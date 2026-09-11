@@ -57,6 +57,13 @@ _MODEL_SAMPLING: Dict[str, Any] = {}
 # shutdown is treated as expected — no ERROR log, no "failed" latch. See run_backend_supervisor.
 _SHUTTING_DOWN = threading.Event()
 BACKEND_DEATH_EXIT_GRACE_S = 10.0
+# Graceful-stop escalation budget per worker: how long it may act on the SIGINT relay
+# (its KeyboardInterrupt teardown -> Engine.shutdown()) and then on SIGTERM, before SIGKILL.
+WORKER_SIGINT_GRACE_S = 10.0
+WORKER_SIGTERM_GRACE_S = 5.0
+# One-shot reap guard: the uvicorn lifespan and the shell teardown can both reach the stop
+# helper (the shell's 15s uvicorn-thread join < worst-case escalation); first caller wins.
+_BACKEND_REAP_STARTED = threading.Event()
 
 
 def get_global_state() -> FrontendManager:
@@ -97,18 +104,101 @@ def _exit_after_backend_death(grace_s: float) -> threading.Timer:
     return timer
 
 
-def _reap_backend_workers(processes: List[Any], timeout: float = 5.0) -> None:
+def _reap_backend_workers(processes: List[Any], timeout: float = WORKER_SIGTERM_GRACE_S) -> None:
     """Wait out a preceding ``_terminate_backend_workers`` and SIGKILL whatever is still
-    standing. Only the shell path needs this: it owns the process lifetime end to end (no
-    outer signal takes the process down for it), and a worker that ignored SIGTERM would keep
-    the GPU and the IPC sockets after the shell has already returned to the user's terminal."""
+    standing, joining the kill too so the tree is fully reaped when this returns. Shared by
+    both stop paths (uvicorn lifespan + shell): a worker that ignored SIGTERM would keep the
+    GPU and the IPC sockets after the server has already returned/exited."""
     for p in processes or []:
         try:
             p.join(timeout=timeout)
             if p.is_alive():
+                logger.warning(
+                    "SIGTERM grace expired; sending SIGKILL to %s", getattr(p, "name", "?")
+                )
                 p.kill()
+                p.join(timeout=timeout)
         except Exception:  # noqa: BLE001 -- already-gone / unqueryable handle: nothing to do
             continue
+
+
+def _release_ack_queue(ack_queue: Any) -> None:
+    """Close the ack queue (feeder flushed) and run multiprocessing's exit finalizers now.
+
+    uvicorn re-raises the stop signal and kills this process, skipping atexit and
+    multiprocessing finalization -- the queue's 3 SemLocks would stay tracker-registered and
+    the resource_tracker warns about leaked /mp-* names. _run_finalizers(0) is the pass
+    normal exit would run; already-run finalizers are de-registered, so no double-clean."""
+    try:
+        ack_queue.close()
+        ack_queue.join_thread()
+    except Exception:  # noqa: BLE001 -- best-effort; the tree is going down regardless
+        pass
+    try:
+        import multiprocessing.util as mp_util
+
+        mp_util._run_finalizers(0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _shutdown_backend_workers(processes: List[Any], ack_queue: Any = None) -> None:
+    """Full stop escalation shared by the uvicorn lifespan shutdown and the shell teardown.
+
+    SIGINT is relayed first -- the only signal a worker handles gracefully (no SIGTERM
+    handler exists in any worker): its KeyboardInterrupt path runs scheduler.shutdown() ->
+    Engine.shutdown() (CUDA graphs + process group). Then join -> SIGTERM -> join -> SIGKILL
+    with the escalation budgets, and finally the ack queue is released. Blocking here is
+    deliberate: on return the whole tree is dead, so the uvicorn re-raise that kills this
+    process cannot orphan it or leave CUDA contexts behind. Callers must have set
+    _SHUTTING_DOWN already, so the supervisor attributes the ensuing deaths to the stop."""
+    if _BACKEND_REAP_STARTED.is_set():
+        return
+    _BACKEND_REAP_STARTED.set()
+
+    def _alive(p: Any) -> bool:
+        try:
+            return bool(p.is_alive())
+        except Exception:  # noqa: BLE001 -- unqueryable handle: treat as gone
+            return False
+
+    workers = list(processes or [])
+    logger.info(
+        "Graceful stop: reaping %d backend worker(s), pids=%s",
+        len(workers),
+        [getattr(p, "pid", None) for p in workers],
+    )
+    # Relay to every live worker BEFORE joining any: they exit in parallel, so the wait is
+    # bounded by the slowest worker rather than the sum of all of them.
+    for p in workers:
+        try:
+            # BaseProcess exposes no public send_signal (only terminate/kill), so signal
+            # the pid directly; SIGINT is the only signal a worker handles gracefully.
+            if _alive(p) and p.pid is not None:
+                os.kill(p.pid, signal.SIGINT)
+        except Exception:  # noqa: BLE001 -- already-gone / unqueryable handle: nothing to do
+            continue
+    for p in workers:
+        try:
+            p.join(timeout=WORKER_SIGINT_GRACE_S)
+        except Exception:  # noqa: BLE001 -- already-gone / unqueryable handle: nothing to do
+            continue
+    survivors = [p for p in workers if _alive(p)]
+    if survivors:
+        logger.warning(
+            "SIGINT grace expired; escalating to SIGTERM for %s",
+            [getattr(p, "name", "?") for p in survivors],
+        )
+    _terminate_backend_workers(workers)
+    _reap_backend_workers(workers, timeout=WORKER_SIGTERM_GRACE_S)
+    survivors = [p for p in workers if _alive(p)]
+    if survivors:
+        logger.warning(
+            "Workers survived SIGTERM and SIGKILL: %s",
+            [getattr(p, "name", "?") for p in survivors],
+        )
+    if ack_queue is not None:
+        _release_ack_queue(ack_queue)
 
 
 def _unwrap_msg(msg: BaseFrontendMsg) -> List[UserReply]:
@@ -181,6 +271,9 @@ class FrontendManager:
     # handler) tears these down itself, AFTER setting _SHUTTING_DOWN, so the supervisor observes
     # the shutdown flag before the ensuing deaths. See _terminate_backend_workers.
     backend_processes: List[Any] = field(default_factory=list)
+    # The full BackendHandle behind backend_processes, kept so the shutdown path can close
+    # ack_queue (its 3 SemLocks are 3 of the 4 /mp-* names the resource_tracker reported).
+    backend_handle: Any = None
     # Event loop the listener runs on, captured when the listener starts (_create_listener_once).
     # Lets a cross-thread caller — the supervisor thread's failure callback — marshal rebuild
     # future resolution back onto the loop (asyncio Futures are not thread-safe). None until the
@@ -380,9 +473,14 @@ class FrontendManager:
     def shutdown(self):
         self.send_tokenizer.stop()
         self.recv_tokenizer.stop()
-        # Tear the workers down ourselves (best-effort). _SHUTTING_DOWN is already set by the
-        # time shutdown() runs, so the supervisor attributes the ensuing deaths to the stop.
-        _terminate_backend_workers(self.backend_processes)
+        # Reap the workers inside the graceful window (SIGINT relay -> join -> terminate ->
+        # kill) and release the ack queue. _SHUTTING_DOWN is already set by the time
+        # shutdown() runs, so the supervisor attributes the ensuing deaths to the stop, and
+        # blocking here is the point: "Finished server process" must imply the tree is dead.
+        _shutdown_backend_workers(
+            self.backend_processes,
+            ack_queue=getattr(self.backend_handle, "ack_queue", None),
+        )
 
 
 @asynccontextmanager
@@ -913,8 +1011,10 @@ def _serve_and_run_shell(host: str, port: int) -> None:
         # Belt and braces: if uvicorn's lifespan shutdown did not run (thread wedged), flag the
         # stop and tear the workers down here so nothing outlives the shell.
         _SHUTTING_DOWN.set()
-        _terminate_backend_workers(_GLOBAL_STATE.backend_processes)
-        _reap_backend_workers(_GLOBAL_STATE.backend_processes)
+        _shutdown_backend_workers(
+            _GLOBAL_STATE.backend_processes,
+            ack_queue=getattr(_GLOBAL_STATE.backend_handle, "ack_queue", None),
+        )
 
 
 def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_shell: bool) -> None:
@@ -977,8 +1077,11 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     _GLOBAL_STATE.load_progress = LoadProgress()
     handle = start_backend()
     # Hold the worker handles so the orderly-shutdown path can tear them down itself (after
-    # setting _SHUTTING_DOWN) rather than relying on OS signal-delivery order.
+    # setting _SHUTTING_DOWN) rather than relying on OS signal-delivery order. The full
+    # handle is kept too: the shutdown path closes ack_queue through it, not just the
+    # worker processes.
     _GLOBAL_STATE.backend_processes = list(getattr(handle, "processes", None) or [])
+    _GLOBAL_STATE.backend_handle = handle
 
     def _on_ready() -> None:
         # A stop requested while weights were loading has already sealed admission.  The backend

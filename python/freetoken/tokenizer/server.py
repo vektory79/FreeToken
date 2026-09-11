@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import signal
 from typing import Any, List
 
 import torch
@@ -266,4 +267,5 @@ def tokenize_worker(
                     batch_output = batch_output.data[0]
                 send_backend.put(batch_output)
     except KeyboardInterrupt:
-        pass
+        # A relayed or second SIGINT must not cut the teardown already in progress.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)

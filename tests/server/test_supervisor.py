@@ -270,3 +270,47 @@ def test_byte_bar_emits_to_installed_sink_then_stops_after_clear():
     bar.update(100)
     bar.close()
     assert seen == []
+
+
+# ---------------------------------------------------------------------------
+# closed ack queue: the shutdown path (_release_ack_queue) closes the queue while the
+# supervisor may still be draining it, so get() can raise pre-block from here on.
+# ---------------------------------------------------------------------------
+
+
+def test_drain_ready_absorbs_a_closed_ack_queue_until_the_next_ack():
+    """After the shutdown path closes the ack queue, get() raises ValueError before
+    blocking. drain_ready must treat that like an empty poll and reach the next ack, not
+    die with an uncaught ValueError."""
+    calls = {"n": 0}
+
+    def get(timeout):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise ValueError("Queue <0x...> is closed")
+        return "Scheduler is ready"
+
+    handle = BackendHandle(ack_queue=None, processes=[], expected_acks=1)
+    drain_ready(handle, LoadProgress(), get=get, poll=0.01)
+    assert calls["n"] == 3  # both closed-queue raises absorbed; the third call got the ack
+
+
+def test_drain_ready_reports_worker_death_when_the_ack_queue_is_closed():
+    """Same closed-queue raises, but a worker is dead: the drain must end in WorkerDied
+    via the liveness path, not leak a raw ValueError past the supervisor."""
+    import pytest
+
+    from freetoken.server.supervisor import WorkerDied
+
+    class DeadProc:
+        name = "freetoken-TP0-scheduler"
+
+        def is_alive(self) -> bool:
+            return False
+
+    def get(timeout):
+        raise ValueError("Queue <0x...> is closed")
+
+    handle = BackendHandle(ack_queue=None, processes=[DeadProc()], expected_acks=1)
+    with pytest.raises(WorkerDied):
+        drain_ready(handle, LoadProgress(), get=get, poll=0.01)

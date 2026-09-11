@@ -124,6 +124,8 @@ ft ctl [--base-url http://127.0.0.1:1919] [--timeout 10] [--json] <subcommand>
 | `cache --moe N \| --kv N \| --mamba N \| --swa N [--wait 300]` | `POST /v1/cache/rebuild` | Live pool resizing without a restart (`k`/`m` suffixes; `--kv`/`--swa` in tokens) |
 | `requests [--since N] [--limit N]` | `GET /v1/requests` | Recent request ring |
 
+The server also exposes `GET /ready` for readiness polling: 503 with a reason until the engine is serving with no fatal error, 200 after (`GET /health` always answers 200).
+
 ## ft launch
 
 ```bash

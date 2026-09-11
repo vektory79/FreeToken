@@ -241,6 +241,69 @@ def test_openai_gate_message_is_loading_aware():
     assert _maintenance_gate(SimpleNamespace()) is None
 
 
+def _control_client(state):
+    from fastapi import FastAPI
+
+    from freetoken.server.control_api import register_control_routes
+
+    app = FastAPI()
+    register_control_routes(app, lambda: state)
+    return TestClient(app)
+
+
+def test_ready_gate_matrix():
+    # Wrapper-facing readiness contract: 200 only when serving with no fatal error, so a
+    # wrapper can gate on the status code (GET /health always answers 200).
+    serving = SimpleNamespace(maintenance_state="serving", fatal_error=None)
+    client = _control_client(serving)
+    r = client.get("/ready")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+    # HEAD must be served too: pollers probe with curl -I; undeclared, FastAPI would 405 it.
+    assert client.head("/ready").status_code == 200
+
+    reasons = {
+        "loading": "model is still loading",
+        "rebuilding": "server unavailable: cache rebuild in progress",
+        "stopping": "server unavailable: engine stop in progress",
+    }
+    for mstate, reason in reasons.items():
+        state = SimpleNamespace(maintenance_state=mstate, fatal_error=None)
+        r = _control_client(state).get("/ready")
+        assert r.status_code == 503
+        assert r.json()["status"] == mstate
+        assert r.json()["reason"] == reason
+
+    failed = SimpleNamespace(maintenance_state="failed", fatal_error="watchdog: scheduler died")
+    r = _control_client(failed).get("/ready")
+    assert r.status_code == 503
+    assert r.json()["status"] == "failed"
+    assert "scheduler died" in r.json()["reason"]
+
+    failed_no_fatal = SimpleNamespace(maintenance_state="failed", fatal_error=None)
+    r = _control_client(failed_no_fatal).get("/ready")
+    assert r.status_code == 503
+    assert "failed" in r.json()["reason"]
+
+    fatal = SimpleNamespace(maintenance_state="serving", fatal_error="CUDA OOM")
+    r = _control_client(fatal).get("/ready")
+    assert r.status_code == 503
+    assert "CUDA OOM" in r.json()["reason"]
+
+    # Defensive: a state object without the attributes counts as serving (mirrors /health).
+    assert _control_client(SimpleNamespace()).get("/ready").status_code == 200
+
+
+def test_health_contract_unchanged_while_not_ready():
+    # Pin /health: always 200 with readiness only in the body, even while /ready 503s.
+    for mstate, body_status in (("loading", "loading"), ("serving", "ok"), ("failed", "error")):
+        fatal = "boom" if body_status == "error" else None
+        state = SimpleNamespace(maintenance_state=mstate, fatal_error=fatal)
+        r = _control_client(state).get("/health")
+        assert r.status_code == 200
+        assert r.json()["status"] == body_status
+
+
 def test_cache_rebuild_guarded_during_loading():
     import freetoken.server.api_server as api
 

@@ -88,7 +88,8 @@ def _drain_pending_error(get: Callable[[float], Any], attempts: int = 5, timeout
     for _ in range(attempts):
         try:
             msg = get(timeout)
-        except Empty:
+        except (Empty, ValueError, EOFError, OSError):
+            # A closed / dead-pipe queue raises pre-block; the pending reason is unrecoverable.
             continue
         err = _as_error(msg)
         if err is not None:
@@ -109,7 +110,9 @@ def drain_ready(
 
     ("meta", payload) tuples carry optional backend metadata (per-unit cache byte costs);
     they are forwarded to ``on_meta`` and do NOT count toward readiness. meta is optional --
-    an engine build that never emits it must not stall this drain, so nothing waits for it."""
+    an engine build that never emits it must not stall this drain, so nothing waits for it.
+
+    A closed ack queue (the orderly shutdown releases it) is tolerated like an empty poll."""
     if get is None:
         def get(timeout: float) -> Any:
             return handle.ack_queue.get(timeout=timeout)
@@ -118,13 +121,17 @@ def drain_ready(
     while ready < handle.expected_acks:
         try:
             msg = get(poll)
-        except Empty:
+        except (Empty, ValueError, EOFError, OSError) as exc:
             dead = _first_dead(handle.processes)
             if dead is not None:
                 # The worker may have pushed its real failure reason just before exiting; give
                 # the queue a brief window to surface it, else fall back to the generic message.
                 reason = _drain_pending_error(get)
                 raise WorkerDied(reason or f"backend worker {getattr(dead, 'name', '?')} exited during load")
+            # Closed/dead-pipe queue raises come back pre-block; wait out the poll interval so
+            # the liveness loop cannot hot-spin while the workers finish dying.
+            if not isinstance(exc, Empty):
+                time.sleep(poll)
             continue
         err = _as_error(msg)
         if err is not None:

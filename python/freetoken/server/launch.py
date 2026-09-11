@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+import signal
 import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -46,8 +47,16 @@ def _detach_process_group() -> None:
         pass
 
 
+def _arm_sigint_handler() -> None:
+    """A worker born with SIGINT=SIG_IGN (background-job launch) inherits it across the spawn
+    exec, so the kernel silently drops the parent's shutdown SIGINT relay; re-arming the
+    default handler restores the KeyboardInterrupt path the graceful teardown relies on."""
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
 def _run_tokenize_worker(detach: bool, **kwargs) -> None:
     """Module-level so it survives the spawn pickle; exists only to detach the group first."""
+    _arm_sigint_handler()
     if detach:
         _detach_process_group()
     from freetoken.tokenizer import tokenize_worker
@@ -56,6 +65,7 @@ def _run_tokenize_worker(detach: bool, **kwargs) -> None:
 
 
 def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
+    _arm_sigint_handler()
     if args.shell_mode:
         _detach_process_group()
 
@@ -115,11 +125,16 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
         try:
             scheduler.run_forever()
         except KeyboardInterrupt:
+            # A relayed or second SIGINT must not cut the teardown already in progress.
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             logger = init_logger(__name__)
             if args.tp_info.is_primary():
                 print()  # for a clean newline after ^C
                 logger.info("Scheduler exiting gracefully...")
             scheduler.shutdown()
+            # Hand cached allocator blocks back to the driver now: this process' CUDA context
+            # dies with it, and this starts the VRAM release before process death.
+            torch.cuda.empty_cache()
 
 
 def launch_server(

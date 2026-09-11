@@ -1,5 +1,6 @@
 """Read-only control-plane endpoints consumed by the desktop app: /health (lifecycle),
-/v1/stats (runtime metrics, Task 6), /v1/requests (request log ring, Task 5).
+/ready (readiness gate, 503 until serving), /v1/stats (runtime metrics, Task 6),
+/v1/requests (request log ring, Task 5).
 
 All handlers read a shared FrontendManager snapshot via ``get_state``; nothing here touches
 the scheduler or blocks. Registered on the app alongside the OpenAI/Anthropic/Responses routes.
@@ -11,6 +12,7 @@ import time
 from typing import Any, Callable
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 
 def build_health(state: Any, version: str) -> dict:
@@ -57,6 +59,31 @@ def register_control_routes(
     @app.get("/health")
     async def health():
         return build_health(get_state(), app.version)
+
+    # Explicit HEAD: FastAPI APIRoute does not auto-add it (Starlette Route does), and
+    # readiness pollers commonly probe with HEAD (curl -I).
+    @app.api_route("/ready", methods=["GET", "HEAD"])
+    async def ready():
+        """503 with a reason until the engine is serving with no fatal error, 200 after.
+        Lets wrappers gate on the status code; /health always answers 200 (readiness in body)."""
+        state = get_state()
+        mstate = getattr(state, "maintenance_state", "serving")
+        fatal = getattr(state, "fatal_error", None)
+        if mstate == "serving" and fatal is None:
+            return {"status": "ok"}
+        if fatal is not None:
+            reason = str(fatal)
+        elif mstate == "loading":
+            # Same wire messages as the OpenAI generation gate (_maintenance_gate).
+            reason = "model is still loading"
+        elif mstate == "failed":
+            reason = "server unavailable: maintenance failed (restart required)"
+        elif mstate == "stopping":
+            # The gate lumps stopping into the rebuild message; /ready can afford accuracy.
+            reason = "server unavailable: engine stop in progress"
+        else:
+            reason = "server unavailable: cache rebuild in progress"
+        return JSONResponse({"status": mstate, "reason": reason}, status_code=503)
 
     from . import request_ring
 
