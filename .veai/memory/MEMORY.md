@@ -1,2 +1,3 @@
-- [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-ca05468edd30.md) — FreeToken test/e2e gotchas: --extra dev pytest, tests-import blocker, ft serve SIG_IGN worker gotcha, tqdm mp-lock
-- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-403468cb69b2.md) — GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319
+- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-d28de3176510.md) — GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319
+- [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-13edf6413fdc.md) — PR #408 nvfp4 KV port to vektory79 + 1M-token KV on RTX 5090: merge clean, reserve+fill measured, decode flat
+- [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-7375616a617c.md) — FreeToken test/e2e gotchas: pytest --extra dev, 09-12 baseline failures, SIG_IGN gotcha, hybrid cpu_ok kernel

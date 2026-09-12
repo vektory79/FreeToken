@@ -27,10 +27,12 @@ from freetoken.layers.quantization import (
     Fp8BlockConfig,
     KernelSelectionError,
     ModelOptConfig,
+    MoEConfig,
     Mxfp4Config,
     NoQuantConfig,
     QuantConfig,
     QuantKind,
+    select_kernel,
 )
 from freetoken.layers.quantization.linear import (
     Fp8BlockLinearMethod,
@@ -386,6 +388,53 @@ def test_probed_layers_get_the_method_their_config_says(case: Case, monkeypatch)
             assert op.quant_method.kernel.name == kernel, probe
     if case.check is not None:
         case.check(model, idx)
+
+
+def test_hybrid_explicit_kernel_error_names_the_usable_alternative(monkeypatch):
+    """A GPU-only kernel requested under hybrid must say which kernel would run here; the bare rejection sent the user hunting through the kernel tables."""
+    from freetoken.kernel import backend
+
+    monkeypatch.setattr(backend, "device_capability", lambda: (12, 0))
+    monkeypatch.setattr(backend, "is_vllm_installed", lambda: True)
+    monkeypatch.setattr(backend, "is_flashinfer_installed", lambda: True)
+    cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=ModelOptConfig.SCHEMES["NVFP4"], strategy="hybrid", decode_target="cpu")
+    with pytest.raises(KernelSelectionError, match=r"has no CPU executor format.*\(usable here: triton\)"):
+        select_kernel(Nvfp4MoEMethod.candidates, "b12x", cfg)
+
+
+def test_hybrid_explicit_fp8_kernel_error_reports_an_empty_table():
+    """fp8 experts ship one kernel and it decodes on the GPU only: the explicit request must say no kernel can run here, not name an alternative that does not exist."""
+    cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=Fp8BlockConfig.SCHEMES["BLOCK"], strategy="hybrid", decode_target="cpu")
+    with pytest.raises(KernelSelectionError, match=r"has no CPU executor format.*\(no kernel in the table is usable here\)"):
+        select_kernel(Fp8BlockMoEMethod.candidates, "triton", cfg)
+
+
+def test_hybrid_auto_fp8_kernel_error_lists_what_was_skipped():
+    """The auto branch's rejection carries the same per-kernel reasons the explicit path got."""
+    cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=Fp8BlockConfig.SCHEMES["BLOCK"], strategy="hybrid", decode_target="cpu")
+    with pytest.raises(KernelSelectionError, match=r"no usable kernel in table.*triton: has no CPU executor format"):
+        select_kernel(Fp8BlockMoEMethod.candidates, "auto", cfg)
+
+
+def test_nvfp4_auto_selection_still_lands_on_triton(monkeypatch):
+    """The shared probe behind auto selection must not shift what it picks: triton stays first for nvfp4 under CPU and GPU decode, b12x reachable only by explicit request."""
+    from freetoken.kernel import backend
+
+    monkeypatch.setattr(backend, "device_capability", lambda: (12, 0))
+    monkeypatch.setattr(backend, "is_vllm_installed", lambda: True)
+    monkeypatch.setattr(backend, "is_flashinfer_installed", lambda: True)
+    for strategy, decode_target in (("hybrid", "cpu"), ("offload", "gpu")):
+        cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=ModelOptConfig.SCHEMES["NVFP4"], strategy=strategy, decode_target=decode_target)
+        assert select_kernel(Nvfp4MoEMethod.candidates, "auto", cfg).name == "triton", strategy
+    cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=ModelOptConfig.SCHEMES["NVFP4"], strategy="hybrid", decode_target="cpu")
+    assert select_kernel(Nvfp4MoEMethod.candidates, "triton", cfg).name == "triton"
+
+
+def test_mxfp4_auto_selection_picks_by_expert_biases():
+    """The same helper over the second kind: gpt-oss experts (bias, interleaved) get the gpt-oss kernel, plain ones the standard kernel."""
+    for has_bias, expected in ((False, "triton"), (True, "triton_gptoss")):
+        cfg = MoEConfig(num_experts=128, hidden=2880, intermediate=2880, top_k=8, scheme=Mxfp4Config.SCHEME, strategy="offload", decode_target="gpu", has_bias=has_bias, interleaved=has_bias)
+        assert select_kernel(Mxfp4MoEMethod.candidates, "auto", cfg).name == expected, has_bias
 
 
 # --------------------------------------------------------------------------- config without local weights

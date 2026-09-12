@@ -1,0 +1,40 @@
+---
+name: "pr408-kv-nvfp4-1m-port"
+description: "PR #408 nvfp4 KV port to vektory79 + 1M-token KV on RTX 5090: merge clean, reserve+fill measured, decode flat"
+type: project
+lastUpdated: 2026-09-12T11:35
+lastRecall: 2026-09-12T15:29
+---
+
+# PR #408 port: nvfp4 KV cache -> 1M tokens on RTX 5090
+
+Hardware-verified 2026-09-12 on the user's GLM-5.3-Flash-NVFP4 / RTX 5090 / FTW checkpoint setup.
+
+## The four user-asked PRs (all open, none merged)
+- #408 `feat(kvcache): add nvfp4 kv quantization` - 19 commits, 41 files, +4659. Flag `--kv-cache-dtype nvfp4` (choices bf16|fp8|nvfp4). Validated on RTX 5090. Docs explicitly name GLM-5.3-Flash: covers MLA/DSA, "only the latent slab is quantized" (DSA index slab stays bf16). Superset of #354's fp8 mode.
+- #354 fp8 e4m3 - 2x KV shrink, same flag, also touches dsa_pool/attention/dsa. Mutually exclusive with #408 (same flag, same files).
+- #398 ISO3/ISO4 - 5.1x/3.8x shrink but plain full-attention only, forces --attention-backend iso. NOT for GLM.
+- #309 reliable Q8/FP8/Q6/Q4 - MHA/SWA pools only, no DSA. Not for GLM.
+
+## Port (user keeps it on their branch, not upstream)
+`git fetch origin pull/408/head:pr-408 && git merge pr-408` into vektory79 = CLEAN merge (merge-tree dry-run empty), py_compile + imports OK. Merge commit ba0f20f. Re-port recipe: `git fetch origin pull/408/head && git merge FETCH_HEAD` (incremental, merge-tracking); main updates via `git merge origin/main`. Push to user's own GitHub fork is the user's job (agents must not push). Note: user's sync tool rewrote vektory79 mid-session (dropped the old 4e11ab0 "server operability" commit; branch became origin/main + vendored-topk merge).
+
+## Measured results (FTW checkpoint, threads 20, ratio 0.89, --kv-cache-dtype nvfp4, kv-reserve-tokens 1048576)
+- nvfp4 dsa_pool math: stored_dim = latent_dim//2 bytes + fp32 scale/row + E4M3 block-scale/16 elems; latent ~3.5x smaller, DSA index slab stays bf16 -> total ~3.07x shrink. Measured 1,049,920 KV tokens = 3.83 GiB (3.65 KB/token vs 11.2 unquantized).
+- 1M reserve boots: moe_cache_size=347 slots, num_pages=16405, free after init 2.81 GiB, boot 68s, short-ctx decode 14.42 tok/s (no loss).
+- ~578k tokens single prefill SUCCEEDS (old code OOMed at 500k unquantized); decode gen throughput at 555k context = 14.55-15.05 tok/s (flat vs short ctx - DSA/GDN keeps decode cost context-flat). Prefill pace 400-950 tok/s. 3.198M-char counter-text was rejected with HTTP 400 (capacity enforcement works).
+- Same 1M-fill caveat as before: GDN history buffer (kda_chunk_delta_h h[B,NT,H,V,K]) scales with prefill length; wrapper's idle 1.27 GiB VRAM matters at the margin.
+
+## 1M fill wall (2026-09-12, v14/v15 measured)
+- Single-shot prefill of long contexts hits CUDA OOM in the DSA indexer: dsa_indexer_kpool.py:276 _select_prefill -> dsv4_indexer.py:72 indexer_select_prefill; workspace scales ~linearly with TOTAL context (~0.62 KB/context-token: 274 MiB @561k, 348 MiB @712k). It is NOT the GDN history buffer and NOT chunk-size dependent.
+- v14 (347 slots, 2.81 GiB free): died at ~561k. v15 (explicit --moe-cache-size 288 -> 1.19M tokens KV 4.36 GiB, free 3.27 GiB): passed 561k, died at ~712k. Extrapolated 1M single-shot needs ~490 MiB indexer workspace + free headroom -> on 31.4 GiB card with the idle wrapper (1.07-1.27 GiB) it does NOT fit; with wrapper unloaded (+1.27 GiB) it very likely completes.
+- Verified along the way: decode gen throughput at 555k ctx 14.55-15.05 tok/s (flat); capacity enforcement HTTP 400 works; v12 filled 578k OK.
+- Practical single-session ceiling as-configured: ~700k tokens single prefill. For full 1M: stop the idle wrapper during the long-context session, or wait for an upstream fix that shrimes the indexer prefill workspace (out of scope of #408).
+
+## Quality A/B bf16 vs nvfp4 KV (2026-09-12, measured)
+- No logprobs via API (openai_api.py:627-633 rejects; chat request has no field) -> no teacher-forced PPL; repo has no eval harness; bench_kv_quant.py is perf-only (MHA, no DSA).
+- Greedy battery (12 deterministic tasks, temp 0, max_tokens 768, harness /tmp/ft_quality_ab.sh): bf16 10/12, nvfp4 10/12, RAW OUTPUTS BYTE-IDENTICAL across all 12 tasks (both "failures" are battery bugs: count1 expected 7 but the pangram has 8 'a'; fact2 strict-exact on verbose answer).
+- Needle-in-haystack at ~155k-token context (needle at 30% depth): both legs found "ZX-7412-KM" identically (fill+answer 387s vs 397s).
+- PR #408 thread: gdevenyi's GSM8K-300 greedy on Qwen3.8-Flash-Next (QSA, sm_89, TP2): fp8 vs nvfp4 identical 98.0% (294/300) - different architecture, same conclusion.
+- Battery gotchas: glm reasoning parser burns max_tokens (96 -> empty content; use 768+); bf16 leg needs --kv-reserve-tokens 262144 override at ratio 0.89 (524288 fails floor assert); needle harness /tmp/ft_needle.sh.
+- Caveat: E2M1 rounding does perturb latents (tests prove only dequantized-reference parity, not bf16 equivalence); identity at greedy on 12 tasks + needle + GSM8K datapoint = degradation below argmax-flip threshold in all measured cases. For a stronger statistical claim: bigger task battery (the harness is reusable).

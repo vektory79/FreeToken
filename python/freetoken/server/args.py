@@ -32,6 +32,37 @@ def _nvfp4_entry(value: str) -> str:
     return "moe.nvfp4=" + {"flashinfer": "b12x"}.get(value, value)
 
 
+def _warn_gpu_only_nvfp4(entry: str, strategy: str, cpu_layers: str | None) -> None:
+    """A deprecated --nvfp4-backend value can pin a GPU-only kernel while --moe-strategy decodes on the CPU; warn now, the model build fails later.
+    The CPU decode target is hybrid, cpu, or an offload-family strategy with --moe-cpu-layers set, mirroring engine._decode_target. The capability answer comes from the kernel registry's cpu_format, not a local table; a registry failure skips the hint, the engine error stays authoritative.
+    """
+    from freetoken.moe import is_offload_moe_strategy
+
+    if not (strategy in ("hybrid", "cpu") or (is_offload_moe_strategy(strategy) and cpu_layers)):
+        return
+    key, sep, name = entry.partition("=")
+    if not sep or key != "moe.nvfp4":
+        return
+    try:
+        from freetoken.layers.quantization import QuantKind
+        from freetoken.layers.quantization.registry import LayerKind, method_class
+
+        candidates = method_class(QuantKind.NVFP4, LayerKind.MOE).candidates
+        requested = next((cls for cls in candidates if cls.name == name), None)
+        if requested is None or requested.cpu_format is not None:
+            return
+        cpu_capable = [cls.name for cls in candidates if cls.cpu_format is not None]
+    except (ImportError, AttributeError, NotImplementedError) as exc:
+        logger.debug("skipping the nvfp4 CPU-decode hint; the kernel registry did not answer: %r", exc)
+        return
+    if not cpu_capable:
+        return
+    logger.warning(
+        "kernel %r cannot run with --moe-strategy %s (no CPU executor format); use --quant-backend %s=%s",
+        name, strategy, key, cpu_capable[0],
+    )
+
+
 @dataclass(frozen=True)
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
@@ -737,6 +768,7 @@ def parse_args(
             parser.error("--nvfp4-backend cannot be combined with --quant-backend; write --quant-backend moe.nvfp4=... instead")
         if entry:
             kwargs["quant_backend"] = entry
+            _warn_gpu_only_nvfp4(entry, kwargs["moe_strategy"], kwargs["moe_cpu_layers"])
 
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])

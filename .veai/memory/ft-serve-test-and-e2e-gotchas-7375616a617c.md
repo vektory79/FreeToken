@@ -1,9 +1,9 @@
 ---
 name: "ft-serve-test-and-e2e-gotchas"
-description: "FreeToken test/e2e gotchas: --extra dev pytest, tests-import blocker, ft serve SIG_IGN worker gotcha, tqdm mp-lock"
+description: "FreeToken test/e2e gotchas: pytest --extra dev, 09-12 baseline failures, SIG_IGN gotcha, hybrid cpu_ok kernel"
 type: project
-lastUpdated: 2026-09-05T19:27
-lastRecall: 2026-09-11T22:15
+lastUpdated: 2026-09-12T15:36
+lastRecall: 2026-09-12T15:29
 ---
 
 # FreeToken test/e2e environment gotchas
@@ -27,3 +27,12 @@ Durable operational facts discovered 2026-09-04 while fixing `ft serve` /ready +
 
 ## tqdm gotcha
 - tqdm's TqdmDefaultWriteLock creates an mp RLock registered with the resource_tracker (call site models/qwen4_exp/weight.py:166 during expert weight load). Any worker KILLED BY SIGNAL leaks it -> "resource_tracker: There appear to be N leaked semaphore objects" warning. Clean exit runs SemLock Finalize and unlinks it. tqdm 4.70.0 has no lock_args/threading-only option.
+
+## Full-gate baseline update (2026-09-12, agent-run, uv run --extra dev pytest tests/ -m "not slow" --ignore=tests/models/test_glm5_next_kda_snapshot.py -> 19 failed / 1801 passed / 170 skipped)
+- Still baseline-classified: pinned_tensor UVA (cudaHostGetDevicePointer, :128), qwen4_exp/test_ple flaky bitwise (:421), muse_glimmer tests-import (:872).
+- NEW known-failing class since commit 04d4621 (2026-09-08, nvfp4 latent dsa kv): 10x "ModuleNotFoundError: No module named 'tests'" (7x tests/attention/test_dsa_kpool.py[nvfp4]:175, 2x tests/kvcache/test_dsa_pool.py:220, 1x tests/models/test_glm_dsa.py:316) - same no-tests/__init__.py root cause.
+- 2x tests/models/test_glm_dsa.py: triton OutOfResources shared memory 102400 > 101376 (glm_dsa_sparse.py:487/:517).
+- 3x tests/moe/test_prefill_hit_d2d.py: "cudaMemcpyBatchAsync probe copied wrong bytes" (kernel/batch_memcpy.py:39).
+- 1x tests/kernels/test_qsa_fp8.py::test_fp8_codes_match_the_bf16_cache_bit_for_bit[1-1-64]: CUDA invalid argument (:48).
+- None of these touch layers/quantization/method.py or server/args.py.
+- 2026-09-12 kernel-UX change context: hybrid decode requires kernels with a CPU executor format; nvfp4 triton is the only cpu_ok one (marlin/b12x are gpu-only); deprecated shim maps --nvfp4-backend flashinfer -> b12x (args.py _nvfp4_entry), so hybrid+flashinfer fails by design; select_kernel now appends "(usable here: <kernels>)" and args.py warns at parse time. GLM FTW auto path fills triton from checkpoint metadata (engine.py _adjust_ftw_quant_backend) - never pass a conflicting explicit --quant-backend.

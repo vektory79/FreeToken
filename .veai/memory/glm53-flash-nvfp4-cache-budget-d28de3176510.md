@@ -2,8 +2,8 @@
 name: "glm53-flash-nvfp4-cache-budget"
 description: "GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319"
 type: project
-lastUpdated: 2026-09-12T00:02
-lastRecall: 2026-09-11T23:25
+lastUpdated: 2026-09-12T00:26
+lastRecall: 2026-09-12T15:29
 ---
 
 # GLM-5.3-Flash-NVFP4 on RTX 5090: --moe-cache-auto budget floor
@@ -60,3 +60,9 @@ Any boot of this model class on a 32GB card: compute the min plan first; prefer 
 - FTW boot (threads 20, ratio 0.89): ready in 72s (vs 245s serial / 131s parallel-HF); "Loading expert banks (FTW)" 160G with bursts to 15 GB/s and pin waves 2-3 GB/s; host RAM avail dips to ~15 GiB. FTW path ignores --expert-load (expert_banks.py checks is_ftw_checkpoint first).
 - FTW decode sanity: 14.50 tok/s / GPU 77% (no regression vs v2 14.24); resolved moe_cache_size=427, num_pages=4113 (262k KV kept), free after init 2.84 GiB (tighter than ratio 0.85's 4.14).
 - Load-time ladder for this checkpoint on RTX 5090: serial 245s -> parallel 131s -> FTW 72s.
+
+## 512k KV experiment (2026-09-12, FTW checkpoint)
+- Model config max_position_embeddings=1048576, so 512k is VRAM-bound only. KV: 0.733 MB/page -> +100k tokens ~= +0.73 GiB ~= -52 expert slots or +0.025 memory-ratio.
+- ratio 0.93 + kv-reserve-tokens 524288 FAILS fail-fast assert (min plan 288 slots + 8192 pages = 10.36 GiB > budget 10.24 GiB, short by 115 MB). ratio 0.93 + kv-reserve 512000 (8000 pages) PASSES: resolved moe=294 slots, num_pages=8006 (512384 tokens, 5.71 GiB), free after init 1.81 GiB, boot 68s.
+- Decode at 512k reserve: 14.19 tok/s / GPU 82% vs 262k reserve 14.50/77% - <=2% loss (slots 294 vs 427; within noise).
+- Filling ~500k tokens in ONE prefill OOMs: kernel/fla/kda_chunk_delta_h.py:364 h=k.new_empty(B,NT,H,V,K) - GDN state history scales with the WHOLE prefill length (NT), independent of --max-prefill-length; needed 128 MiB with 169 MiB free because the idle wrapper on :18080 holds ~1.27 GiB VRAM. Workarounds: free the wrapper's VRAM, or fill context incrementally (HybridRadixCache reuses GDN-state prefixes across requests, so each pass is short). KV ladder (#300 port, discussed in #340) would grow KV from expert slots on demand - exists in NO branch (git log --all verified).

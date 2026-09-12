@@ -17,22 +17,40 @@ class KernelSelectionError(RuntimeError):
     pass
 
 
+def _probe(cls, cfg: Any):
+    """Instantiate one kernel candidate and ask why it cannot run here; the single usability check behind both selection paths."""
+    kernel = cls()
+    return kernel, kernel.unusable_reason(cfg)
+
+
+def _usable_here(candidates: Sequence[type], cfg: Any, skip: str | None = None) -> list[str]:
+    """Table entries that pass the usability check, for the explicit-request error; skip saves re-probing the already-failed requested kernel."""
+    usable = []
+    for cls in candidates:
+        if cls.name == skip:
+            continue
+        kernel, reason = _probe(cls, cfg)
+        if not reason:
+            usable.append(kernel.name)
+    return usable
+
+
 def select_kernel(candidates: Sequence[type], requested: str, cfg: Any):
     """Pick one kernel from an ordered table: the requested name if usable, else the first usable one that is worth it."""
     if not candidates:
         raise KernelSelectionError("empty kernel table")
     names = [c.name for c in candidates]
     if requested != "auto" and requested in names:
-        kernel = candidates[names.index(requested)]()
-        reason = kernel.unusable_reason(cfg)
+        kernel, reason = _probe(candidates[names.index(requested)], cfg)
         if reason:
-            raise KernelSelectionError(f"kernel {requested!r} was requested but cannot run here: {reason}")
+            usable = _usable_here(candidates, cfg, skip=requested)
+            alternatives = f"(usable here: {', '.join(usable)})" if usable else "(no kernel in the table is usable here)"
+            raise KernelSelectionError(f"kernel {requested!r} was requested but cannot run here: {reason} {alternatives}")
         return kernel
     skipped: list[str] = []
     fallback = None
     for cls in candidates:
-        kernel = cls()
-        reason = kernel.unusable_reason(cfg)
+        kernel, reason = _probe(cls, cfg)
         if reason:
             skipped.append(f"{kernel.name}: {reason}")
             continue
