@@ -2,8 +2,8 @@
 name: "glm53-flash-nvfp4-cache-budget"
 description: "GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319"
 type: project
-lastUpdated: 2026-09-12T00:26
-lastRecall: 2026-09-12T15:29
+lastUpdated: 2026-09-12T22:16
+lastRecall: 2026-09-12T22:10
 ---
 
 # GLM-5.3-Flash-NVFP4 on RTX 5090: --moe-cache-auto budget floor
@@ -66,3 +66,7 @@ Any boot of this model class on a 32GB card: compute the min plan first; prefer 
 - ratio 0.93 + kv-reserve-tokens 524288 FAILS fail-fast assert (min plan 288 slots + 8192 pages = 10.36 GiB > budget 10.24 GiB, short by 115 MB). ratio 0.93 + kv-reserve 512000 (8000 pages) PASSES: resolved moe=294 slots, num_pages=8006 (512384 tokens, 5.71 GiB), free after init 1.81 GiB, boot 68s.
 - Decode at 512k reserve: 14.19 tok/s / GPU 82% vs 262k reserve 14.50/77% - <=2% loss (slots 294 vs 427; within noise).
 - Filling ~500k tokens in ONE prefill OOMs: kernel/fla/kda_chunk_delta_h.py:364 h=k.new_empty(B,NT,H,V,K) - GDN state history scales with the WHOLE prefill length (NT), independent of --max-prefill-length; needed 128 MiB with 169 MiB free because the idle wrapper on :18080 holds ~1.27 GiB VRAM. Workarounds: free the wrapper's VRAM, or fill context incrementally (HybridRadixCache reuses GDN-state prefixes across requests, so each pass is short). KV ladder (#300 port, discussed in #340) would grow KV from expert slots on demand - exists in NO branch (git log --all verified).
+
+## OOM cause depends on KV mode: bf16 262k reserve -> GDN history buffer kda_chunk_delta_h.py:364; nvfp4 1M reserve -> DSA indexer workspace ~0.62 KB/token dsa_indexer_kpool.py:276, NOT GDN, 578k succeeds. pr408-kv-nvfp4-1m-port.
+
+<arg_value>

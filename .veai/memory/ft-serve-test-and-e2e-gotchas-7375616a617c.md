@@ -3,7 +3,7 @@ name: "ft-serve-test-and-e2e-gotchas"
 description: "FreeToken test/e2e gotchas: pytest --extra dev, 09-12 baseline failures, SIG_IGN gotcha, hybrid cpu_ok kernel"
 type: project
 lastUpdated: 2026-09-12T15:36
-lastRecall: 2026-09-12T15:29
+lastRecall: 2026-09-12T22:10
 ---
 
 # FreeToken test/e2e environment gotchas

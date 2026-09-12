@@ -1,3 +1,6 @@
-- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-d28de3176510.md) — GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-13edf6413fdc.md) — PR #408 nvfp4 KV port to vektory79 + 1M-token KV on RTX 5090: merge clean, reserve+fill measured, decode flat
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-7375616a617c.md) — FreeToken test/e2e gotchas: pytest --extra dev, 09-12 baseline failures, SIG_IGN gotcha, hybrid cpu_ok kernel
+- [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; IOMMU tax = old 4 GB/s
+- [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-5dd13615ef79.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; MSI PRO Z790-P; article .veai/docs
+- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-360195b98396.md) — GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319
+- [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-ad7d6de9a43d.md) — ft serve MoE flags: moe-cpu-threads dead for offload; benchbw stale pre-iommu; fast_index_copy path
