@@ -3,7 +3,7 @@ name: "glm53-flash-nvfp4-cache-budget"
 description: "GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319"
 type: project
 lastUpdated: 2026-09-12T22:16
-lastRecall: 2026-09-12T22:10
+lastRecall: 2026-09-12T23:39
 ---
 
 # GLM-5.3-Flash-NVFP4 on RTX 5090: --moe-cache-auto budget floor

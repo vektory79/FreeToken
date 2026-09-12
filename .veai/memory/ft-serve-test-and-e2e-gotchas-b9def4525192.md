@@ -1,9 +1,9 @@
 ---
 name: "ft-serve-test-and-e2e-gotchas"
-description: "FreeToken test/e2e gotchas: pytest --extra dev, 09-12 baseline failures, SIG_IGN gotcha, hybrid cpu_ok kernel"
+description: "FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness"
 type: project
-lastUpdated: 2026-09-12T15:36
-lastRecall: 2026-09-12T22:10
+lastUpdated: 2026-09-12T23:41
+lastRecall: 2026-09-12T23:43
 ---
 
 # FreeToken test/e2e environment gotchas
@@ -36,3 +36,23 @@ Durable operational facts discovered 2026-09-04 while fixing `ft serve` /ready +
 - 1x tests/kernels/test_qsa_fp8.py::test_fp8_codes_match_the_bf16_cache_bit_for_bit[1-1-64]: CUDA invalid argument (:48).
 - None of these touch layers/quantization/method.py or server/args.py.
 - 2026-09-12 kernel-UX change context: hybrid decode requires kernels with a CPU executor format; nvfp4 triton is the only cpu_ok one (marlin/b12x are gpu-only); deprecated shim maps --nvfp4-backend flashinfer -> b12x (args.py _nvfp4_entry), so hybrid+flashinfer fails by design; select_kernel now appends "(usable here: <kernels>)" and args.py warns at parse time. GLM FTW auto path fills triton from checkpoint metadata (engine.py _adjust_ftw_quant_backend) - never pass a conflicting explicit --quant-backend.
+
+## A/B serving benchmark gotchas (2026-09-12, agent harness on :18081)
+- /v1/chat/completions rejects requests without a "model" field: HTTP 422 Unprocessable Content. Always send "model": <served_model_name> (e.g. "GLM-5.3-Flash-NVFP4-FTW").
+- Prefill pace: client-side wall clock UNDERSTATES server throughput (459 vs ~514 tok/s on a 64k fill; tokenize/HTTP overhead). Authoritative metric = server log "Prefill batch ... input throughput (token/s)" lines, one per 4096-token chunk; the first chunk is low (JIT/autotune warmup) - compare steady-state chunks only.
+- Decode: re-send the SAME prompt to reuse the HybridRadixCache prefix (log shows "#new-token: 12, #cached-token: 64512") and stream for a clean decode rate (exclude TTFT). TTFT on a fully cached prefix is ~6 s - that is first-decode-step overhead (CUDA graph/sync), not re-prefill.
+- glm reasoning parser streams reasoning_content: count any delta carrying content OR reasoning_content as a generated token for tok/s.
+- max_tokens=1 non-stream works as a prefill-only probe (usage.prompt_tokens present; content empty because reasoning parser burns the budget).
+
+## Backend-death hang gotcha (2026-09-12, OOM during B2 8192-chunk benchmark)
+- A CUDA OOM in the first prefill kills the backend worker ("Backend worker freetoken-TP0-scheduler exited"; API logs "Backend worker is gone and cannot be restarted"), then the API server hangs indefinitely in uvicorn "INFO: Waiting for connections to close." - /ready never returns 200 or dies; a /ready-polling benchmark runner blocks until its timeout while the ft process stays alive in shutdown-wait.
+- Recovery: kill -9 the ft serve process tree AND the runner script (graceful SIGTERM never completes once the worker is gone; the runner's kill -0 liveness check passes because the dying process is still alive). Then verify GPU is empty via nvidia-smi before the next config.
+- Design fix for future harnesses: poll /ready AND the process's backend-log for "exited"/"OutOfMemoryError", with a hard timeout that force-kills both PIDs.
+
+## Benchmark harness must self-detect backend death (2026-09-12, user feedback)
+- User rule: the runner must detect a backend crash itself and print the reason - the user should never have to relay "it crashed" or "it is just waiting" (said after B2/A4c OOM hangs).
+- Implemented pattern (scripts are ephemeral /tmp/ft_run_config.sh + /tmp/ft_ab_bench.py; recreate from this if lost):
+  * FAILPAT='OutOfMemoryError|AssertionError|Backend worker is gone|backend worker .* exited'; grep it in the server log every 5 s during the boot-wait AND in a background watchdog loop (2 s) while the benchmark runs; on hit: print matched lines + the "Tried to allocate" line, pkill the client, kill -9 the ft process, exit non-zero.
+  * trap on runner EXIT kills watchdog + client + server, so a failed run never leaks processes.
+  * client: per-phase try/except that captures the HTTPError BODY (first ~400 chars, e.g. 422 validation detail), prints phase names as progress, exits non-zero if any phase failed - the runner then reports rc and the failure lines.
+- Why: a dead backend leaves uvicorn alive in "Waiting for connections to close"; /ready stays non-200 while the process is still alive, so a /ready-only poller hangs until its timeout.
