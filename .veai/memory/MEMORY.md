@@ -7,4 +7,6 @@
 - [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-33ae77e9943f.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; MSI PRO Z790-P; article .veai/docs
 - [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-9ea1520673f8.md) — GLM-5.3-Flash-NVFP4 RTX 5090: cache_budget min-plan math, boot/FTW load ladder, bf16 512k OOM; decode superseded
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
-- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-fce4c477fa0d.md) — GGUF glm5next: Phase 1 committed 4162f7c; Phase 2 iter+expert sources done (51 tests); Phase 4 dispatch next
+- [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-124193259365.md) — gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3 OK; gcc trips ATen List_inl.h
+- [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
+- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-23b45ac011ac.md) — GGUF glm5next: Phases 1-2 committed, 3-4 in one commit c443d95; private-use, #34 gate waived; Phase 5 banks next
