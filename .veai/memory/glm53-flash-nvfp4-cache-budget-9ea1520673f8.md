@@ -1,18 +1,19 @@
 ---
 name: "glm53-flash-nvfp4-cache-budget"
-description: "GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319"
+description: "GLM-5.3-Flash-NVFP4 RTX 5090: cache_budget min-plan math, boot/FTW load ladder, bf16 512k OOM; decode superseded"
 type: project
-lastUpdated: 2026-09-12T22:16
-lastRecall: 2026-09-12T23:39
+lastUpdated: 2026-09-13T02:18
+lastRecall: 2026-09-13T02:13
 ---
 
 # GLM-5.3-Flash-NVFP4 on RTX 5090: --moe-cache-auto budget floor
 
-From the 2026-09-11 OOM investigation + HARDWARE-VERIFIED boot (assertion in `engine/cache_budget.py::plan_cache_budget`).
+From the 2026-09-11 OOM investigation + HARDWARE-VERIFIED boot (assertion in `engine/cache_budget.py::plan_cache_budget`). Decode tok/s numbers here were measured PRE-iommu=pt and are superseded by glm53-post-iommu-baseline.
 
 ## The arithmetic
 - Budget = memory_ratio * baseline_free - weights - fixed_cache. RTX 5090 32GB, baseline_free ~29.6 GiB, dense bf16 weights ~17 GiB (checkpoint: 16.97 GiB dense, 166.22 GiB NVFP4 experts, 1.05 GiB visual not loaded), GDN/DSA fixed pool ~1.2 GiB.
-- MoE slot = one (layer, expert) pair, ~14.4 MB (288 experts, 43 MoE layers incl. MTP layer 45). KV page (dsa backend, page_size=64) ~0.733 MB -> ~11 KB/token (MLA latent + DSA index slab).
+- MoE slot = one (layer, expert) pair, ~14.4 MB (288 experts). Serving working set = 42 MoE layers x top_k 8 = 336 pairs - the old 43x8=344 claim is WRONG (MTP layer 45 is not a serving MoE layer; verified via CPU executor boot log, see ft-serve-moe-flags-semantics).
+- KV page (dsa backend, page_size=64) ~0.733 MB -> ~11 KB/token bf16 (MLA latent + DSA index slab).
 - With prefill overlap the floor is 2*num_experts = 576 slots = 8.3 GiB; --kv-reserve-tokens 262144 -> 4096 pages = 3 GiB. Min plan 11.3 GiB > ~9 GiB budget -> intentional fail-fast assert.
 - The greedy fill ALWAYS leaves zero pool headroom: any fitting plan = budget exactly.
 
@@ -31,23 +32,19 @@ Resolved: moe_cache_size=326, num_pages=4113 (263,232 KV tokens, 2.93 GiB), free
 
 ## Alternative (keep overlap): cap --kv-reserve-tokens at <= ~46k tokens (576 slots need budget - 0.54 GiB). Default reserve 8192 boots but leaves only ~8k KV tokens (issue #111).
 
-## Related upstream (FlashML-org/FreeToken, open as of 2026-09-11)
+## Related upstream (FlashML-org/FreeToken)
+- PR #300 (OPEN) KV ladder - grow KV on demand from expert slots. Verdict for THIS model: no decode gain (slots already >= working set 336 on every plan; see ft-pr-relevance-glm-hybrid) - it buys flexibility, not speed, here.
 - PR #340: dummy-page off-by-one in the auto KV floor (kv_reserve_pages+1); makes floor slightly stricter, not a fix.
 - PR #198: explicit --num-pages/--num-tokens now participates in the auto reserve (fixes issue #383 class).
-- KV ladder (grow KV on demand from expert slots, port of #300, commit 057ce31 referenced in #340 thread) - best future fit, not yet a standalone open PR.
 - Issue #401: no room for prefill after auto boot; its workaround: explicit --moe-cache-size below the auto number. PR #337: NVMe disk tier for expert banks (RAM overflow).
 
 ## How to apply
 Any boot of this model class on a 32GB card: compute the min plan first; prefer --disable-moe-prefill-overlap + memory_ratio ~0.85 + --max-prefill-length 4096 over raising memory_ratio; expect the first prefill to autotune triton kernels (one-time 256 MiB bench cache).
 
-## Decode tuning A/B (2026-09-11 hardware, same prompt, 768 tokens, batch 1)
-- Hybrid decode per (layer, step): LRU ensure + capped PCIe fetch OVERLAPPED with CPU GEMV on misses; layer completes at max(cpu, pcie); slots pool is one global LRU (layers/moe.py _decode_hybrid). Auto fetch fraction from ~/.cache/freetoken/benchbw/<uuid>.json overlapped benches.
-- Measured tok/s decode / GPU% in decode window: baseline (8t, 326 slots, auto 19.7% fetch) 12.84/59; --moe-cpu-threads 20 -> 13.66/73; + --memory-ratio 0.89 (417 slots, KV 4112 pages = 262k kept) 14.24/76 = BEST; + --moe-hybrid-max-fetch 3 -> 10.15/99% (GPU 99% but -29% speed!); re-profiling benchbw at 8 threads is a no-op (55.8 vs 57.7 GB/s - 8 threads nearly saturate DRAM, profile is thread-count-insensitive).
-- Lesson: past the balanced fetch point GPU utilization rises and throughput FALLS; slots >= per-step working set (43 layers x top-8 = 344 pairs) add ~+4%; remaining ~2x gap to the ~27 tok/s channel bound is fixed per-layer sync overhead, not flag-tunable.
-- Best config: --moe-cpu-threads 20 + --memory-ratio 0.89, auto max-fetch, same KV floor. Do NOT chase 99% GPU util.
-- Branch facts: perf/default-vendored-topk-router already merged into main (e05cff8, PR #319); fix/prefill-jit-warmup merges with a trivial engine/config.py comment-field conflict, adds startup prefill warmup + --skip-prefill-warmup; ple-disk/fp8-scaled-mm/multi-gpu-select/split-residency/decode-token-checkpoint - no decode gain for GLM on this card.
-
-- v5 (warmup branch + topk-noop, best flags): 13.75 tok/s / GPU 69% - within run-to-run noise of v2 (14.24); branch combo is decode-neutral, merges with one trivial config.py comment conflict (resolved manually during the test).
+## Decode tuning A/B (2026-09-11, PRE-iommu=pt: tok/s superseded by glm53-post-iommu-baseline; lessons stand)
+- Numbers then (pre-iommu, 19.7% fetch): 8t 12.84/59% GPU; 20t 13.66; 20t + ratio 0.89 (417 slots) 14.24 then-best; --moe-hybrid-max-fetch 3 -> 10.15 at 99% GPU (-29%). Post-iommu re-baseline: 15.13-15.5 tok/s and threads 16 == 20 FLAT -> the old "20 threads best" advice is RETRACTED (see glm53-post-iommu-baseline, ft-serve-moe-flags-semantics).
+- Standing lessons: hybrid decode = LRU ensure + capped PCIe fetch OVERLAPPED with CPU GEMV on misses, one global LRU slot pool (layers/moe.py _decode_hybrid); auto fetch fraction from ~/.cache/freetoken/benchbw/<uuid>.json; past the balanced fetch point GPU util rises and throughput FALLS - do NOT chase 99% GPU util; slots above the 336-pair working set add only ~+2.5-6%; remaining ~2x gap to the ~27 tok/s channel bound is per-layer sync overhead, not flag-tunable; benchbw re-profile at 8 threads = no-op (thread-insensitive profile).
+- Branch A/Bs 2026-09-11: ple-disk / fp8-scaled-mm / multi-gpu-select / split-residency / decode-token-checkpoint - no decode gain for GLM on this card; v5 (warmup branch + topk-noop, PR #319 merged e05cff8) decode-neutral.
 
 ## Boot load time (2026-09-11 A/B)
 - Baseline (--expert-load serial) ready in 245s: ~14s dense+config, ~220s "expert banks: slow path (serial build)" (mmap, single-stream, 185 GiB experts at ~0.86 GB/s), ~11s CUDA graphs. Disk is NVMe (nvme0n1, xfs) - not the bottleneck.
@@ -58,15 +55,14 @@ Any boot of this model class on a 32GB card: compute the min plan first; prefer 
 ## FTW conversion (2026-09-11, measured)
 - One-time: `ft checkpoint --model <hf_dir> --out <ftw_dir> --moe-backend offload --quant-backend moe.nvfp4=triton --shard-gib 8` -> 177 GiB in 439s (GPU repack, ~300-630 MB/s disk). quant_format nvfp4, 252 per-layer experts_bank entries.
 - FTW boot (threads 20, ratio 0.89): ready in 72s (vs 245s serial / 131s parallel-HF); "Loading expert banks (FTW)" 160G with bursts to 15 GB/s and pin waves 2-3 GB/s; host RAM avail dips to ~15 GiB. FTW path ignores --expert-load (expert_banks.py checks is_ftw_checkpoint first).
-- FTW decode sanity: 14.50 tok/s / GPU 77% (no regression vs v2 14.24); resolved moe_cache_size=427, num_pages=4113 (262k KV kept), free after init 2.84 GiB (tighter than ratio 0.85's 4.14).
+- FTW decode sanity (pre-iommu): 14.50 tok/s / GPU 77% (no regression vs 14.24); resolved moe_cache_size=427, num_pages=4113 (262k KV kept), free after init 2.84 GiB (tighter than ratio 0.85's 4.14).
 - Load-time ladder for this checkpoint on RTX 5090: serial 245s -> parallel 131s -> FTW 72s.
 
-## 512k KV experiment (2026-09-12, FTW checkpoint)
+## 512k KV experiment (2026-09-12, BF16 KV, FTW checkpoint)
 - Model config max_position_embeddings=1048576, so 512k is VRAM-bound only. KV: 0.733 MB/page -> +100k tokens ~= +0.73 GiB ~= -52 expert slots or +0.025 memory-ratio.
 - ratio 0.93 + kv-reserve-tokens 524288 FAILS fail-fast assert (min plan 288 slots + 8192 pages = 10.36 GiB > budget 10.24 GiB, short by 115 MB). ratio 0.93 + kv-reserve 512000 (8000 pages) PASSES: resolved moe=294 slots, num_pages=8006 (512384 tokens, 5.71 GiB), free after init 1.81 GiB, boot 68s.
 - Decode at 512k reserve: 14.19 tok/s / GPU 82% vs 262k reserve 14.50/77% - <=2% loss (slots 294 vs 427; within noise).
-- Filling ~500k tokens in ONE prefill OOMs: kernel/fla/kda_chunk_delta_h.py:364 h=k.new_empty(B,NT,H,V,K) - GDN state history scales with the WHOLE prefill length (NT), independent of --max-prefill-length; needed 128 MiB with 169 MiB free because the idle wrapper on :18080 holds ~1.27 GiB VRAM. Workarounds: free the wrapper's VRAM, or fill context incrementally (HybridRadixCache reuses GDN-state prefixes across requests, so each pass is short). KV ladder (#300 port, discussed in #340) would grow KV from expert slots on demand - exists in NO branch (git log --all verified).
+- Filling ~500k tokens in ONE prefill OOMs: kernel/fla/kda_chunk_delta_h.py:364 h=k.new_empty(B,NT,H,V,K) - GDN state history scales with the WHOLE prefill length (NT), independent of --max-prefill-length; needed 128 MiB with 169 MiB free because the idle wrapper on :18080 holds ~1.27 GiB VRAM. Workarounds: free the wrapper's VRAM, or fill context incrementally (HybridRadixCache reuses GDN-state prefixes across requests, so each pass is short). KV ladder = PR #300, see verdict above.
 
-## OOM cause depends on KV mode: bf16 262k reserve -> GDN history buffer kda_chunk_delta_h.py:364; nvfp4 1M reserve -> DSA indexer workspace ~0.62 KB/token dsa_indexer_kpool.py:276, NOT GDN, 578k succeeds. pr408-kv-nvfp4-1m-port.
-
-<arg_value>
+## OOM cause depends on KV mode
+- bf16 KV -> GDN history buffer (kda_chunk_delta_h.py:364). nvfp4 1M reserve -> DSA indexer workspace ~0.62 KB/token (dsa_indexer_kpool.py:276), NOT GDN; 578k succeeds - see pr408-kv-nvfp4-1m-port.

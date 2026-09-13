@@ -2,8 +2,8 @@
 name: "rtx5090-pcie-gen5-bw-cap"
 description: "RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; MSI PRO Z790-P; article .veai/docs"
 type: project
-lastUpdated: 2026-09-12T22:11
-lastRecall: 2026-09-12T22:45
+lastUpdated: 2026-09-13T02:18
+lastRecall: 2026-09-13T02:13
 ---
 
 # RTX 5090 PCIe Gen5 bandwidth cap on work.vektory79.me - ROOT CAUSE: IOMMU Translated mode (fixed 2026-09-12)
@@ -32,5 +32,5 @@ On consumer Intel + IOMMU Translated default, any ATS-less DMA device can be cap
 - Full article (fix steps, verification checklist, false hypotheses, measurements): /media/ai/src/FreeToken/.veai/docs/rtx5090-pcie-gen5-iommu-bandwidth.md
 - Probe scripts: /media/ai/src/FreeToken/.tasks/pcie-bw-probe/ (pcie_bw_probe.py, size_scaling.py, dram_dir_bw.py, pcie_bw.cu)
 
-## NVMe follow-up (2026-09-12, same evening) - RESOLVED, content moved to nvme-990evo-plus-iommu-fio-gotchas
-Samsung 990 EVO Plus + Samsung 980 investigation: no thermal throttling; sustained ~6-6.4 and ~2-2.4 GB/s; the 7.25 GB/s spec is SLC short burst; the user's remembered "4 GB/s" is most plausibly the same Translated-IOMMU ~50% tax. Full verdict, rounds and fio/dd methodology live in that memory.
+## NVMe follow-up (2026-09-12, same evening) - RESOLVED
+Samsung 990 EVO Plus + 980 investigation: no thermal throttling; the user's old ~4 GB/s is most plausibly the same Translated-IOMMU ~50% tax (hypothesis, not retrospectively verified). Full verdict, sustained numbers, rounds and fio/dd methodology live in nvme-990evo-plus-iommu-fio-gotchas.

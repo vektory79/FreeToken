@@ -1,10 +1,10 @@
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-13edf6413fdc.md) — PR #408 nvfp4 KV port to vektory79 + 1M-token KV on RTX 5090: merge clean, reserve+fill measured, decode flat
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; IOMMU tax = old 4 GB/s
-- [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-5dd13615ef79.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; MSI PRO Z790-P; article .veai/docs
-- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-360195b98396.md) — GLM-5.3-Flash-NVFP4 RTX 5090: ft serve cache budget + hybrid decode A/B (threads 20, ratio 0.89); PRs #198/#340/#319
-- [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-e86db741a45c.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-ac92781688a8.md) — ft serve MoE flags: cpu-threads dead for offload; benchbw v4 profile post-iommu 25% fetch; threads 16==20 flat
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-b9def4525192.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-95f74e785908.md) — GLM-5.3 post-iommu re-baseline A1/B1/B2/A4: working set 336, 8192 chunk +36% @512k, 6144 +20% @1M, 1M min ratio 0.89
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-6a5d5c0d1fd0.md) — ft serve prefill overlap at KV=524288: 2E slot floor boot assert at 0.89, OOM at 0.95; chunk size is the only 512k lever
-- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-48dd4f1019a0.md) — ft serve GGUF whitelist: only gemma4; glm5next rejected at models/gguf/config.py:65; no MR adds GLM GGUF
+- [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-33ae77e9943f.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; MSI PRO Z790-P; article .veai/docs
+- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-9ea1520673f8.md) — GLM-5.3-Flash-NVFP4 RTX 5090: cache_budget min-plan math, boot/FTW load ladder, bf16 512k OOM; decode superseded
+- [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
+- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-fce4c477fa0d.md) — GGUF glm5next: Phase 1 committed 4162f7c; Phase 2 iter+expert sources done (51 tests); Phase 4 dispatch next

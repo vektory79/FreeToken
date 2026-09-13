@@ -2,8 +2,8 @@
 name: "ft-pr-relevance-glm-hybrid"
 description: "PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable"
 type: project
-lastUpdated: 2026-09-12T23:03
-lastRecall: 2026-09-12T23:39
+lastUpdated: 2026-09-13T02:18
+lastRecall: 2026-09-13T02:13
 ---
 
 # Upstream PR applicability for GLM-5.3-Flash-NVFP4 hybrid on RTX 5090 (researched 2026-09-12, branch vektory79 = main + #408 port)
@@ -34,3 +34,7 @@ Check here BEFORE porting any upstream perf PR; re-verify sgl_kernel presence be
 
 Why: each verdict is grounded in this box's measured facts (slot saturation at working set 336, sgl_kernel installed, nvfp4 CPU executor, static config); blind porting wastes A/B time or adds regressions.
 How to apply: any "will MR X help this setup" question - start here, then A/B only what the verdict leaves open.
+
+## Post-research verification (2026-09-12, measured - closes the hedges above)
+- #339 A/B'd on hardware (A3 in glm53-post-iommu-baseline): NEUTRAL on this box - server prefill ~492-505 vs ~510 clean, decode flat; sgl_kernel confirmed installed; patch applied then reverted, tree clean. #339's real value = CUDA-graph capture legality, not speed here.
+- #300 slot-saturation verdict confirmed by post-iommu B1: 373 -> 517 slots = only +2.5% @64k / +6% short decode. Ladder stays unported.

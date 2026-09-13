@@ -3,6 +3,7 @@ name: "ft-serve-prefill-overlap-512k-infeasible"
 description: "ft serve prefill overlap at KV=524288: 2E slot floor boot assert at 0.89, OOM at 0.95; chunk size is the only 512k lever"
 type: project
 lastUpdated: 2026-09-12T23:59
+lastRecall: 2026-09-13T02:13
 ---
 
 # ft serve --moe-prefill-overlap: slot-floor incompatibility with big KV (GLM-5.3, RTX 5090)

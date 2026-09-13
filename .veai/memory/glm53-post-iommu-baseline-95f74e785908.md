@@ -3,7 +3,7 @@ name: "glm53-post-iommu-baseline"
 description: "GLM-5.3 post-iommu re-baseline A1/B1/B2/A4: working set 336, 8192 chunk +36% @512k, 6144 +20% @1M, 1M min ratio 0.89"
 type: project
 lastUpdated: 2026-09-12T23:49
-lastRecall: 2026-09-12T23:43
+lastRecall: 2026-09-13T02:13
 ---
 
 # GLM-5.3-Flash-NVFP4 hybrid on RTX 5090: post-iommu=pt re-baseline (2026-09-12)
