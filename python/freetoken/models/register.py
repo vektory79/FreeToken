@@ -230,6 +230,13 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         "Glm5NextForCausalLM",
         packed_modules_mapping=_GLM5_NEXT_PACKED,
     ),
+    # GGUF (native quants) glm5next: same model classes, GGUF config + weight loaders.
+    "Glm5NextGGUFForCausalLM": ModelSpec(
+        "freetoken.models.glm5_next",
+        "Glm5NextForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+    ),
 }
 
 

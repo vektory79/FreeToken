@@ -283,7 +283,8 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         # KDA conv/recurrent state lives in the LinearStatePool, not paged KV.
         name="RedHatAI/GLM-5.3-Flash-NVFP4",
         architecture="Glm5NextForCausalLM",
-        arch_aliases=("Glm5NextForConditionalGeneration",),
+        # the native-GGUF release shares the expert-bank geometry (hidden 4096, top 8, inter 2048)
+        arch_aliases=("Glm5NextForConditionalGeneration", "Glm5NextGGUFForCausalLM"),
         hidden_size=4096,
         kv_groups=(),
         top_k=8,
