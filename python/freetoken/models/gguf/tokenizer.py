@@ -10,10 +10,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from transformers import AddedToken
+
 from .reader import gguf_architecture, load_gguf_metadata
 
 # GGUF architecture -> transformers GGUF tokenizer-converter key.
-_TOKENIZER_ARCH = {"gemma4": "gemma4_text"}
+# glm5next: the gguf declares tokenizer.ggml.model=gpt2 (pre=glm4); GGUFGPTConverter
+# is the plain-BPE structural match - qwen2's converter hardcodes qwen AddedTokens.
+# GGUFGPTConverter ignores the pre scheme entirely; the env-gated round-trip test
+# (FREETOKEN_GLM5NEXT_TOKENIZER_REF) judges the tokenization fidelity.
+_TOKENIZER_ARCH = {"gemma4": "gemma4_text", "glm5next": "gpt2"}
 
 
 def load_gguf_tokenizer(model_path: str):
@@ -31,6 +37,23 @@ def load_gguf_tokenizer(model_path: str):
     fast, _extra = convert_gguf_tokenizer(conv_arch, tok_dict)
 
     tokens = tok_dict["tokens"]
+
+    # Register the gguf special tokens (token_type CONTROL/USER_DEFINED) as
+    # AddedTokens on the converted backend: serving re-encodes rendered chat text
+    # (apply_chat_template(tokenize=False) -> encode), and without registration the
+    # special strings split byte-wise instead of mapping to their vocab ids. The
+    # ids do not change (the strings already sit in the vocab). Arch-agnostic:
+    # gemma4's <turn|> gains atomicity too. See test_glm5next_gguf_tokenizer_matches_reference.
+    token_types = meta.get("tokenizer.ggml.token_type") or []
+    special_names = [
+        tok
+        for tok, tt in zip(tokens, token_types)
+        if int(tt) in (3, 4)  # GGMLTokenTyPE CONTROL / USER_DEFINED
+    ]
+    if special_names:
+        fast.add_special_tokens(
+            [AddedToken(t, special=True, normalized=False) for t in special_names]
+        )
 
     def tok_for(id_key: str, default: str) -> str:
         tid = meta.get(f"tokenizer.ggml.{id_key}")
@@ -62,6 +85,14 @@ def gguf_eos_token_ids(model_path: str, tokenizer) -> set[int]:
     eid = meta.get("tokenizer.ggml.eos_token_id")
     if eid is not None:
         ids.add(int(eid))
+    # glm5next ends turns with <eot>/<eom>, not just <eos>: the gguf carries
+    # eot_token_id/eom_token_id next to eos (reference stop set {154820, 154827,
+    # 154829}); eos-only would run past the turn end.
+    if gguf_architecture(model_path) == "glm5next":
+        for key in ("eom_token_id", "eot_token_id"):
+            tid = meta.get(f"tokenizer.ggml.{key}")
+            if tid is not None:
+                ids.add(int(tid))
     # Look the stop tokens up in the vocab directly (convert_tokens_to_ids would map an
     # absent name to <unk>, wrongly adding it as a stop id).
     for name in ("<eos>", "<turn|>"):

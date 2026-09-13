@@ -503,3 +503,51 @@ def test_uncapped_platform_stays_uncapped(monkeypatch):
     if hasattr(os, "uname") and "microsoft" in os.uname().release.lower():
         pytest.skip("WSL caps pinning")
     assert _pin_budget_bytes(reserved=2**30) is None
+
+
+def test_adjust_config_rejects_gguf_experts_on_cpu_paths():
+    # gguf moe_weight_format has no CPU/resident expert path until the Phase 5 bank
+    # integration: cpu/hybrid/fused picks must fail at config time, offload (the only
+    # wired path) passes the gate.
+    from freetoken.engine.engine import _adjust_config
+
+    model_config = SimpleNamespace(
+        single_stream_only=False,
+        is_moe=True,
+        expert_quant="none",
+        moe_weight_format="gguf",
+        hidden_act="swiglu_clamp",
+        has_swa_attention=False,
+        has_linear_attention=False,
+    )
+
+    class Cfg:
+        moe_cache_auto = False
+        moe_cache_size = 0
+        moe_cache_rate = None
+        moe_strategy = "cpu"
+        moe_cpu_layers = None
+        max_running_req = 4
+        cuda_graph_max_bs = 2
+        cuda_graph_bs = [1, 2]
+        max_seq_len = 1024
+        page_size = 1
+        attention_backend = "fi"
+        num_page_override = None
+        num_token_override = None
+
+        @property
+        def model_config(self):
+            return model_config
+
+    cfg = Cfg()
+    with pytest.raises(ValueError, match="gguf moe_weight_format supports offload only"):
+        _adjust_config(cfg)
+
+    cfg.moe_strategy = "fused"
+    with pytest.raises(ValueError, match="gguf moe_weight_format supports offload only"):
+        _adjust_config(cfg)
+
+    cfg.moe_strategy = "offload"
+    _adjust_config(cfg)  # the only wired expert path passes the gate
+    assert cfg.moe_strategy == "offload"

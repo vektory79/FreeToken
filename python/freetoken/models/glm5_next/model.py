@@ -167,6 +167,14 @@ class Glm5NextForCausalLM(BaseLLMModel):
             prefix="lm_head",
         )
 
+        # GGUF checkpoints carry native block-quantized weights: swap the packed
+        # projections + embedding + untied head for GGUF-quant ops (routed experts
+        # stay on the offload cache, Phase 5).
+        from .gguf import convert_glm5_next_to_gguf, is_gguf_model
+
+        if is_gguf_model(config):
+            convert_glm5_next_to_gguf(self, config)
+
     def prepare_for_runtime(self) -> None:
         """Post-load, pre-KV-sizing hook: materialize the DSA layers' bmm-ready
         kv_b splits and free the checkpoint-layout originals (glm_moe_dsa

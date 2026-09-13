@@ -1527,6 +1527,24 @@ def _adjust_config(config: EngineConfig):
             "and let every layer decode on the GPU offload path instead."
         )
 
+    if (
+        is_moe
+        and getattr(model_config, "moe_weight_format", None) == "gguf"
+        and (
+            config.moe_strategy in ("cpu", "hybrid", "fused") or config.moe_cpu_layers
+        )
+    ):
+        asked = (
+            f"--moe-cpu-layers={config.moe_cpu_layers!r}"
+            if config.moe_strategy not in ("cpu", "hybrid")
+            else f"--moe-strategy {config.moe_strategy!r}"
+        )
+        raise ValueError(
+            f"{asked}: gguf moe_weight_format supports offload only until the "
+            "expert-bank integration lands; drop the flag and let every layer decode "
+            "on the GPU offload path instead."
+        )
+
     if is_moe and config.moe_strategy == "auto":
         # A MoE model always defaults to the offload family: experts stream from pinned host
         # banks into an auto-sized GPU slot cache, which is the only default that serves a model

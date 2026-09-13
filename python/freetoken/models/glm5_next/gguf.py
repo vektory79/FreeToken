@@ -16,13 +16,21 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Iterator
 
 import torch
 
+from freetoken.layers.base import BaseOP
 from freetoken.models.glm5_next.args import DSA_LAYER, KDA_LAYER
-from freetoken.models.gguf.dequant import GGML_NAME, dequantize
+from freetoken.models.gguf.dequant import (
+    GGML_NAME,
+    GGML_Q6_K,
+    GGML_Q8_0,
+    dequantize,
+    row_bytes,
+)
 
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
@@ -232,12 +240,16 @@ def parse_gguf_config(shim: "GgufConfigShim") -> "ModelConfig":
         routed_scaling_factor=float(g("expert_weights_scale")),
         tie_word_embeddings=bool(shim.tie_word_embeddings),
     )
-    return parse_config(
-        SimpleNamespace(
-            text_config=text,
-            architectures=list(shim.architectures),
-            model_type=shim.model_type,
-        )
+    # gguf marker for the model build (gemma4 precedent): is_gguf_model keys on it.
+    return replace(
+        parse_config(
+            SimpleNamespace(
+                text_config=text,
+                architectures=list(shim.architectures),
+                model_type=shim.model_type,
+            )
+        ),
+        moe_weight_format="gguf",
     )
 
 
@@ -435,11 +447,23 @@ def iter_gguf_weights(
     for t in iter_gguf_tensors(model_path):
         name = t.name
         if name == "token_embd.weight":
+            if t.ggml_type != GGML_Q8_0:
+                # the convert swap builds the embedding as Q8_0; a variant dense type
+                # would otherwise die as a late loader shape assert.
+                raise ValueError(
+                    f"{name} is {GGML_NAME.get(t.ggml_type, t.ggml_type)}; "
+                    "the convert swap builds the embedding as Q8_0"
+                )
             pn = "model.embed_tokens.qweight"
             yield pn, _logged(pn, t.packed(), t)  # Q8_0 packed table
             continue
         if name == "output.weight":
-            # present -> the head is untied; no GGUFTiedLMHead duplication path
+            if t.ggml_type != GGML_Q6_K:
+                # the untied head swaps to a Q6_K GGUF head (convert contract).
+                raise ValueError(
+                    f"{name} is {GGML_NAME.get(t.ggml_type, t.ggml_type)}; "
+                    "the convert swap builds the untied head as Q6_K"
+                )
             pn = "lm_head.qweight"
             yield pn, _logged(pn, t.packed(), t)  # Q6_K packed table
             continue
@@ -487,6 +511,13 @@ def iter_gguf_weights(
                 raise ValueError(f"unmapped glm5next GGUF tensor: {name}")
             rel, cast = entry
             if cast == "qw":
+                if t.ggml_type != GGML_Q8_0:
+                    # every map-branch linear swaps to a Q8_0 GGUFLinear; a K/iq-quant
+                    # dense row would otherwise die as a late loader shape assert.
+                    raise ValueError(
+                        f"{name} is {GGML_NAME.get(t.ggml_type, t.ggml_type)}; "
+                        "the convert swap builds packed linears as Q8_0"
+                    )
                 pn = f"{base}.{rel[: -len('.weight')]}.qweight"
                 yield pn, _logged(pn, t.packed(), t)
             else:
@@ -597,4 +628,95 @@ def iter_gguf_expert_sources(
         )
 
 
-__all__ = ["parse_gguf_config", "iter_gguf_weights", "iter_gguf_expert_sources"]
+# --------------------------------------------------------------------------------------
+# Model layer swap: packed Q8_0/Q6_K yields -> native GGUF-quant ops (gemma4 pattern).
+# --------------------------------------------------------------------------------------
+
+
+def is_gguf_model(config: "ModelConfig") -> bool:
+    """True when the model was parsed from a GGUF checkpoint (native-quant path)."""
+    return getattr(config, "moe_weight_format", None) == "gguf"
+
+
+class GGUFLMHead(BaseOP):
+    """Untied LM head over the native Q6_K output table.
+
+    This checkpoint ships output.weight, so unlike gemma4 there is no tied-head
+    path; the prefill last-token slicing mirrors ParallelLMHead.forward. TP=1 only.
+    """
+
+    def __init__(self, num_embeddings: int, embedding_dim: int, quant_type: int):
+        self._quant_type = quant_type
+        self.qweight = torch.empty(
+            num_embeddings, row_bytes(embedding_dim, quant_type), dtype=torch.uint8
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from freetoken.core import get_global_ctx
+        from freetoken.layers.gguf import fused_mul_mat_gguf
+
+        batch = get_global_ctx().batch
+        if batch.is_prefill:
+            indices = batch.attn_metadata.get_last_indices(batch.size)
+            x = x[indices].contiguous()
+        return fused_mul_mat_gguf(x, self.qweight, self._quant_type)
+
+
+def convert_glm5_next_to_gguf(model, config: "ModelConfig") -> None:
+    """In place: swap the packed Q8_0 projections, the Q8_0 embedding and the Q6_K
+    untied head for the native GGUF ops.
+
+    Only the .qweight-yielded params swap; the bf16/fp32 outputs (kv_b_proj, conv1d,
+    hc_*, indexer, router, e_score_correction_bias) keep the normal path, and the
+    routed experts are untouched (offload banks, Phase 5).
+    """
+    if config.tie_word_embeddings:
+        # the iterator yields lm_head.qweight only when output.weight ships; a tied
+        # variant would die late on that missing key. GGUFTiedLMHead (gemma4) is the
+        # future path once a tied glm5next gguf exists.
+        raise ValueError(
+            "glm5next gguf serving requires the untied file (output.weight present); "
+            "the tied variant has no lm_head path yet (GGUFTiedLMHead is the future "
+            "analog)"
+        )
+    from freetoken.layers.gguf import GGUFEmbedding, GGUFLinear
+
+    inner = model.model
+    inner.embed_tokens = GGUFEmbedding(config.vocab_size, config.hidden_size, GGML_Q8_0)
+
+    def swap(owner, attr):
+        lin = getattr(owner, attr)
+        out_features, in_features = lin.weight.shape
+        setattr(
+            owner,
+            attr,
+            GGUFLinear(in_features, out_features, GGML_Q8_0, has_bias=lin.bias is not None),
+        )
+
+    for layer in inner.layers.op_list:
+        attn = layer.self_attn
+        if hasattr(attn, "in_proj"):  # KDA layer
+            for attr in ("in_proj", "f_b_proj", "g_b_proj", "o_proj"):
+                swap(attn, attr)
+        else:  # DSA/MLA layer: kv_b_proj stays dense (the MLA absorption needs it unquantized)
+            for attr in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "o_proj"):
+                swap(attn, attr)
+        mlp = layer.mlp
+        owner, attrs = (
+            (mlp, ("gate_proj", "up_proj", "down_proj"))
+            if hasattr(mlp, "gate_proj")
+            else (mlp.shared_experts, ("gate_proj", "up_proj", "down_proj"))
+        )
+        for attr in attrs:
+            swap(owner, attr)
+
+    model.lm_head = GGUFLMHead(config.vocab_size, config.hidden_size, GGML_Q6_K)
+
+
+__all__ = [
+    "parse_gguf_config",
+    "iter_gguf_weights",
+    "iter_gguf_expert_sources",
+    "is_gguf_model",
+    "convert_glm5_next_to_gguf",
+]

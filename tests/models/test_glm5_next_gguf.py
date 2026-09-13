@@ -9,6 +9,11 @@ shape[-1] is the vocab -- the only tensor fact build_gguf_shim consumes. The
 
 from __future__ import annotations
 
+import os
+
+import warnings
+
+import gguf
 import numpy as np
 import pytest
 import torch
@@ -469,7 +474,7 @@ def test_optional_guard_keys_may_be_absent(tmp_path, optional_key):
 # =====================================================================================
 
 _VOCAB_S = 256
-_H = 64  # embedding_length
+_H = 256  # embedding_length (a multiple of 256 so the Q6_K head table packs)
 _NH = 4  # attention.head_count
 _HD = 32  # kda.head_dim -> KDA proj = _NH * _HD
 _QL = 32  # attention.q_lora_rank
@@ -571,7 +576,8 @@ def _iter_tensor_set() -> dict:
 
     # globals: Q8_0 embedding, untied F16 head, F32 final norm
     add("token_embd.weight", _pack_q8_0(_q8_vals(_VOCAB_S, _H, 0)), q8)
-    add("output.weight", ((np.arange(_VOCAB_S)[:, None] + np.arange(_H)) % 16).astype(np.float16))
+    # untied Q6_K head table (the convert contract; bytes are opaque to the tests)
+    add("output.weight", np.zeros((_VOCAB_S, _H // 256 * 210), np.uint8), q6k)
     add("output_norm.weight", np.full(_H, 0.5, np.float32))
 
     hc_rows, hc_cols = (2 + _HCN) * _HCN, _HCN * _H
@@ -763,7 +769,7 @@ def test_iter_gguf_weights_full_trunk_names_and_casts(glm5next_iter_gguf):
             assert t.dtype in (torch.bfloat16, torch.float32), name
     # packed geometry follows the fixture's own dims, not the real file's
     assert out["model.embed_tokens.qweight"].shape == (_VOCAB_S, _H // 32 * 34)
-    assert out["lm_head.qweight"].shape == (_VOCAB_S, _H * 2)  # F16 rows
+    assert out["lm_head.qweight"].shape == (_VOCAB_S, _H // 256 * 210)  # Q6_K rows
     assert out["model.layers.1.self_attn.f_b_proj.qweight"].shape == (_PROJ, _HD // 32 * 34)
     assert out["model.layers.1.self_attn.o_proj.qweight"].shape == (_H, _PROJ // 32 * 34)
     # dense-name yields: bf16 norms, fp32 where the family keeps fp32
@@ -984,6 +990,122 @@ def test_iter_gguf_weights_rejects_tp_gt_1(glm5next_iter_gguf, monkeypatch):
         )
 
 
+def test_convert_swaps_packed_modules_and_keeps_dense_fusions(tmp_path):
+    # Phase 4 entry criterion: parse_gguf_config sets the gguf marker and the convert
+    # swaps exactly the .qweight-yielded params for GGUF-quant ops, mirroring gemma4's
+    # is_gguf_model/convert pair. Fusion outputs (kv_b_proj, conv1d) and the bf16/fp32
+    # rows stay on the normal path. The fixture's F16 head + 64-dim hidden are
+    # iterator-only conveniences -- the converted head follows the real file's Q6_K
+    # output convention, which needs a 256-multiple hidden, hence the metadata
+    # override below.
+    import gguf as gguf_mod
+
+    from freetoken.layers.gguf import GGUFEmbedding, GGUFLinear
+    from freetoken.models.gguf.dequant import row_bytes as _rb
+    from freetoken.models.glm5_next.gguf import GGUFLMHead
+    from freetoken.models.glm5_next.model import Glm5NextForCausalLM
+
+    hidden = 256  # Q6_K tables pack 256-wide blocks; the real file's 4096 qualifies
+    meta = {**_ITER_METADATA, "glm5next.embedding_length": hidden}
+    path = _write_iter_gguf(tmp_path / "convert.gguf", metadata=meta)
+    config = _parse(path)
+    assert config.moe_weight_format == "gguf"
+    # construction alone converts: the __init__ hook sees the gguf marker
+    model = Glm5NextForCausalLM(config)
+
+    assert isinstance(model.model.embed_tokens, GGUFEmbedding)
+    assert isinstance(model.lm_head, GGUFLMHead)
+    assert model.lm_head.qweight.shape == (_VOCAB_S, _rb(hidden, gguf_mod.GGMLQuantizationType.Q6_K))
+    l0, l1, l2 = model.model.layers.op_list[0], model.model.layers.op_list[1], model.model.layers.op_list[2]
+    # KDA layer 0: the four packed linears + the dense mlp swap
+    for owner, attr in (
+        (l0.self_attn, "in_proj"),
+        (l0.self_attn, "f_b_proj"),
+        (l0.self_attn, "g_b_proj"),
+        (l0.self_attn, "o_proj"),
+        (l0.mlp, "gate_proj"),
+        (l0.mlp, "up_proj"),
+        (l0.mlp, "down_proj"),
+    ):
+        assert isinstance(getattr(owner, attr), GGUFLinear), attr
+    assert l0.self_attn.in_proj.qweight.shape == (3 * _PROJ + _NH + 2 * _HD, _rb(hidden, gguf_mod.GGMLQuantizationType.Q8_0))
+    # DSA layer 2: the four packed linears swap; kv_b_proj stays dense
+    for attr in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "o_proj"):
+        assert isinstance(getattr(l2.self_attn, attr), GGUFLinear), attr
+    assert not isinstance(l2.self_attn.kv_b_proj, GGUFLinear)
+    assert isinstance(l2.mlp.shared_experts.gate_proj, GGUFLinear)
+    assert not isinstance(l2.mlp.gate, GGUFLinear)  # the router stays dense
+    # the loader-visible state dict exposes packed keys; dense keys unchanged
+    sd = model.state_dict()
+    assert "lm_head.qweight" in sd and "lm_head.weight" not in sd
+    assert "model.layers.1.self_attn.in_proj.qweight" in sd
+    assert "model.layers.2.self_attn.kv_b_proj.weight" in sd
+    assert "model.layers.0.self_attn.A_log" in sd
+    # the convert must leave every non-.qweight param exactly as built
+    from freetoken.layers import LinearReplicated
+
+    assert not isinstance(l0.self_attn.conv1d, GGUFLinear)
+    assert isinstance(l0.self_attn.conv1d.weight, torch.Tensor)
+    assert l0.self_attn.conv1d.weight.shape == (3 * _PROJ, 1, _CONV)
+    assert not isinstance(l2.self_attn.indexer.wk, GGUFLinear)
+    assert isinstance(l2.self_attn.indexer.wk, LinearReplicated)
+    assert l0.hc_attn_fn.dtype == torch.float32
+    assert not isinstance(l1.mlp.gate, GGUFLinear)
+    assert isinstance(l1.mlp.gate, LinearReplicated)
+    assert l1.mlp.e_score_correction_bias.dtype == torch.float32
+
+
+def test_convert_rejects_tied_gguf(tmp_path):
+    # a tied variant (no output.weight) would die late on a bare lm_head.qweight
+    # KeyError -- the config guard refuses it up front instead.
+    ts = _iter_tensor_set()
+    del ts["output.weight"]
+    path = _write_iter_gguf(tmp_path / "tied.gguf", tensors=ts)
+    config = _parse(path)
+    assert config.tie_word_embeddings is True
+    from freetoken.models.glm5_next.model import Glm5NextForCausalLM
+
+    with pytest.raises(ValueError, match="requires the untied file"):
+        Glm5NextForCausalLM(config)
+
+
+@pytest.mark.parametrize(
+    ("tensor_name", "payload", "raw_dtype", "match"),
+    [
+    (
+        "token_embd.weight",
+        np.zeros((_VOCAB_S, 144), np.uint8),  # ne0 = 144/18*32 = hidden
+        gguf.GGMLQuantizationType.Q4_0,
+        r"token_embd\.weight is Q4_0; the convert swap builds the embedding as Q8_0",
+    ),
+    (
+        "output.weight",
+        np.zeros((_VOCAB_S, 272), np.uint8),  # ne0 = 272/34*32 = hidden
+        gguf.GGMLQuantizationType.Q8_0,
+        r"output\.weight is Q8_0; the convert swap builds the untied head as Q6_K",
+    ),
+    (
+        "blk.0.ffn_gate.weight",
+        np.zeros((_DFF, 144), np.uint8),
+        gguf.GGMLQuantizationType.Q4_0,
+        r"blk\.0\.ffn_gate\.weight is Q4_0; the convert swap builds packed linears as Q8_0",
+    ),
+    ],
+)
+def test_iter_gguf_weights_rejects_wrong_dense_type(
+    tmp_path, tensor_name, payload, raw_dtype, match
+):
+    # C1: the convert hardcodes a per-target packed type (embed Q8_0, untied head
+    # Q6_K, linears Q8_0); a variant file deviating on any dense tensor must fail at
+    # ITERATION time naming the tensor and the expected type, never as a late
+    # loader shape assert. Payload byte widths keep ne0 == the fixture hidden.
+    ts = _iter_tensor_set()
+    ts[tensor_name] = (payload, raw_dtype)
+    path = _write_iter_gguf(tmp_path / "wrong-dense-type.gguf", tensors=ts)
+    with pytest.raises(ValueError, match=match):
+        _iter_params(path)
+
+
 def test_dequant_q8_0_reference_matches_handcrafted_blocks():
     from freetoken.models.gguf.dequant import GGML_Q8_0, dequant_q8_0, dequantize
 
@@ -1007,3 +1129,213 @@ def test_dequant_q8_0_reference_matches_handcrafted_blocks():
     # dequantize dispatch + bf16 cast agree with the fp32 reference rounded once
     bf = dequantize(torch.from_numpy(raw.reshape(-1)), GGML_Q8_0, torch.bfloat16).reshape(n, 32)
     assert torch.equal(bf, torch.from_numpy(ref).to(torch.bfloat16))
+
+
+# =====================================================================================
+# Phase 3: embedded tokenizer (tokenizer.ggml.* KV -> PreTrainedTokenizerFast)
+# =====================================================================================
+
+
+def _write_tokenizer_gguf(
+    tmp_path, *, tokens, merges, special_ids, chat_template=None, token_type=None
+):
+    import gguf as gguf_mod
+
+    path = tmp_path / "tokenizer.gguf"
+    w = gguf_mod.GGUFWriter(str(path), "glm5next")
+    w.add_array("tokenizer.ggml.tokens", list(tokens))
+    w.add_array("tokenizer.ggml.token_type", token_type or [1] * len(tokens))
+    w.add_array("tokenizer.ggml.merges", list(merges))
+    w.add_string("tokenizer.ggml.model", "gpt2")
+    w.add_string("tokenizer.ggml.pre", "glm4")
+    for key, tid in special_ids.items():
+        w.add_uint32(f"tokenizer.ggml.{key}_token_id", tid)
+    if chat_template is not None:
+        w.add_string("tokenizer.chat_template", chat_template)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.close()
+    return str(path)
+
+
+def test_load_tokenizer_from_gguf_metadata(tmp_path):
+    # Byte-level alphabet + one merge whose result is in the vocab: encode() splits
+    # to single byte tokens (the merge never applies to the sample text) and
+    # decode() is lossless, so the round trip exercises the converter path without
+    # depending on merge ranks. gguf-py drops empty arrays on write, so the merge
+    # list must be non-empty.
+    from transformers import PreTrainedTokenizerFast
+    from transformers.convert_slow_tokenizer import bytes_to_unicode
+
+    from freetoken.utils.hf import load_eos_token_ids, load_tokenizer
+
+    byte_chars = list(bytes_to_unicode().values())
+    tokens = byte_chars + ["!!", "<eos>", "<pad>", "[gMASK]"]
+    eos_id, pad_id, bos_id, unk_id = 257, 258, 259, 0
+    template = "{% for m in messages %}{{ m['content'] }}{% endfor %}"
+    path = _write_tokenizer_gguf(
+        tmp_path,
+        tokens=tokens,
+        # gguf-py drops empty arrays on write; a harmless real merge keeps the KV
+        merges=["! !"],
+        special_ids={"eos": eos_id, "padding": pad_id, "bos": bos_id, "unknown": unk_id},
+        chat_template=template,
+    )
+
+    tok = load_tokenizer(path)
+    assert isinstance(tok, PreTrainedTokenizerFast)
+    assert (tok.bos_token_id, tok.eos_token_id, tok.pad_token_id, tok.unk_token_id) == (
+        bos_id,
+        eos_id,
+        pad_id,
+        unk_id,
+    )
+    assert tok.bos_token == "[gMASK]" and tok.eos_token == "<eos>"
+    assert tok.chat_template == template
+
+    text = "hello world! 42"
+    ids = tok.encode(text)
+    assert all(0 <= i < len(tokens) for i in ids)
+    assert tok.decode(ids) == text
+
+    # eos-ids helper: the formal eos plus the vocab <eos>; no <turn|> in this vocab,
+    # so the gemma4 turn-end branch is a no-op for glm5next.
+    assert load_eos_token_ids(path, tok) == {eos_id}
+
+
+_GLM5NEXT_TOKENIZER_REF = os.environ.get("FREETOKEN_GLM5NEXT_TOKENIZER_REF", "")
+needs_ref_tokenizer = pytest.mark.skipif(
+    not (_GLM5NEXT_TOKENIZER_REF and os.path.isdir(_GLM5NEXT_TOKENIZER_REF)),
+    reason=(
+        "FREETOKEN_GLM5NEXT_TOKENIZER_REF not set to the RedHatAI GLM-5.3-Flash dir "
+        "(with tokenizer.json); set it to round-trip against the reference tokenizer"
+    ),
+)
+
+
+@needs_ref_tokenizer
+def test_glm5next_gguf_tokenizer_matches_reference(tmp_path):
+    """Round-trip the gguf-embedded tokenizer against the RedHatAI reference.
+
+    The synthetic gguf carries the REFERENCE's own flat vocab (model vocab + added
+    tokens, in id order) and its full merge list, so any tokenization difference
+    isolates the converter path (ByteLevel-only pre-tokenization; the gguf's
+    pre=glm4 scheme is ignored by GGUFGPTConverter) rather than vocab drift. Known
+    special-token handling: the serve path re-encodes rendered chat text, so the
+    converted tokenizer registers the gguf special tokens (token_type walk) as
+    atomic AddedTokens - asserted below via the render->encode check. The
+    code-pre tokenization divergence stays pinned; the boundary split is
+    reported via warnings.warn, not masked.
+    """
+    import json
+
+    from transformers import AutoTokenizer
+
+    from freetoken.utils.hf import load_eos_token_ids, load_tokenizer
+
+    ref_dir = _GLM5NEXT_TOKENIZER_REF
+    ref = AutoTokenizer.from_pretrained(ref_dir)
+    with open(os.path.join(ref_dir, "tokenizer.json"), encoding="utf-8") as f:
+        tj = json.load(f)
+
+    # flat vocab in id order: model vocab + added tokens (the gguf convention)
+    flat = dict(tj["model"]["vocab"])
+    for t in tj["added_tokens"]:
+        flat[t["content"]] = t["id"]
+    size = max(flat.values()) + 1
+    tokens = ["<|gguf_pad|>"] * size
+    for tok_, i in flat.items():
+        tokens[i] = tok_
+    assert all(t != "<|gguf_pad|>" for t in tokens)
+
+    added = {t["content"]: t["id"] for t in tj["added_tokens"]}
+    eos_id = added["<|endoftext|>"]
+    bos_id = added["[gMASK]"]
+    merges = [f"{a} {b}" for a, b in tj["model"]["merges"]]
+    # F1: the gguf's token_type array marks the special tokens CONTROL - the
+    # converter registers them as atomic AddedTokens on the fast tokenizer.
+    token_types = [1] * len(tokens)
+    for tok_id in added.values():
+        token_types[tok_id] = 3  # GGMLTokenTyPE.CONTROL
+    path = _write_tokenizer_gguf(
+        tmp_path,
+        tokens=tokens,
+        merges=merges,
+        special_ids={
+            "eos": eos_id,
+            "bos": bos_id,
+            "padding": eos_id,
+            "unknown": eos_id,
+            # the real file declares eom/eot ids; the eos helper unions them (F2)
+            "eom": added["<|observation|>"],
+            "eot": added["<|user|>"],
+        },
+        token_type=token_types,
+        chat_template=ref.chat_template,
+    )
+
+    tok = load_tokenizer(path)
+    assert tok.eos_token_id == eos_id and tok.bos_token_id == bos_id
+    # F2: glm5next ends turns with <eot>/<eom> - the helper unions the gguf-declared
+    # eom/eot ids with eos (reference stop set {154820, 154827, 154829}).
+    assert load_eos_token_ids(path, tok) == {154820, 154827, 154829}
+
+    # Prose samples MUST match the reference exactly (verified: en/ru/cjk identical).
+    # The code sample is a PINNED known divergence: the reference pre-tokenizes with
+    # the GPT-2 regex Split (grouping '(x' and '):\u010a' into single BPE pieces)
+    # while GGUFGPTConverter emits ByteLevel-only pre-tokenization and ignores the
+    # gguf's pre=glm4 scheme - both tokenizations decode losslessly, but they are
+    # not identical. If a future converter emits the regex split, the pinned assert
+    # below flips and this comment should be removed along with the mapping review.
+    prose = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Съешь ещё этих мягких французских булок, да выпей чаю.",
+        "你好，世界！GLM-5.3-Flash 是一个混合专家模型。",
+    ]
+    code = "def f(x):\n    return x + 12345  # comment"
+
+    for s in prose:
+        ref_toks = ref.tokenize(s)
+        got_toks = tok.convert_ids_to_tokens(tok.encode(s))
+        assert got_toks == ref_toks, (
+            f"prose sample {s[:20]!r} diverges from the reference: "
+            f"gguf={got_toks[:10]} ref={ref_toks[:10]}"
+        )
+        assert tok.decode(tok.encode(s)) == s
+
+    got_code = tok.convert_ids_to_tokens(tok.encode(code))
+    ref_code = ref.tokenize(code)
+    # pinned known divergence (reported finding): ByteLevel-only pre-tokenization
+    # vs the reference's regex Split - gguf splits '(x' as '(' + 'x', keeps the
+    # newline as a separate 'Ċ' token, and does not merge '):' + newline.
+    assert got_code[:7] == ["def", "Ġf", "(", "x", "):", "Ċ", "ĠĠĠ"], got_code[:10]
+    assert ref_code[:4] == ["def", "Ġf", "(x", "):Ċ"], ref_code[:10]
+    assert tok.decode(tok.encode(code)) == code  # still lossless
+
+    # F3: the serve path renders the chat template to TEXT and re-encodes it
+    # (apply_chat_template(tokenize=False) -> encode(..., add_special_tokens=False));
+    # every special token the template emits must map to its single registered id
+    # (no byte-splitting) - pinned by the token_type registration in tokenizer.py.
+    messages = [{"role": "user", "content": "hi"}]
+    rendered = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    enc = tok.encode(rendered, add_special_tokens=False)
+    rendered_specials = [t for t in sorted(added, key=lambda k: added[k]) if t and t in rendered]
+    assert rendered_specials, f"no special tokens in rendered template: {rendered[:120]!r}"
+    for st in rendered_specials:
+        assert added[st] in enc, (
+            f"special token {st!r} byte-split across the rendered template encode"
+        )
+
+    # special-token boundary: reported, not masked -- the gguf converter has no
+    # added_tokens machinery, so the literal special string byte-splits.
+    s = "<|user|>hello"
+    got_toks = tok.convert_ids_to_tokens(tok.encode(s))
+    boundary_id = added["<|user|>"]
+    if boundary_id not in tok.encode(s):
+        warnings.warn(
+            f"glm5next gguf tokenizer boundary divergence: {s!r} encodes as "
+            f"{got_toks[:8]!r}; the special id {boundary_id} is only reachable "
+            "via explicit ids (the gguf converter has no added_tokens machinery)",
+            stacklevel=1,
+        )
+    assert tok.decode(tok.encode(s)) == s  # still lossless

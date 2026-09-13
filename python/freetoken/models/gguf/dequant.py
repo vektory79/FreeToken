@@ -18,12 +18,18 @@ from __future__ import annotations
 
 import torch
 
-# ggml_type enum values (subset present in these checkpoints).
+# ggml_type enum values (subset present in these checkpoints). The K-quant and iq
+# ints match this vendored gguf-py's GGMLQuantizationType (pre-variant K names:
+# Q3_K/Q4_K, no _S/_M/_L splits).
 GGML_F32 = 0
 GGML_F16 = 1
 GGML_Q4_0 = 2
 GGML_Q8_0 = 8
+GGML_Q3_K = 11
+GGML_Q4_K = 12
 GGML_Q6_K = 14
+GGML_IQ3_XXS = 18
+GGML_IQ4_XS = 23
 GGML_BF16 = 30
 
 # (block numel, bytes per block) per ggml type.
@@ -34,6 +40,13 @@ BLOCK_SHAPE: dict[int, tuple[int, int]] = {
     GGML_Q4_0: (32, 18),
     GGML_Q8_0: (32, 34),
     GGML_Q6_K: (256, 210),
+    # glm5next expert-bank formats: geometry only (row_bytes + log spelling). There
+    # is deliberately NO python reference dequant for these - the packed CUDA
+    # kernels dequantize them on GPU, and dequantize() raises if called.
+    GGML_Q3_K: (256, 110),
+    GGML_Q4_K: (256, 144),
+    GGML_IQ3_XXS: (256, 98),
+    GGML_IQ4_XS: (256, 136),
 }
 
 GGML_NAME = {
@@ -43,13 +56,10 @@ GGML_NAME = {
     GGML_Q4_0: "Q4_0",
     GGML_Q8_0: "Q8_0",
     GGML_Q6_K: "Q6_K",
-    # log-only names (ints match gguf-py's GGMLQuantizationType; no BLOCK_SHAPE or
-    # dequant entry): glm5next's expert banks ship these and pass through packed, so
-    # the yield log must print spellings, not raw ints.
-    18: "IQ3_XXS",
-    23: "IQ4_XS",
-    11: "Q3_K",
-    12: "Q4_K",
+    GGML_Q3_K: "Q3_K",
+    GGML_Q4_K: "Q4_K",
+    GGML_IQ3_XXS: "IQ3_XXS",
+    GGML_IQ4_XS: "IQ4_XS",
 }
 
 
@@ -162,7 +172,11 @@ __all__ = [
     "GGML_BF16",
     "GGML_Q4_0",
     "GGML_Q8_0",
+    "GGML_Q3_K",
+    "GGML_Q4_K",
     "GGML_Q6_K",
+    "GGML_IQ3_XXS",
+    "GGML_IQ4_XS",
     "GGML_NAME",
     "BLOCK_SHAPE",
     "row_bytes",
