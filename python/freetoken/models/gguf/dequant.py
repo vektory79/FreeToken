@@ -1,5 +1,5 @@
 """GGML block-quant dequantization in pure torch (the formats this repo's GGUF
-checkpoints use: Q4_0, Q6_K, plus trivial F32/F16/BF16).
+checkpoints use: Q4_0, Q6_K, Q8_0, plus trivial F32/F16/BF16).
 
 This is the *reference / CPU* path, NOT the engine's hot path: GGUF weights stay
 packed and are dequantized inside the borrowed ggml CUDA kernels (see
@@ -43,6 +43,13 @@ GGML_NAME = {
     GGML_Q4_0: "Q4_0",
     GGML_Q8_0: "Q8_0",
     GGML_Q6_K: "Q6_K",
+    # log-only names (ints match gguf-py's GGMLQuantizationType; no BLOCK_SHAPE or
+    # dequant entry): glm5next's expert banks ship these and pass through packed, so
+    # the yield log must print spellings, not raw ints.
+    18: "IQ3_XXS",
+    23: "IQ4_XS",
+    11: "Q3_K",
+    12: "Q4_K",
 }
 
 
@@ -115,9 +122,21 @@ def dequant_q6_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     return y.reshape(-1).to(out_dtype)
 
 
+def dequant_q8_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q8_0: per 32-elem block = fp16 scale ``d`` + 32 int8 quants; ``w = d*q``.
+
+    glm5next's dense linears ship as Q8_0 -- the first in-tree consumer (gemma4 is
+    Q4_0/Q6_K only)."""
+    raw = raw.reshape(-1, 34)
+    d = _f16_scales(raw, 0, 2)  # [N,1]
+    q = raw[:, 2:34].contiguous().view(torch.int8).to(torch.float32)  # [N,32]
+    return (q * d).reshape(-1).to(out_dtype)
+
+
 _DEQUANT = {
     GGML_Q4_0: dequant_q4_0,
     GGML_Q6_K: dequant_q6_k,
+    GGML_Q8_0: dequant_q8_0,
 }
 
 
@@ -149,5 +168,6 @@ __all__ = [
     "row_bytes",
     "dequant_q4_0",
     "dequant_q6_k",
+    "dequant_q8_0",
     "dequantize",
 ]

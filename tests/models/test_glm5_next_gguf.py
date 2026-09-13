@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from freetoken.attention.base import AttnType
 from freetoken.models.config import FullAttentionGroupConfig, LinearGatedDeltaGroupConfig
@@ -239,11 +240,16 @@ def test_registry_resolves_the_glm5next_gguf_spec():
     assert iter_gguf_weights is gguf_module.iter_gguf_weights
 
 
-def test_iter_gguf_weights_is_a_phase2_stub():
+def test_iter_gguf_weights_rejects_expert_inclusion():
+    # routed experts only serve from the offload cache (same contract as the HF reader);
+    # the iterator is a generator, so the guard fires on first next() like weight.py's
+    # ``yield from`` consumption.
     from freetoken.models.glm5_next import iter_gguf_weights
 
-    with pytest.raises(NotImplementedError, match="Phase 2"):
-        iter_gguf_weights("unused.gguf", None, include_moe_experts=True, include_non_moe=True)
+    with pytest.raises(ValueError, match="include_moe_experts=True is not supported"):
+        list(
+            iter_gguf_weights("unused.gguf", None, include_moe_experts=True, include_non_moe=True)
+        )
 
 
 def test_missing_required_metadata_key_fails_loudly(tmp_path):
@@ -448,3 +454,556 @@ def test_optional_guard_keys_may_be_absent(tmp_path, optional_key):
     path = _write_gguf(tmp_path / "absent-key.gguf", metadata=meta)
     cfg = _parse(path)
     assert cfg.num_layers == _NUM_LAYERS
+
+
+# =====================================================================================
+# Phase 2: iter_gguf_weights / iter_gguf_expert_sources over a synthetic weight file.
+#
+# The Phase 1 fixture above is metadata-only (the config shim consumes one tensor
+# fact). The weight iterator consumes the tensor table, so this section adds a
+# second session-scoped fixture with a small trunk: layer 0 KDA + dense FFN, layer 1
+# KDA + MoE, layer 2 DSA + MoE, and blk.3 as the skipped MTP/NextN block. Every
+# config dim is shrunk (head 4, hidden 64, kv_lora 32, moe ffn 256) so the Q8_0
+# blocks stay tiny; all geometry asserts read THESE dims, never the real
+# checkpoint's, and the 147 GB gguf is never opened.
+# =====================================================================================
+
+_VOCAB_S = 256
+_H = 64  # embedding_length
+_NH = 4  # attention.head_count
+_HD = 32  # kda.head_dim -> KDA proj = _NH * _HD
+_QL = 32  # attention.q_lora_rank
+_KL = 32  # attention.kv_lora_rank
+_QK = 32  # attention.key_length_mla (qk_nope)
+_VD = 32  # attention.value_length_mla
+_DFF = 128  # feed_forward_length (dense FFN)
+_EFF = 256  # expert_feed_forward_length: Q6_K down bank needs ne0 % 256
+_NE = 4  # expert_count
+_IDXH = 2  # indexer head_count
+_IDXD = 32  # indexer key_length
+_KPOOL = 4
+_HCN = 2  # hyper_connection.count -> hc_dim 128, hc_mix 8
+_CONV = 4  # ssm.conv_kernel
+_PROJ = _NH * _HD  # KDA d_inner
+_IT_BLOCK_COUNT = 4
+_IT_LAYERS = 3  # trunk layers 0..2; blk.3 is the MTP block
+_KDA_ITER_LAYERS = (0, 1)
+_DSA_ITER_LAYERS = (2,)
+_MOE_ITER_LAYERS = (1, 2)
+
+_ITER_METADATA = {
+    **_GLM5NEXT_METADATA,
+    "glm5next.block_count": _IT_BLOCK_COUNT,
+    "glm5next.vocab_size": _VOCAB_S,
+    "glm5next.embedding_length": _H,
+    "glm5next.attention.head_count": _NH,
+    "glm5next.attention.head_count_kv": [0, 0, 1, 1],
+    "glm5next.attention.q_lora_rank": _QL,
+    "glm5next.attention.kv_lora_rank": _KL,
+    "glm5next.attention.key_length": _QK,
+    "glm5next.attention.key_length_mla": _QK,
+    "glm5next.attention.value_length": _VD,
+    "glm5next.attention.value_length_mla": _VD,
+    "glm5next.attention.indexer.head_count": _IDXH,
+    "glm5next.attention.indexer.key_length": _IDXD,
+    "glm5next.attention.indexer.top_k": 8,
+    "glm5next.attention.indexer.kpool": _KPOOL,
+    "glm5next.kda.head_dim": _HD,
+    "glm5next.feed_forward_length": _DFF,
+    "glm5next.leading_dense_block_count": 1,
+    "glm5next.expert_count": _NE,
+    "glm5next.expert_used_count": 2,
+    "glm5next.expert_feed_forward_length": _EFF,
+    "glm5next.expert_shared_count": 1,
+    "glm5next.expert_shared_feed_forward_length": _EFF,
+    "glm5next.hyper_connection.count": _HCN,
+    "glm5next.swiglu_clamp_exp": [10.0] * _IT_BLOCK_COUNT,
+    "glm5next.swiglu_clamp_shexp": [10.0] * _IT_BLOCK_COUNT,
+}
+
+# A_log ground truth: the gguf stores -exp(A_log) per head (kimi-k3 convention).
+_SSM_A_TRUE = np.array([0.5, -1.0, 2.0, -0.25], np.float32)
+# Q6_K down bank payload: random bytes are fine, the bank must pass through verbatim.
+_DOWN_BANK_BYTES = np.random.default_rng(1234).integers(0, 256, (_NE, _H, 210), dtype=np.uint8)
+
+
+def _q8_vals(rows, cols, tag):
+    """Element values whose Q8_0 payload encodes (tag, row, col) in every int8."""
+    vals = (tag * 1000 + np.arange(rows)[:, None] * cols + np.arange(cols)) % 254 - 127
+    return vals.astype(np.int8)
+
+
+def _pack_q8_0(vals):
+    """Q8_0 blocks (fp16 scale 1.0 + int8 quants) shaped for gguf-py raw writes: the
+    uint8 byte shape [..., row_bytes] converts back to the ggml element shape."""
+    cols = vals.shape[-1]
+    assert cols % 32 == 0
+    nb = cols // 32
+    flat = np.ascontiguousarray(vals, dtype=np.int8).reshape(-1, cols)
+    out = np.zeros((flat.shape[0], nb * 34), dtype=np.uint8)
+    out[:, 1::34] = 0x3C  # fp16 scale 1.0, little-endian
+    for b in range(nb):
+        out[:, b * 34 + 2:b * 34 + 34] = flat[:, b * 32:(b + 1) * 32].view(np.uint8)
+    return out.reshape(vals.shape[:-1] + (nb * 34,))
+
+
+def _bank_vals(tag):
+    """Routed-expert bank fills: expert e's rows encode (tag, e, ffn, col)."""
+    e = np.arange(_NE)[:, None, None]
+    f = np.arange(_EFF)[None, :, None]
+    c = np.arange(_H)[None, None, :]
+    return ((tag * 1000 + e * 2000 + f * _H + c) % 254 - 127).astype(np.int8)
+
+
+def _iter_tensor_set() -> dict:
+    """{gguf tensor name -> (payload ndarray, gguf raw dtype or None)} for the trunk.
+
+    Float arrays carry the torch shape (C-order, ggml ne0 last); quantized payloads
+    are uint8 byte shapes that gguf-py converts back to the ggml element shape."""
+    import gguf
+
+    q8 = gguf.GGMLQuantizationType.Q8_0
+    q6k = gguf.GGMLQuantizationType.Q6_K
+    ts: dict = {}
+
+    def add(name, arr, qt=None):
+        ts[name] = (arr, qt)
+
+    # globals: Q8_0 embedding, untied F16 head, F32 final norm
+    add("token_embd.weight", _pack_q8_0(_q8_vals(_VOCAB_S, _H, 0)), q8)
+    add("output.weight", ((np.arange(_VOCAB_S)[:, None] + np.arange(_H)) % 16).astype(np.float16))
+    add("output_norm.weight", np.full(_H, 0.5, np.float32))
+
+    hc_rows, hc_cols = (2 + _HCN) * _HCN, _HCN * _H
+    for n in range(_IT_LAYERS):
+        add(f"blk.{n}.attn_norm.weight", np.full(_H, 0.25, np.float32))
+        add(f"blk.{n}.ffn_norm.weight", np.full(_H, 0.75, np.float32))
+        add(f"blk.{n}.hc_attn_fn.weight", _pack_q8_0(_q8_vals(hc_rows, hc_cols, n)), q8)
+        add(f"blk.{n}.hc_attn_base.weight", np.arange(hc_rows, dtype=np.float32) / 8)
+        add(f"blk.{n}.hc_attn_scale.weight", np.array([0.1, 0.2, 0.3], np.float32))
+        add(f"blk.{n}.hc_ffn_fn.weight", _pack_q8_0(_q8_vals(hc_rows, hc_cols, 10 + n)), q8)
+        add(f"blk.{n}.hc_ffn_base.weight", np.arange(hc_rows, dtype=np.float32) / 8)
+        add(f"blk.{n}.hc_ffn_scale.weight", np.array([0.4, 0.5, 0.6], np.float32))
+
+    for n in _KDA_ITER_LAYERS:
+        for tag, suffix, rows in (
+            (0, "attn_q", _PROJ), (1, "attn_k", _PROJ), (2, "attn_v", _PROJ),
+            (3, "ssm_beta", _NH), (4, "ssm_f_a", _HD), (5, "ssm_g_a", _HD),
+        ):
+            add(f"blk.{n}.{suffix}.weight", _pack_q8_0(_q8_vals(rows, _H, tag)), q8)
+        for tag, part in ((1.0, "q"), (2.0, "k"), (3.0, "v")):
+            add(f"blk.{n}.ssm_conv1d_{part}.weight", np.full((_PROJ, 1, _CONV), tag, np.float32))
+        add(f"blk.{n}.ssm_f_b.weight", _pack_q8_0(_q8_vals(_PROJ, _HD, 10)), q8)
+        add(f"blk.{n}.ssm_g_b.weight", _pack_q8_0(_q8_vals(_PROJ, _HD, 11)), q8)
+        add(f"blk.{n}.attn_output.weight", _pack_q8_0(_q8_vals(_H, _PROJ, 12)), q8)
+        add(f"blk.{n}.ssm_a", (-np.exp(_SSM_A_TRUE)).astype(np.float32))
+        add(f"blk.{n}.ssm_dt.bias", np.arange(_PROJ, dtype=np.float32) / 16 - 4)
+        add(f"blk.{n}.ssm_norm.weight", np.full(_HD, 0.5, np.float32))
+
+    add("blk.0.ffn_gate.weight", _pack_q8_0(_q8_vals(_DFF, _H, 20)), q8)
+    add("blk.0.ffn_up.weight", _pack_q8_0(_q8_vals(_DFF, _H, 21)), q8)
+    add("blk.0.ffn_down.weight", _pack_q8_0(_q8_vals(_H, _DFF, 22)), q8)
+
+    for n in _MOE_ITER_LAYERS:
+        add(f"blk.{n}.ffn_gate_inp.weight", (
+            np.arange(_NE, dtype=np.float32)[:, None] + np.arange(_H)[None, :] / 64
+        ).astype(np.float32))
+        add(f"blk.{n}.exp_probs_b.bias", np.array([0.01, -0.02, 0.03, -0.04], np.float32))
+        add(f"blk.{n}.ffn_gate_shexp.weight", _pack_q8_0(_q8_vals(_EFF, _H, 30)), q8)
+        add(f"blk.{n}.ffn_up_shexp.weight", _pack_q8_0(_q8_vals(_EFF, _H, 31)), q8)
+        add(f"blk.{n}.ffn_down_shexp.weight", _pack_q8_0(_q8_vals(_H, _EFF, 32)), q8)
+        add(f"blk.{n}.ffn_gate_exps.weight", _pack_q8_0(_bank_vals(0)), q8)
+        add(f"blk.{n}.ffn_up_exps.weight", _pack_q8_0(_bank_vals(7)), q8)
+        add(f"blk.{n}.ffn_down_exps.weight", _DOWN_BANK_BYTES, q6k)
+
+    add("blk.2.attn_q_a.weight", _pack_q8_0(_q8_vals(_QL, _H, 40)), q8)
+    add("blk.2.attn_q_a_norm.weight", np.full(_QL, 0.5, np.float32))
+    add("blk.2.attn_q_b.weight", _pack_q8_0(_q8_vals(_NH * _QK, _QL, 41)), q8)
+    add("blk.2.attn_kv_a_mqa.weight", _pack_q8_0(_q8_vals(_KL, _H, 42)), q8)
+    add("blk.2.attn_kv_a_norm.weight", np.full(_KL, 0.5, np.float32))
+    add("blk.2.attn_output.weight", _pack_q8_0(_q8_vals(_H, _NH * _VD, 43)), q8)
+    # kv_b pieces: attn_k_b reads [head, kv_lora, qk] and stores h*kl + kv (constant
+    # along qk, so the fused rows expose the transpose); attn_v_b reads
+    # [head, v_head, kv_lora] and stores -128 + h*kl + v (disjoint sign range).
+    k_b = np.broadcast_to(
+        np.arange(_NH)[:, None, None] * _KL + np.arange(_KL)[None, :, None],
+        (_NH, _KL, _QK),
+    ).astype(np.int8)
+    v_b = np.broadcast_to(
+        -128 + np.arange(_NH)[:, None, None] * _KL + np.arange(_VD)[None, :, None],
+        (_NH, _VD, _KL),
+    ).astype(np.int8)
+    add("blk.2.attn_k_b.weight", _pack_q8_0(k_b), q8)
+    add("blk.2.attn_v_b.weight", _pack_q8_0(v_b), q8)
+
+    add("blk.2.indexer.attn_k.weight", _pack_q8_0(_q8_vals(_IDXD, _H, 50)), q8)
+    add("blk.2.indexer.attn_q_b.weight", _pack_q8_0(_q8_vals(_IDXH * _IDXD, _QL, 51)), q8)
+    add("blk.2.indexer.proj.weight", (
+        np.arange(_IDXH, dtype=np.float32)[:, None] + np.arange(_H)[None, :] / 64
+    ).astype(np.float32))
+    add("blk.2.indexer.k_norm.weight", np.full(_IDXD, 0.5, np.float32))
+    add("blk.2.indexer.k_norm.bias", np.arange(_IDXD, dtype=np.float32) / 8 - 2)
+    add("blk.2.indexer_compressor_gate.weight", _pack_q8_0(_q8_vals(_IDXD, _H, 52)), q8)
+    add("blk.2.indexer_compressor_ape.weight", (
+        np.arange(_KPOOL, dtype=np.float32)[:, None] + np.arange(_IDXD)[None, :] / 64
+    ).astype(np.float32))
+
+    # MTP draft block blk.3: block weights + .nextn glue + a bank; all skipped.
+    add("blk.3.attn_norm.weight", np.full(_H, 0.25, np.float32))
+    add("blk.3.nextn.eh_proj.weight", _pack_q8_0(_q8_vals(_PROJ, _H, 60)), q8)
+    add("blk.3.nextn.enorm.weight", np.full(_H, 0.25, np.float32))
+    add("blk.3.ffn_gate_exps.weight", _pack_q8_0(_bank_vals(0)), q8)
+    return ts
+
+
+def _write_iter_gguf(path, *, metadata=None, tensors=None) -> str:
+    import gguf
+
+    meta = _ITER_METADATA if metadata is None else metadata
+    entries = _iter_tensor_set() if tensors is None else tensors
+    w = gguf.GGUFWriter(str(path), "glm5next")
+    for key, val in sorted(meta.items()):
+        if isinstance(val, bool):
+            w.add_bool(key, val)
+        elif isinstance(val, list):
+            w.add_array(key, val)
+        elif isinstance(val, float):
+            w.add_float32(key, val)
+        else:
+            # int32 so negative-valued guard fixtures survive the round-trip
+            w.add_int32(key, val)
+    for name, (arr, qt) in entries.items():
+        w.add_tensor(name, arr, raw_dtype=qt)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
+
+
+@pytest.fixture(scope="session")
+def glm5next_iter_gguf(tmp_path_factory) -> str:
+    return _write_iter_gguf(tmp_path_factory.mktemp("glm5next-iter") / "glm5next-iter.gguf")
+
+
+@pytest.fixture(autouse=True)
+def _single_rank_tp():
+    # iter_gguf_weights enforces TP=1 via get_tp_info; weight-reader tests run TP=1
+    # (same guarded idiom as the kda/model/snapshot tests).
+    from freetoken.distributed import set_tp_info, try_get_tp_info
+
+    if try_get_tp_info() is None:
+        set_tp_info(rank=0, size=1)
+
+
+def _iter_params(path) -> dict:
+    from freetoken.models.glm5_next import iter_gguf_weights
+
+    return dict(
+        iter_gguf_weights(path, None, include_moe_experts=False, include_non_moe=True)
+    )
+
+
+def _expected_iter_names() -> set:
+    names = {"model.embed_tokens.qweight", "lm_head.qweight", "model.norm.weight"}
+    for n in range(_IT_LAYERS):
+        names |= {
+            f"model.layers.{n}.{s}"
+            for s in (
+                "input_layernorm.weight", "post_attention_layernorm.weight",
+                "hc_attn_fn", "hc_attn_base", "hc_attn_scale",
+                "hc_ffn_fn", "hc_ffn_base", "hc_ffn_scale",
+            )
+        }
+    for n in _KDA_ITER_LAYERS:
+        names |= {
+            f"model.layers.{n}.self_attn.{s}"
+            for s in (
+                "in_proj.qweight", "conv1d.weight", "f_b_proj.qweight",
+                "g_b_proj.qweight", "o_proj.qweight", "o_norm.weight",
+                "A_log", "dt_bias",
+            )
+        }
+    names |= {
+        f"model.layers.2.self_attn.{s}"
+        for s in (
+            "q_a_proj.qweight", "q_a_layernorm.weight", "q_b_proj.qweight",
+            "kv_a_proj_with_mqa.qweight", "kv_a_layernorm.weight", "o_proj.qweight",
+            "kv_b_proj.weight", "indexer.wk.weight", "indexer.wq_b.weight",
+            "indexer.weights_proj.weight", "indexer.k_norm.weight",
+            "indexer.k_norm.bias", "indexer.index_kpool_compress_gate",
+            "indexer.index_kpool_compress_ape",
+        )
+    }
+    names |= {
+        f"model.layers.0.mlp.{s}"
+        for s in ("gate_proj.qweight", "up_proj.qweight", "down_proj.qweight")
+    }
+    for n in _MOE_ITER_LAYERS:
+        names |= {
+            f"model.layers.{n}.mlp.{s}"
+            for s in (
+                "gate.weight", "e_score_correction_bias",
+                "shared_experts.gate_proj.qweight", "shared_experts.up_proj.qweight",
+                "shared_experts.down_proj.qweight",
+            )
+        }
+    return names
+
+
+def test_iter_gguf_weights_full_trunk_names_and_casts(glm5next_iter_gguf):
+    out = _iter_params(glm5next_iter_gguf)
+    assert set(out) == _expected_iter_names()
+    # blk.45-style MTP tensors (block weights, .nextn glue, a bank) never surface
+    assert not any(name.startswith("model.layers.3.") for name in out)
+    for name, t in out.items():
+        if name.endswith(".qweight"):
+            assert t.dtype == torch.uint8 and t.dim() == 2, name
+        else:
+            assert t.dtype in (torch.bfloat16, torch.float32), name
+    # packed geometry follows the fixture's own dims, not the real file's
+    assert out["model.embed_tokens.qweight"].shape == (_VOCAB_S, _H // 32 * 34)
+    assert out["lm_head.qweight"].shape == (_VOCAB_S, _H * 2)  # F16 rows
+    assert out["model.layers.1.self_attn.f_b_proj.qweight"].shape == (_PROJ, _HD // 32 * 34)
+    assert out["model.layers.1.self_attn.o_proj.qweight"].shape == (_H, _PROJ // 32 * 34)
+    # dense-name yields: bf16 norms, fp32 where the family keeps fp32
+    assert out["model.layers.0.input_layernorm.weight"].dtype == torch.bfloat16
+    assert out["model.layers.0.self_attn.o_norm.weight"].dtype == torch.bfloat16
+    assert out["model.layers.0.hc_attn_fn"].dtype == torch.float32
+    assert out["model.layers.0.hc_attn_fn"][0, 0].item() == -127.0  # Q8_0 dequant, scale 1
+    assert out["model.layers.1.mlp.e_score_correction_bias"].dtype == torch.float32
+    assert out["model.layers.2.self_attn.indexer.wk.weight"].dtype == torch.bfloat16
+
+
+def test_iter_gguf_weights_in_proj_fusion_matches_consumer_split(glm5next_iter_gguf):
+    out = _iter_params(glm5next_iter_gguf)
+    fused = out["model.layers.1.self_attn.in_proj.qweight"]
+    # Glm5NextKDA._in_proj_split = [P, P, P, H, D, D] (kda.py) slices the fused GEMM
+    # in the q|k|v|b|f_a|g_a concat order of weight.py _KDA_IN_PROJ; every piece is
+    # Q8_0 with ne0 == hidden, so the packed dim-0 concat is byte-exact.
+    assert fused.dtype == torch.uint8
+    assert fused.shape == (3 * _PROJ + _NH + 2 * _HD, _H // 32 * 34)
+    row = 0
+    for suffix, rows, tag in (
+        ("attn_q", _PROJ, 0), ("attn_k", _PROJ, 1), ("attn_v", _PROJ, 2),
+        ("ssm_beta", _NH, 3), ("ssm_f_a", _HD, 4), ("ssm_g_a", _HD, 5),
+    ):
+        expected = torch.from_numpy(_pack_q8_0(_q8_vals(rows, _H, tag)))
+        assert torch.equal(fused[row:row + rows], expected), f"slot {suffix} out of order"
+        row += rows
+    assert row == fused.shape[0]
+
+
+def test_iter_gguf_weights_conv1d_channel_order(glm5next_iter_gguf):
+    out = _iter_params(glm5next_iter_gguf)
+    fused = out["model.layers.0.self_attn.conv1d.weight"]
+    # q|k|v conv pieces F32 in the gguf, cat on the channel axis, bf16 out.
+    assert fused.dtype == torch.bfloat16
+    assert fused.shape == (3 * _PROJ, 1, _CONV)
+    for i, tag in enumerate((1.0, 2.0, 3.0)):
+        assert torch.equal(
+            fused[i * _PROJ:(i + 1) * _PROJ],
+            torch.full((_PROJ, 1, _CONV), tag).to(torch.bfloat16),
+        ), f"conv slot {i} out of order"
+
+
+def test_iter_gguf_weights_kv_b_axis_convention(glm5next_iter_gguf):
+    out = _iter_params(glm5next_iter_gguf)
+    fused = out["model.layers.2.self_attn.kv_b_proj.weight"]
+    # attn_k_b stores [head, kv_lora, qk] and fuses with the last-two-axes transpose;
+    # attn_v_b stores [head, v_head, kv_lora] as-is; per head the rows are
+    # [k(qk); v(v_head)] over kv_lora (attention.py takes w[:, :qk] = w_uk).
+    assert fused.dtype == torch.bfloat16
+    assert fused.shape == (_NH * (_QK + _VD), _KL)
+    expected = torch.empty(_NH * (_QK + _VD), _KL, dtype=torch.bfloat16)
+    for h in range(_NH):
+        k_rows = h * (_QK + _VD) + torch.arange(_QK)
+        expected[k_rows] = (torch.arange(_KL) + h * _KL).to(torch.bfloat16)
+        v_rows = h * (_QK + _VD) + _QK + torch.arange(_VD)
+        expected[v_rows] = (torch.arange(-128, -128 + _VD) + h * _KL).unsqueeze(1).to(torch.bfloat16)
+    assert torch.equal(fused, expected)
+
+
+def test_iter_gguf_weights_a_log_dt_bias_and_underscore_params(glm5next_iter_gguf):
+    out = _iter_params(glm5next_iter_gguf)
+    a_log = out["model.layers.1.self_attn.A_log"]
+    assert a_log.dtype == torch.float32 and a_log.shape == (_NH,)
+    torch.testing.assert_close(a_log, torch.from_numpy(_SSM_A_TRUE), rtol=1e-6, atol=1e-7)
+    # round trip: the gguf stores -exp(A_log); log(-x) must invert it in fp32
+    torch.testing.assert_close(
+        -torch.exp(a_log), torch.from_numpy(-np.exp(_SSM_A_TRUE)), rtol=1e-6, atol=1e-7
+    )
+    # ssm_dt ships as a .bias tensor but maps to the plain dt_bias param, fp32
+    dt = out["model.layers.1.self_attn.dt_bias"]
+    assert dt.dtype == torch.float32
+    torch.testing.assert_close(
+        dt, torch.arange(_PROJ, dtype=torch.float32) / 16 - 4, rtol=0, atol=0
+    )
+    # indexer_compressor_* underscore spellings map to the raw (no .weight) params
+    gate = out["model.layers.2.self_attn.indexer.index_kpool_compress_gate"]
+    ape = out["model.layers.2.self_attn.indexer.index_kpool_compress_ape"]
+    assert gate.dtype == torch.bfloat16 and gate.shape == (_IDXD, _H)
+    assert ape.dtype == torch.float32 and ape.shape == (_KPOOL, _IDXD)
+
+
+@pytest.mark.parametrize(
+    ("bogus", "match"),
+    [
+        ("blk.1.mystery.weight", r"unmapped glm5next GGUF tensor: blk\.1\.mystery\.weight"),
+        ("mystery.weight", r"unmapped glm5next GGUF tensor: mystery\.weight"),
+    ],
+)
+def test_iter_gguf_weights_unknown_tensor_names_the_tensor(tmp_path, bogus, match):
+    ts = _iter_tensor_set()
+    ts[bogus] = (np.full(_H, 0.25, np.float32), None)
+    path = _write_iter_gguf(tmp_path / "unknown.gguf", tensors=ts)
+    with pytest.raises(ValueError, match=match):
+        _iter_params(path)
+
+
+def test_iter_gguf_weights_a_log_guard_rejects_nonnegative_ssm_a(tmp_path):
+    # ssm_a holds -exp(A_log) per head; a >= 0 entry cannot yield a real A_log.
+    ts = _iter_tensor_set()
+    ts["blk.0.ssm_a"] = (np.array([-1.0, -2.0, 0.5, -0.5], np.float32), None)
+    path = _write_iter_gguf(tmp_path / "bad-a-log.gguf", tensors=ts)
+    with pytest.raises(ValueError, match=r"blk\.0\.ssm_a: ssm_a holds -exp\(A_log\) but 1 entries are >= 0"):
+        _iter_params(path)
+
+
+@pytest.mark.parametrize(
+    ("drop", "match"),
+    [
+        ("blk.1.ssm_g_a.weight", r"incomplete in_proj groups \[\(1, \['b', 'f_a', 'k', 'q', 'v'\]\)\]"),
+        ("blk.1.ssm_conv1d_v.weight", r"incomplete conv1d groups \[\(1, \['k', 'q'\]\)\]"),
+        ("blk.2.attn_v_b.weight", r"incomplete kv_b groups \[\(2, \['k'\]\)\]"),
+    ],
+)
+def test_iter_gguf_weights_incomplete_fusion_group_fails_at_end_of_stream(tmp_path, drop, match):
+    # The implementation buffers fusion pieces and checks completeness when the
+    # generator is exhausted: a ValueError listing the layer and the slots that
+    # arrived (a bare assert would vanish under python -O and yield a partial set).
+    ts = _iter_tensor_set()
+    del ts[drop]
+    path = _write_iter_gguf(tmp_path / "incomplete.gguf", tensors=ts)
+    with pytest.raises(ValueError, match=match):
+        _iter_params(path)
+
+
+def test_iter_gguf_weights_kda_piece_on_a_dsa_layer_fails_at_end_of_stream(tmp_path):
+    # _IN_PROJ_SLOTS is consulted before the layer-class tables, so a KDA-only
+    # suffix on a DSA layer buffers silently and can only fail at end of stream.
+    ts = _iter_tensor_set()
+    ts["blk.2.attn_q.weight"] = ts["blk.0.attn_q.weight"]
+    path = _write_iter_gguf(tmp_path / "kda-on-dsa.gguf", tensors=ts)
+    with pytest.raises(ValueError, match=r"incomplete in_proj groups \[\(2, \['q'\]\)\]"):
+        _iter_params(path)
+
+
+def test_iter_gguf_weights_mixed_row_bytes_in_proj_rejected(tmp_path):
+    # F8 guard: the packed concat needs uniform row_bytes; an F16 ssm_beta among
+    # Q8_0 pieces must fail loudly, not inside torch.cat with a tensor-less error.
+    ts = _iter_tensor_set()
+    ts["blk.1.ssm_beta.weight"] = (np.full((_NH, _H), 0.5, np.float16), None)
+    path = _write_iter_gguf(tmp_path / "mixed-rb.gguf", tensors=ts)
+    with pytest.raises(ValueError, match=r"layer 1 in_proj pieces mix row_bytes"):
+        _iter_params(path)
+
+
+def test_iter_gguf_expert_sources_yields_moe_banks_verbatim(glm5next_iter_gguf):
+    import gguf as gguf_mod
+    from freetoken.models.glm5_next import iter_gguf_expert_sources
+
+    path = glm5next_iter_gguf
+    entries = list(iter_gguf_expert_sources(path, _parse(path)))
+    # one entry per MoE trunk layer, in stream order; the dense layer has no banks
+    # and blk.3 (MTP) is outside the trunk
+    assert [layer for layer, _ in entries] == list(_MOE_ITER_LAYERS)
+    for layer, slots in entries:
+        assert set(slots) == {"gate", "up", "down"}
+        gate, up, down = slots["gate"], slots["up"], slots["down"]
+        assert gate.shape == (_NE, _EFF, _H) and up.shape == (_NE, _EFF, _H)
+        assert down.shape == (_NE, _H, _EFF)
+        # ggml type rides untouched: gate/up Q8_0, down Q6_K superblocks
+        assert gate.ggml_type == int(gguf_mod.GGMLQuantizationType.Q8_0)
+        assert down.ggml_type == int(gguf_mod.GGMLQuantizationType.Q6_K)
+        # packed() is the stacked bank: rows run expert-major within the bank, so a
+        # dim-0 slice IS one expert's contiguous packed rows (no repack, no dequant).
+        assert gate.packed().shape == (_NE * _EFF, _H // 32 * 34)
+        assert down.packed().shape == (_H * _NE, 210)
+        gate_bytes = gate.packed()
+        up_bytes = up.packed()
+        for e in range(_NE):
+            want_gate = torch.from_numpy(_pack_q8_0(_bank_vals(0)[e:e + 1])).reshape(_EFF, -1)
+            assert torch.equal(gate_bytes[e * _EFF:(e + 1) * _EFF], want_gate), (layer, e)
+            want_up = torch.from_numpy(_pack_q8_0(_bank_vals(7)[e:e + 1])).reshape(_EFF, -1)
+            assert torch.equal(up_bytes[e * _EFF:(e + 1) * _EFF], want_up), (layer, e)
+        assert torch.equal(
+            down.packed(), torch.from_numpy(_DOWN_BANK_BYTES.reshape(_H * _NE, 210))
+        )
+
+
+def test_iter_gguf_expert_sources_incomplete_bank_group_fails(tmp_path):
+    ts = _iter_tensor_set()
+    del ts["blk.2.ffn_down_exps.weight"]
+    path = _write_iter_gguf(tmp_path / "bankless.gguf", tensors=ts)
+    from freetoken.models.glm5_next import iter_gguf_expert_sources
+
+    with pytest.raises(ValueError, match=r"incomplete expert bank groups \[\(2, \['gate', 'up'\]\)\]"):
+        list(iter_gguf_expert_sources(path, _parse(path)))
+
+
+def test_iter_gguf_expert_sources_reject_bank_on_dense_layer(tmp_path):
+    # a bank under leading_dense_block_count is a corrupt file; dropping it silently
+    # would desync the bank count the offload cache allocates.
+    ts = _iter_tensor_set()
+    ts["blk.0.ffn_down_exps.weight"] = ts["blk.1.ffn_down_exps.weight"]
+    path = _write_iter_gguf(tmp_path / "dense-bank.gguf", tensors=ts)
+    from freetoken.models.glm5_next import iter_gguf_expert_sources
+
+    with pytest.raises(ValueError, match=r"ffn_down_exps.weight on dense layer 0"):
+        list(iter_gguf_expert_sources(path, _parse(path)))
+
+
+def test_iter_gguf_weights_rejects_tp_gt_1(glm5next_iter_gguf, monkeypatch):
+    # the loader emits full fused tensors; TP sharding is not implemented, same
+    # status as the HF reader (weight.py raises the same NotImplementedError).
+    from freetoken.models.glm5_next import iter_gguf_weights
+
+    class _TwoRank:
+        size = 2
+
+        def is_primary(self):
+            return True
+
+    monkeypatch.setattr("freetoken.distributed.get_tp_info", lambda: _TwoRank())
+    with pytest.raises(NotImplementedError, match="supports TP=1 only"):
+        list(
+            iter_gguf_weights(
+                glm5next_iter_gguf, None, include_moe_experts=False, include_non_moe=True
+            )
+        )
+
+
+def test_dequant_q8_0_reference_matches_handcrafted_blocks():
+    from freetoken.models.gguf.dequant import GGML_Q8_0, dequant_q8_0, dequantize
+
+    # handcrafted block: fp16 scale 0.5 + 32 int8 quants -> w = d * q
+    q = np.array([127, -128, 1, -1, 0, 42, -42, 7] + [0] * 24, dtype=np.int8)
+    raw = np.concatenate([np.array([0.5], np.float16).view(np.uint8), q.view(np.uint8)])
+    out = dequant_q8_0(torch.from_numpy(raw.copy()), torch.float32)
+    torch.testing.assert_close(out, torch.from_numpy(q.astype(np.float32) * np.float32(0.5)))
+
+    # multi-block: expected values recomputed by an independent numpy decode
+    rng = np.random.default_rng(11)
+    n = 7
+    scales = rng.uniform(-3, 3, n).astype(np.float16)
+    quants = rng.integers(-128, 128, (n, 32)).astype(np.int8)
+    raw = np.zeros((n, 34), np.uint8)
+    raw[:, 0:2] = scales.view(np.uint8).reshape(n, 2)
+    raw[:, 2:34] = quants.view(np.uint8)
+    ref = quants.astype(np.float32) * scales.astype(np.float32).reshape(n, 1)
+    out = dequant_q8_0(torch.from_numpy(raw), torch.float32).reshape(n, 32)
+    torch.testing.assert_close(out, torch.from_numpy(ref))
+    # dequantize dispatch + bf16 cast agree with the fp32 reference rounded once
+    bf = dequantize(torch.from_numpy(raw.reshape(-1)), GGML_Q8_0, torch.bfloat16).reshape(n, 32)
+    assert torch.equal(bf, torch.from_numpy(ref).to(torch.bfloat16))
