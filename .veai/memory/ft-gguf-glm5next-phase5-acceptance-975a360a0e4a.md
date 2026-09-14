@@ -3,7 +3,7 @@ name: "ft-gguf-glm5next-phase5-acceptance"
 description: "GGUF glm5next: Phases 1-6 committed through 028f2d9; digit-split fixed (battery 6/6); sizing+prefetch waves in flight"
 type: project
 lastUpdated: 2026-09-14T19:10
-lastRecall: 2026-09-14T20:27
+lastRecall: 2026-09-14T22:47
 ---
 
 # GGUF glm5next: Phase 5 acceptance + Phase 6 closure + post-campaign fixes (2026-09-14)

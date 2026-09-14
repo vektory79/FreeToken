@@ -3,7 +3,7 @@ name: "ft-serve-prefill-overlap-512k-infeasible"
 description: "prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions"
 type: project
 lastUpdated: 2026-09-14T11:48
-lastRecall: 2026-09-14T18:54
+lastRecall: 2026-09-14T22:05
 ---
 
 # ft serve --moe-prefill-overlap: slot-floor incompatibility with big KV (GLM-5.3, RTX 5090)

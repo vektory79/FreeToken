@@ -3,7 +3,7 @@ name: "ft-serve-gguf-glm5next-unsupported"
 description: "GGUF glm5next: CAMPAIGN COMPLETE - 6 commits, all quality defects closed, production-usable"
 type: project
 lastUpdated: 2026-09-14T20:31
-lastRecall: 2026-09-14T20:27
+lastRecall: 2026-09-14T20:38
 ---
 
 # GGUF glm5next (Path A): phase tracker - see PLAN.md for the full record

@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-test-fixture-crafting"
-description: "Crafting synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets, bounded fp16 scales, Q6_K d-last"
+description: "Synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets; analytic uniform fixtures catch what parity cannot"
 type: project
-lastUpdated: 2026-09-13T23:19
-lastRecall: 2026-09-14T19:30
+lastUpdated: 2026-09-14T22:05
+lastRecall: 2026-09-14T22:47
 ---
 
 # Crafting synthetic gguf quant tensors in FreeToken tests
@@ -19,3 +19,6 @@ Gotchas collected while building the glm5next GGUF test fixtures (tests/models/t
 
 Why: these fixtures gate the CUDA kernel parity battery and the offload bank path; a fixture that hides geometry produces green tests over broken code.
 How to apply: any new test crafting quantized gguf tensors or expert banks - reuse the existing helpers (_write_tokenizer_gguf / iter-fixture patterns) and keep the non-square + multi-signature rule.
+
+## Analytic-uniform fixtures beat parity (2026-09-15, hybrid campaign Task 01)
+Analytic uniform fixtures (exact expected values computed independently) catch fixture/packer-semantics bugs that parity-vs-reference CANNOT: same wrong bytes on both sides cancel out. In tests/moe/test_cpu_moe_gguf_iq.py the analytic test caught the IQ3_XXS scale nibble broadcast into the summed sign lanes (4x nibble) which the parity test missed by construction. Always pair parity-vs-gguf-py with an analytic uniform test.
