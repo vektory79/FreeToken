@@ -28,8 +28,9 @@ _QUANT_TO_BENCH_FORMAT = {
     "mxfp4": "mxfp4_triton",
     "bf16": "bf16",
     "fp8_block": "fp8_block",
-    # glm5next native GGUF: offload-only (no CPU MoE weight path, so it can never
-    # resolve to hybrid; engine.py also excludes it from the auto->hybrid upgrade).
+    # glm5next native GGUF: the bench measures a CPU MoE leg for it now (the gguf
+    # K-quant GEMV), but engine.py excludes gguf from the auto->hybrid upgrade, so a
+    # "hybrid" verdict in the profile alone cannot flip serving.
     "gguf": "gguf",
 }
 

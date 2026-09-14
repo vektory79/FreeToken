@@ -131,8 +131,9 @@ def test_hybrid_fixed_cap_unchanged():
 def test_benchbw_gguf_profile_sanity(monkeypatch, tmp_path):
     # The "gguf" bench row: the workload constructs (glm5.3-flash geometry), the bank
     # specs yield the three stacked projections at the exact offload_cache widths, the
-    # profile reader resolves the format through the identity mapping, and the bench's
-    # CPU-MoE section skips (no CPU weight path) so the verdict is always offload.
+    # profile reader resolves the format through the identity mapping, and the CPU-MoE
+    # leg RUNS (the gguf K-quant GEMV rides the executor's "gguf" alias), so the
+    # verdict follows the measured CPU-vs-PCIe pair instead of being pinned to offload.
     import json
 
     from freetoken.moe import benchbw
@@ -165,18 +166,86 @@ def test_benchbw_gguf_profile_sanity(monkeypatch, tmp_path):
     assert load_backend_recommendation("gguf", path=str(path)) == "offload"
     assert load_hybrid_fetch_fraction("gguf", path=str(path)) == pytest.approx(0.4)
 
-    # the bench itself: the CPU-MoE section skips (gguf not in _CPU_MOE_FORMATS), so the
-    # verdict is offload even when the PCIe gather side would look slow
-    assert "gguf" not in benchbw._CPU_MOE_FORMATS
+    # the bench itself: the CPU leg runs for the gguf alias (and the concrete family
+    # types + q4_0), so the verdict comes from recommend() over the measured pair and
+    # the contended pair sets the fetch split. Legs mocked -> unit-level.
+    assert {"gguf", "iq3_xxs", "iq4_xs", "q6_k", "q4_0"} <= benchbw._CPU_MOE_FORMATS
     eb = benchbw._expert_bytes("gguf", wl.hidden, wl.inter)
     monkeypatch.setattr(
         benchbw, "measure_pcie_gather_bw",
         lambda *a, **k: {"bw_gbs": 40.0, "expert_bytes": eb, "synth_experts": 160, "fused": True},
     )
+    monkeypatch.setattr(
+        benchbw, "measure_cpu_moe_bw",
+        lambda *a, **k: {"bw_gbs": 100.0, "isa": "scalar", "isa_sweep": {"scalar": 100.0},
+                         "expert_bytes": eb, "synth_experts": 160},
+    )
+    monkeypatch.setattr(
+        benchbw, "measure_overlap_bw",
+        lambda *a, **k: {"cpu_gbs": 90.0, "pcie_gbs": 30.0},
+    )
     entry = benchbw._bench_format(
         "gguf", wl, torch.device("cuda"), threshold=1.0, cpu_threads=0, cpu_iters=1, pcie_iters=1
+    )
+    assert entry["recommended"] == "hybrid"
+    assert entry["cpu_moe_gbs"] == 100.0 and entry["cpu_moe_isa"] == "scalar"
+    assert entry["ratio"] == 2.5 and entry["pcie_gather_gbs"] == 40.0
+    assert entry["cpu_moe_overlap_gbs"] == 90.0 and entry["pcie_gather_overlap_gbs"] == 30.0
+
+    # the fetch split the engine consults (load_hybrid_fetch_fraction): the contended
+    # pair, strictly inside (0, 1)
+    kernels_path = tmp_path / "kernels.json"
+    kernels_path.write_text(json.dumps({"gpu": {"name": "FAKE GPU"}, "dtype_kernels": {"gguf": entry}}))
+    frac = load_hybrid_fetch_fraction("gguf", path=str(kernels_path))
+    assert 0.0 < frac < 1.0
+    assert frac == pytest.approx(30.0 / (30.0 + 90.0))
+
+
+def test_benchbw_non_cpu_capable_profile_stays_offload(monkeypatch):
+    # fp8_block has no CPU MoE weight path: the CPU leg is skipped and the verdict is
+    # offload no matter how slow the PCIe gather looks (threshold 1.0 here) -- the
+    # gguf flip must not loosen the not-CPU-capable branch.
+    from freetoken.moe import benchbw
+
+    assert "fp8_block" not in benchbw._CPU_MOE_FORMATS
+    wl = benchbw.DTYPE_WORKLOADS["fp8_block"]
+    eb = benchbw._expert_bytes("fp8_block", wl.hidden, wl.inter)
+    monkeypatch.setattr(
+        benchbw, "measure_pcie_gather_bw",
+        lambda *a, **k: {"bw_gbs": 40.0, "expert_bytes": eb, "synth_experts": 160, "fused": True},
+    )
+    entry = benchbw._bench_format(
+        "fp8_block", wl, torch.device("cuda"), threshold=1.0, cpu_threads=0, cpu_iters=1, pcie_iters=1
     )
     assert entry["recommended"] == "offload"
     assert entry["cpu_moe_gbs"] is None and entry["cpu_moe_isa"] is None
     assert entry["ratio"] is None and entry["pcie_gather_gbs"] == 40.0
-    assert "CPU MoE has no gguf weight path" in entry["note"]
+    assert "CPU MoE has no fp8_block weight path" in entry["note"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_benchbw_gguf_banks_build_the_executor(monkeypatch):
+    # The bench's synthetic gguf banks + cache stub construct a real CpuMoeExecutor
+    # end to end: the stub's gguf_types triple resolves the "gguf" alias and the
+    # per-role bank shapes satisfy _resolve_gguf_banks at the exact offload widths.
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_IQ3_XXS, GGML_Q6_K
+    from freetoken.moe import benchbw
+
+    wl = benchbw.DTYPE_WORKLOADS["gguf"]
+    H, I = wl.hidden, wl.inter
+    assert BLOCK_SHAPE[GGML_IQ3_XXS] == (256, 98) and BLOCK_SHAPE[GGML_Q6_K] == (256, 210)
+    # shrink the synthetic expert count so the pinned banks stay small in a unit test
+    monkeypatch.setattr(benchbw, "_SYNTH_BANK_BUDGET", 64 << 20)
+    E = benchbw._synth_experts(wl.experts, benchbw._expert_bytes("gguf", H, I))
+    assert 0 < E < wl.experts
+    banks = benchbw._cpu_moe_bank_sources("gguf", H, I, E)
+    assert tuple(banks) == ("gate", "up", "down")
+    assert banks["gate"].shape == (E, I, (H // 256) * 98)  # IQ3_XXS rows over K = H
+    assert banks["up"].shape == (E, I, (H // 256) * 98)
+    assert banks["down"].shape == (E, H, (I // 256) * 210)  # Q6_K rows over K = I
+    # the CPU leg reads exactly the bytes the gather leg's _offload_bank_specs sums
+    assert sum(int(t.numel()) for t in banks.values()) == E * benchbw._expert_bytes("gguf", H, I)
+
+    ex = benchbw._build_cpu_moe_executor("gguf", wl, banks, num_threads=2, E=E)
+    assert (ex.quant_format, ex.fmt_up, ex.fmt_down) == ("iq3_xxs", "iq3_xxs", "q6_k")
+    assert (ex.H, ex.I, ex.num_experts) == (H, I, E)
