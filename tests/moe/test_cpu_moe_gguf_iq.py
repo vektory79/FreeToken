@@ -11,8 +11,8 @@ tight rel check, which is the real decode-bug discriminator (the CPU chain is fp
 far inside the bound).
 
 Covers the per-projection requirement: the three projections of one layer may have
-DIFFERENT types (the real glm5next file: gate/up IQ3_XXS + down IQ4_XS, i.e. the
-(18, 18, 23) signature).
+DIFFERENT types (the real glm5next file packs (18, 18, 23) / (18, 18, 14) /
+(23, 23, 14) across its layers).
 """
 
 from __future__ import annotations
@@ -247,7 +247,7 @@ def _dfloat_bound(ref, extras, w, ids, hidden, factor_gu, factor_dn, dmax=2.0):
     return bound + 2.0**-8 * ref.abs() + 1e-3
 
 
-def _run_executor(cache, top_k, bs, H, dev, seed, layer=0, x_scale=0.5):
+def _run_executor(cache, top_k, bs, H, dev, seed, layer=0, x_scale=0.5, ids=None):
     from freetoken.moe.cpu_executor import CpuMoeExecutor
 
     ex = CpuMoeExecutor(
@@ -261,9 +261,10 @@ def _run_executor(cache, top_k, bs, H, dev, seed, layer=0, x_scale=0.5):
     )
     gen = torch.Generator().manual_seed(seed)
     hidden = (torch.randn(bs, H, generator=gen) * x_scale).to(torch.bfloat16)
-    ids = torch.stack(
-        [torch.randperm(cache.num_experts, generator=gen)[:top_k] for _ in range(bs)]
-    ).to(torch.int32)
+    if ids is None:
+        ids = torch.stack(
+            [torch.randperm(cache.num_experts, generator=gen)[:top_k] for _ in range(bs)]
+        ).to(torch.int32)
     w = torch.rand(bs, top_k, generator=gen)
     cpu_out = ex.decode(layer, hidden.to(dev), w.to(dev), ids.to(dev)).float()
     torch.cuda.synchronize()
@@ -324,14 +325,27 @@ def test_cpu_moe_gguf_uniform_analytic(qtype):
     assert rel < 5e-3, f"{_TYPE_NAMES[qtype]} analytic rel err {rel.item()} (w={value})"
 
 
-def test_cpu_moe_gguf_per_projection_formats():
-    """The real glm5next signature in one layer: gate/up IQ3_XXS + down IQ4_XS
-    (gguf types 18/18/23). The three projections take DIFFERENT formats and the
-    geometry is asymmetric (gate/up rows = I over K = H; down rows = H over K = I);
-    ids may carry -1 (hybrid GPU-routes), which the C++ skips."""
+# The three real glm5next per-projection signatures (gate, up, down): the three
+# projections may differ within one layer; the fixtures support all these types.
+_GLM5NEXT_SIGNATURES = (
+    (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ4_XS),
+    (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_Q6_K),
+    (GGML_IQ4_XS, GGML_IQ4_XS, GGML_Q6_K),
+)
+
+
+@pytest.mark.parametrize(
+    "types",
+    _GLM5NEXT_SIGNATURES,
+    ids=["-".join(_TYPE_NAMES[t] for t in sig) for sig in _GLM5NEXT_SIGNATURES],
+)
+def test_cpu_moe_gguf_per_projection_formats(types):
+    """The real glm5next per-projection signatures: the three projections of one
+    layer take DIFFERENT formats and the geometry is asymmetric (gate/up rows = I
+    over K = H; down rows = H over K = I); ids may carry -1 (hybrid GPU-routes),
+    which the C++ skips."""
     bs, top_k, L, E, H, I = 2, 3, 2, 8, 512, 256
     dev = torch.device("cuda")
-    types = (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ4_XS)
     cache = _make_gguf_cache(types, L, E, H, I, seed=7)
 
     from freetoken.moe.cpu_executor import CpuMoeExecutor
@@ -345,8 +359,8 @@ def test_cpu_moe_gguf_per_projection_formats():
         max_tokens=bs,
         device=dev,
     )
-    assert ex.quant_format == "iq3_xxs"
-    assert ex.fmt_up == "iq3_xxs" and ex.fmt_down == "iq4_xs"
+    assert ex.quant_format == _TYPE_NAMES[types[0]]
+    assert ex.fmt_up == _TYPE_NAMES[types[1]] and ex.fmt_down == _TYPE_NAMES[types[2]]
 
     gen = torch.Generator().manual_seed(11)
     hidden = (torch.randn(bs, H, generator=gen) * 0.5).to(torch.bfloat16)
@@ -364,11 +378,64 @@ def test_cpu_moe_gguf_per_projection_formats():
     assert rel < 2e-2, f"per-projection rel err {rel.item()}"
 
     bound = _dfloat_bound(
-        ref, extras, w, ids, hidden, _DEQUANT_FACTOR[GGML_IQ3_XXS], _DEQUANT_FACTOR[GGML_IQ4_XS]
+        ref, extras, w, ids, hidden, _DEQUANT_FACTOR[types[0]], _DEQUANT_FACTOR[types[2]]
     )
     dev_abs = (cpu_out - ref).abs()
     assert (dev_abs <= bound).all(), (
         f"per-projection: max abs dev {dev_abs.max():.6g} exceeds the propagated "
+        f"dfloat bound {bound.max():.6g}; {int((dev_abs > bound).sum())} elements outside"
+    )
+
+
+@pytest.mark.parametrize(
+    "qtype", (GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K), ids=["iq3_xxs", "iq4_xs", "q6_k"]
+)
+def test_cpu_moe_gguf_all_skipped_ids_yield_exact_zeros(qtype):
+    """All-(-1) topk ids (every lane hybrid GPU-routed): the C++ pass 2 writes y
+    unconditionally with acc = 0 for skipped lanes, so every row must be EXACTLY
+    zero. Pins the hybrid merge invariant against NaN/garbage leaking into the
+    merge output."""
+    bs, top_k, L, E, H, I = 2, 3, 1, 4, 512, 256
+    dev = torch.device("cuda")
+    cache = _make_gguf_cache((qtype, qtype, qtype), L, E, H, I, seed=5)
+    ids = torch.full((bs, top_k), -1, dtype=torch.int32)
+    _, cpu_out, _, _, _ = _run_executor(cache, top_k, bs, H, dev, seed=13, ids=ids)
+    assert (cpu_out == 0).all(), (
+        f"{_TYPE_NAMES[qtype]}: all-skipped rows must be exactly zero, got max |y| "
+        f"{cpu_out.abs().max().item()}"
+    )
+
+
+def test_cpu_moe_gguf_out_of_range_expert_is_skipped():
+    """An out-of-range expert id (>= num_experts, as a corrupted router could emit)
+    alongside valid ones must be skipped like a -1 lane (the C++ guard bounds e by
+    the configured num_experts; skipped lanes ignore their weight) without
+    corrupting the other rows or lanes."""
+    bs, top_k, L, E, H, I = 2, 3, 1, 8, 512, 256
+    dev = torch.device("cuda")
+    types = (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ4_XS)
+    cache = _make_gguf_cache(types, L, E, H, I, seed=21)
+
+    gen = torch.Generator().manual_seed(23)
+    ids = torch.stack([torch.randperm(E, generator=gen)[:top_k] for _ in range(bs)]).to(
+        torch.int32
+    )
+    ids[0, 0] = E  # out of range: must be skipped, never dereferenced
+    _, cpu_out, hidden, w, _ = _run_executor(cache, top_k, bs, H, dev, seed=23, ids=ids)
+
+    ref_ids = ids.clone()
+    ref_ids[0, 0] = -1  # the reference skips on e < 0; skipped lanes contribute 0
+    ref, extras = _reference_decode(cache.bank_sources, types, 0, hidden, w, ref_ids, top_k)
+    rel = (cpu_out - ref).abs().max() / (ref.abs().max() + 1e-6)
+    assert rel < 2e-2, f"out-of-range expert id rel err {rel.item()}"
+
+    bound = _dfloat_bound(
+        ref, extras, w, ref_ids, hidden,
+        _DEQUANT_FACTOR[GGML_IQ3_XXS], _DEQUANT_FACTOR[GGML_IQ4_XS],
+    )
+    dev_abs = (cpu_out - ref).abs()
+    assert (dev_abs <= bound).all(), (
+        f"out-of-range expert id: max abs dev {dev_abs.max():.6g} exceeds the propagated "
         f"dfloat bound {bound.max():.6g}; {int((dev_abs > bound).sum())} elements outside"
     )
 
@@ -388,7 +455,12 @@ if __name__ == "__main__":
         print(f"gguf cpu gemv parity {_TYPE_NAMES[qt]} OK")
         test_cpu_moe_gguf_uniform_analytic(qt)
         print(f"gguf cpu gemv analytic {_TYPE_NAMES[qt]} OK")
-    test_cpu_moe_gguf_per_projection_formats()
-    print("gguf cpu gemv per-projection OK")
+        test_cpu_moe_gguf_all_skipped_ids_yield_exact_zeros(qt)
+        print(f"gguf cpu gemv all-skipped zeros {_TYPE_NAMES[qt]} OK")
+    for sig in _GLM5NEXT_SIGNATURES:
+        test_cpu_moe_gguf_per_projection_formats(sig)
+        print(f"gguf cpu gemv per-projection {'-'.join(_TYPE_NAMES[t] for t in sig)} OK")
+    test_cpu_moe_gguf_out_of_range_expert_is_skipped()
+    print("gguf cpu gemv out-of-range skip OK")
     test_cpu_moe_gguf_unsupported_type_fails_loudly()
     print("gguf cpu gemv unsupported-type OK")

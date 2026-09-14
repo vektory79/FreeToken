@@ -95,16 +95,24 @@ _WFMT_GGUF_TYPES = {name: tid for tid, name in _GGUF_TYPE_FMTS.items()}
 def _split_gguf_formats(fmt: str, cache) -> tuple[str, str, str] | None:
     """Resolve the executor-level "gguf" alias into per-projection _WFMT_IDS names.
 
-    The gguf banks carry ONE (gate, up, down) type triple per signature partition
-    (``cache.gguf_types``, role-ordered, uniform across the partition's layers) and
-    the three projections may differ -- glm5next packs (18, 18, 23) / (18, 18, 14) /
-    (23, 23, 14). Returns None for non-gguf formats."""
+    The gguf banks carry ONE (gate, up, down) type triple per layer
+    (``cache.gguf_types[i]``, role-ordered), uniform within a signature partition;
+    this executor reads [0] and the uniformity check below fails loudly on any
+    diverging layer. The three projections may differ -- glm5next packs
+    (18, 18, 23) / (18, 18, 14) / (23, 23, 14). Returns None for non-gguf formats."""
     if fmt != "gguf":
         return None
     types = getattr(cache, "gguf_types", None)
     if not types:
         raise NotImplementedError(
             "gguf expert banks need cache.gguf_types to resolve the per-projection types"
+        )
+    diverging = [(i, t) for i, t in enumerate(types) if tuple(t) != tuple(types[0])]
+    if diverging:
+        raise NotImplementedError(
+            f"gguf expert bank types must be uniform within a partition "
+            f"({tuple(types[0])} at layer 0), but these layers diverge: "
+            f"{[(i, tuple(t)) for i, t in diverging]}"
         )
     try:
         return (
@@ -190,7 +198,8 @@ def resolve_threads_and_affinity(requested: int) -> tuple[int, list[int]]:
 
 class CpuMoeExecutor:
     """Decode-time CPU expert compute over an ``OffloadMoeCache``'s host banks
-    (bf16, nvfp4, mxfp4_triton, ds_fp4 or q4_0 — see ``_WFMT_IDS`` / ``_resolve_banks``)."""
+    (bf16, nvfp4, mxfp4_triton, ds_fp4, q4_0 or the gguf K-quant family -
+    see ``_WFMT_IDS`` / ``_resolve_banks``)."""
 
     def __init__(
         self,
@@ -218,10 +227,12 @@ class CpuMoeExecutor:
         if role_fmts is not None:
             fmt, fmt_up_name, fmt_down_name = role_fmts
         if fmt not in _WFMT_IDS or fmt_up_name not in _WFMT_IDS or fmt_down_name not in _WFMT_IDS:
+            # "gguf" stays out of the list: it is the -1 dispatch sentinel, not a format.
             raise NotImplementedError(
                 f"--moe-strategy cpu/hybrid computes experts on the CPU and supports "
-                f"{sorted(_WFMT_IDS)} formats, but this checkpoint's experts are "
-                f"{fmt!r}; use --moe-strategy offload (GPU-side dequant) instead."
+                f"{sorted(k for k in _WFMT_IDS if k != 'gguf')} formats, but this "
+                f"checkpoint's experts are {fmt!r}; use --moe-strategy offload "
+                f"(GPU-side dequant) instead."
             )
         if activation not in _ACT_IDS:
             raise NotImplementedError(f"CPU MoE backend: unsupported activation {activation!r}")
@@ -419,10 +430,22 @@ class CpuMoeExecutor:
             fmt_up = fmt
         if fmt_down is None:
             fmt_down = fmt
-        # The gguf partition is the only schema with three SEPARATE role banks
+        # The gguf family is the only schema with three SEPARATE role banks
         # (_BANK_SCHEMAS["gguf"] = ("gate", "up", "down")); its resolver is per-role.
-        if set(banks) == {"gate", "up", "down"}:
+        # Dispatch on the resolved format, not the role shape, so a format/roles
+        # mismatch raises instead of a bare KeyError deep in a legacy resolver.
+        if fmt in _WFMT_GGUF_TYPES:
+            if set(banks) != {"gate", "up", "down"}:
+                raise NotImplementedError(
+                    f"gguf CPU MoE format {fmt!r} expects separate gate/up/down "
+                    f"banks, got roles {sorted(banks)}"
+                )
             return self._resolve_gguf_banks(banks, fmt, fmt_up, fmt_down)
+        if set(banks) == {"gate", "up", "down"}:
+            raise NotImplementedError(
+                f"separate gate/up/down banks are the gguf family schema, but the "
+                f"resolved CPU MoE format is {fmt!r} (roles: {sorted(banks)})"
+            )
 
         if fmt == "bf16":
             gate_up = banks["gate_up"]
@@ -525,18 +548,29 @@ class CpuMoeExecutor:
                 raise NotImplementedError(
                     f"gguf CPU MoE requires uint8 {name} banks, got {bank[0].dtype}"
                 )
+            # The C++ skip guard bounds e by the CONFIGURED num_experts, not the
+            # bank's rows: a short bank would read out of bounds.
+            if int(bank[0].shape[0]) < self.num_experts:
+                raise NotImplementedError(
+                    f"gguf CPU MoE {name} bank has {int(bank[0].shape[0])} expert "
+                    f"rows but the cache declares num_experts={self.num_experts}"
+                )
         from freetoken.models.gguf.dequant import BLOCK_SHAPE
 
-        def row_bytes(fmt_name: str) -> int:
+        def block_bytes(fmt_name: str) -> int:
             return BLOCK_SHAPE[_WFMT_GGUF_TYPES[fmt_name]][1]
 
+        rb = block_bytes(fmt)
+        # Exact block-multiple check BEFORE deriving H: H is floor-derived below,
+        # so a post-hoc H % 256 assert would be vacuous.
+        assert int(gate[0].shape[2]) % rb == 0, (int(gate[0].shape[2]), rb, fmt)
         I = int(gate[0].shape[1])
-        H = (int(gate[0].shape[2]) // row_bytes(fmt)) * 256
-        assert H % 256 == 0 and I % 256 == 0, (H, I)
-        assert up[0].shape[1] == I and int(up[0].shape[2]) == (H // 256) * row_bytes(fmt_up), (
+        H = (int(gate[0].shape[2]) // rb) * 256
+        assert I % 256 == 0, (H, I)
+        assert up[0].shape[1] == I and int(up[0].shape[2]) == (H // 256) * block_bytes(fmt_up), (
             up[0].shape, I, H, fmt_up,
         )
-        assert down[0].shape[1] == H and int(down[0].shape[2]) == (I // 256) * row_bytes(fmt_down), (
+        assert down[0].shape[1] == H and int(down[0].shape[2]) == (I // 256) * block_bytes(fmt_down), (
             down[0].shape, H, I, fmt_down,
         )
         ptrs = dict(

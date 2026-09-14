@@ -1363,9 +1363,10 @@ float iq3_xxs_dot_scalar(const uint8_t* row, const bf16_t* x, int K) {
     const uint8_t* blk = row + (size_t)b * 98;
     const float d0 = fp16_to_f32(load_u16le(blk));
     const uint8_t* qs = blk + 2;  // 96
-    const uint16_t* gas = reinterpret_cast<const uint16_t*>(qs + 64);
+    const uint8_t* gas = qs + 64;  // 8 uint32 scale words
     for (int ib = 0; ib < 8; ++ib) {
-      const uint32_t aux32 = (uint32_t)gas[2 * ib] | ((uint32_t)gas[2 * ib + 1] << 16);
+      const uint32_t aux32 = (uint32_t)load_u16le(gas + 4 * ib) |
+                             ((uint32_t)load_u16le(gas + 4 * ib + 2) << 16);
       const float d = d0 * (0.5f + (float)(aux32 >> 28)) * 0.5f;
       const uint8_t* q3 = qs + 8 * ib;
       const bf16_t* xb = x + (size_t)b * 256 + 32 * ib;
