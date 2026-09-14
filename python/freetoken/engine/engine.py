@@ -993,6 +993,7 @@ class Engine:
         """
         from freetoken.moe.cpu_executor import CpuMoeExecutor, resolve_pool_affinities
 
+        # borrows hyperparams/fmt for all partitions: flat formats are single-group; gguf types are per-cache.
         sample = layers[0]
         required = ("top_k", "activation", "apply_router_weight_on_input")
         if not all(hasattr(sample, attr) for attr in required):
