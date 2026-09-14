@@ -97,11 +97,12 @@ _BANK_BYTES_PER_EXPERT = {
     "nvfp4": lambda H, I: 2 * I * (H // 2 + H // 16 + 2) + H * (I // 2 + I // 16 + 2),
     "mxfp4": lambda H, I: 2 * I * (H // 2 + H // 32 + 2) + H * (I // 2 + I // 32 + 2),
     "ds_fp4": lambda H, I: 2 * I * (H // 2 + H // 32) + H * (I // 2 + I // 32),
-    # glm5next gguf banks: per-role EXTREMES - gate/up at the IQ3_XXS width (the
-    # narrowest real gate/up type) and down at the Q6_K width (the widest down
-    # type). Conservative only in aggregate: against the dominant (18, 18, 23) mix
-    # it overstates the down bank on 39 of 42 layers. Exact per-layer sizing
-    # happens at load from the bank record's gguf_types.
+    # gguf banks: the estimate's no-path fallback. Per-role EXTREMES - gate/up at
+    # the IQ3_XXS width (the narrowest real gate/up type) and down at the Q6_K width
+    # (the widest down type) - so no row class is undersized; conservative only in
+    # aggregate against the real per-layer IQ3_XXS/IQ4_XS/Q6_K mix. Superseded by
+    # bank_bytes_estimate's exact header scan whenever the gguf path is known;
+    # per-layer exactness at load still comes from the bank gguf_types.
     "gguf": lambda H, I: 2 * I * (H // 256) * 98 + H * (I // 256) * 210,
 }
 

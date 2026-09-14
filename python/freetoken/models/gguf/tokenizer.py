@@ -10,16 +10,41 @@ from __future__ import annotations
 
 from typing import Any
 
+from tokenizers import Regex
+from tokenizers.pre_tokenizers import ByteLevel, Sequence, Split
 from transformers import AddedToken
 
 from .reader import gguf_architecture, load_gguf_metadata
 
 # GGUF architecture -> transformers GGUF tokenizer-converter key.
-# glm5next: the gguf declares tokenizer.ggml.model=gpt2 (pre=glm4); GGUFGPTConverter
-# is the plain-BPE structural match - qwen2's converter hardcodes qwen AddedTokens.
-# GGUFGPTConverter ignores the pre scheme entirely; the env-gated round-trip test
-# (FREETOKEN_GLM5NEXT_TOKENIZER_REF) judges the tokenization fidelity.
+# glm5next: the gguf declares tokenizer.ggml.model=gpt2; GGUFGPTConverter is the
+# plain-BPE structural match - qwen2's converter hardcodes qwen AddedTokens. The
+# converter attaches GPT-2 regex pre-tokenization, so load_gguf_tokenizer swaps in
+# the glm4 scheme (tokenizer.ggml.pre=glm4) for glm5next below; the env-gated
+# round-trip test (FREETOKEN_GLM5NEXT_TOKENIZER_REF) judges the fidelity.
 _TOKENIZER_ARCH = {"gemma4": "gemma4_text", "glm5next": "gpt2"}
+
+# glm4 pre-tokenization, ported verbatim from the reference pre_tokenizer
+# (RedHatAI GLM-5.3-Flash-NVFP4 tokenizer.json; the gguf declares pre=glm4).
+_GLM4_SPLIT_REGEX = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+    r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+    r"|\p{N}{1,3}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
+
+def _glm4_pre_tokenizer():
+    """The reference glm4 Sequence pre-tokenizer rebuilt natively (no ref file)."""
+    return Sequence(
+        [
+            Split(Regex(_GLM4_SPLIT_REGEX), behavior="isolated", invert=False),
+            ByteLevel(add_prefix_space=False, trim_offsets=True, use_regex=False),
+        ]
+    )
 
 
 def load_gguf_tokenizer(model_path: str):
@@ -35,6 +60,11 @@ def load_gguf_tokenizer(model_path: str):
         if k.startswith("tokenizer.ggml.")
     }
     fast, _extra = convert_gguf_tokenizer(conv_arch, tok_dict)
+
+    # glm5next only: the converter's GPT-2 regex glues the space onto digit runs
+    # ("Ġ100"); swap in the reference glm4 scheme so numerals survive encoding.
+    if arch == "glm5next":
+        fast.pre_tokenizer = _glm4_pre_tokenizer()
 
     tokens = tok_dict["tokens"]
 

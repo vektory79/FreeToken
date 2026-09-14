@@ -732,7 +732,9 @@ class Engine:
             budget = _pin_budget_bytes(self._host_tables_bytes)
             bank_bytes = None
             if budget is not None:
-                bank_bytes = ftw_bank_bytes(config.model_path) or bank_bytes_estimate(config.model_config, method)
+                bank_bytes = ftw_bank_bytes(config.model_path) or bank_bytes_estimate(
+                    config.model_config, method, model_path=config.model_path
+                )
             if bank_bytes and bank_bytes > budget:
                 split_residency = True
                 logger.info_rank0(
@@ -1464,7 +1466,9 @@ def _pin_budget_bytes(reserved: int = 0) -> int | None:
 def _bank_bytes(config: EngineConfig, method=None) -> int | None:
     from freetoken.moe.expert_banks import bank_bytes_estimate, ftw_bank_bytes
 
-    return ftw_bank_bytes(config.model_path) or bank_bytes_estimate(config.model_config, method)
+    return ftw_bank_bytes(config.model_path) or bank_bytes_estimate(
+        config.model_config, method, model_path=config.model_path
+    )
 
 
 def _pin_hint(reserved: int) -> str:

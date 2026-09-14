@@ -1143,15 +1143,25 @@ def test_dequant_q8_0_reference_matches_handcrafted_blocks():
 
 
 def _write_tokenizer_gguf(
-    tmp_path, *, tokens, merges, special_ids, chat_template=None, token_type=None
+    tmp_path,
+    *,
+    tokens,
+    merges,
+    special_ids,
+    chat_template=None,
+    token_type=None,
+    arch="glm5next",
+    scores=None,
 ):
     import gguf as gguf_mod
 
-    path = tmp_path / "tokenizer.gguf"
-    w = gguf_mod.GGUFWriter(str(path), "glm5next")
+    path = tmp_path / f"tokenizer-{arch}.gguf"
+    w = gguf_mod.GGUFWriter(str(path), arch)
     w.add_array("tokenizer.ggml.tokens", list(tokens))
     w.add_array("tokenizer.ggml.token_type", token_type or [1] * len(tokens))
     w.add_array("tokenizer.ggml.merges", list(merges))
+    if scores is not None:
+        w.add_array("tokenizer.ggml.scores", list(scores))
     w.add_string("tokenizer.ggml.model", "gpt2")
     w.add_string("tokenizer.ggml.pre", "glm4")
     for key, tid in special_ids.items():
@@ -1209,6 +1219,70 @@ def test_load_tokenizer_from_gguf_metadata(tmp_path):
     assert load_eos_token_ids(path, tok) == {eos_id}
 
 
+def test_glm5next_gguf_tokenizer_digit_split_and_gemma4_gate(tmp_path):
+    """No-reference pin: glm5next gets the glm4 pre-tokenizer, gemma4 does not.
+
+    GGUFGPTConverter attaches the GPT-2 ByteLevel regex, which glues the leading
+    space onto digit runs (" in 100 days" pre-tokenizes as "Ġ100") - a pre-token
+    shape the glm4-trained vocab has no merges for, so numerals in user input
+    byte-split at encode. For glm5next the converter pre_tokenizer is replaced
+    with the reference glm4 scheme; the expected pre-splits below are the
+    reference tokenizer's own pieces (verified against its tokenizer.json).
+    """
+    from transformers.convert_slow_tokenizer import bytes_to_unicode
+
+    from freetoken.utils.hf import load_tokenizer
+
+    byte_chars = list(bytes_to_unicode().values())
+    tokens = byte_chars + ["!!", "<eos>", "<pad>", "[gMASK]"]
+    tok = load_tokenizer(
+        _write_tokenizer_gguf(
+            tmp_path,
+            tokens=tokens,
+            merges=["! !"],
+            special_ids={"eos": 258, "padding": 259, "bos": 260, "unknown": 0},
+        )
+    )
+    pt = tok.backend_tokenizer.pre_tokenizer
+    # the reference glm4 Sequence (Split Isolated + ByteLevel), not the GPT-2 regex
+    assert repr(pt).startswith("Sequence") and "Isolated" in repr(pt)
+    # digit runs split into 1-3 char pre-tokens, no leading space glued to digits
+    assert pt.pre_tokenize_str("in 100 days") == [
+        ("in", (0, 2)),
+        ("Ġ", (2, 3)),
+        ("100", (3, 6)),
+        ("Ġdays", (6, 11)),
+    ]
+    assert pt.pre_tokenize_str("2^10") == [
+        ("2", (0, 1)),
+        ("^", (1, 2)),
+        ("10", (2, 4)),
+    ]
+    assert pt.pre_tokenize_str("2+2") == [
+        ("2", (0, 1)),
+        ("+", (1, 2)),
+        ("2", (2, 3)),
+    ]
+    assert pt.pre_tokenize_str("12345") == [("123", (0, 3)), ("45", (3, 5))]
+    assert tok.decode(tok.encode("in 100 days")) == "in 100 days"
+
+    # gemma4: converter default preserved - no Isolated glm4 split, digits keep
+    # the GPT-2 shape (a standalone digit-run piece must not appear)
+    gtok = load_tokenizer(
+        _write_tokenizer_gguf(
+            tmp_path,
+            arch="gemma4",
+            tokens=["▁hello", "▁world", "h", "i", "2", "+", "<eos>"],
+            merges=["a b"],
+            scores=[0.0] * 7,
+            special_ids={"eos": 6},
+        )
+    )
+    gpt = gtok.backend_tokenizer.pre_tokenizer
+    assert "Isolated" not in repr(gpt)
+    assert ("100", (3, 6)) not in gpt.pre_tokenize_str("in 100 days")
+
+
 _GLM5NEXT_TOKENIZER_REF = os.environ.get("FREETOKEN_GLM5NEXT_TOKENIZER_REF", "")
 needs_ref_tokenizer = pytest.mark.skipif(
     not (_GLM5NEXT_TOKENIZER_REF and os.path.isdir(_GLM5NEXT_TOKENIZER_REF)),
@@ -1225,13 +1299,14 @@ def test_glm5next_gguf_tokenizer_matches_reference(tmp_path):
 
     The synthetic gguf carries the REFERENCE's own flat vocab (model vocab + added
     tokens, in id order) and its full merge list, so any tokenization difference
-    isolates the converter path (ByteLevel-only pre-tokenization; the gguf's
-    pre=glm4 scheme is ignored by GGUFGPTConverter) rather than vocab drift. Known
-    special-token handling: the serve path re-encodes rendered chat text, so the
-    converted tokenizer registers the gguf special tokens (token_type walk) as
-    atomic AddedTokens - asserted below via the render->encode check. The
-    code-pre tokenization divergence stays pinned; the boundary split is
-    reported via warnings.warn, not masked.
+    isolates the converter path rather than vocab drift. Known special-token
+    handling: the serve path re-encodes rendered chat text, so the converted
+    tokenizer registers the gguf special tokens (token_type walk) as atomic
+    AddedTokens - asserted below via the render->encode check. The converter path
+    now ports the reference glm4 pre_tokenizer (was: the GPT-2 ByteLevel regex,
+    which mangled numerals in user input); digit and code samples that used to be
+    pinned divergences assert identity below, and the boundary split is reported
+    via warnings.warn, not masked.
     """
     import json
 
@@ -1287,36 +1362,47 @@ def test_glm5next_gguf_tokenizer_matches_reference(tmp_path):
     assert load_eos_token_ids(path, tok) == {154820, 154827, 154829}
 
     # Prose samples MUST match the reference exactly (verified: en/ru/cjk identical).
-    # The code sample is a PINNED known divergence: the reference pre-tokenizes with
-    # the GPT-2 regex Split (grouping '(x' and '):\u010a' into single BPE pieces)
-    # while GGUFGPTConverter emits ByteLevel-only pre-tokenization and ignores the
-    # gguf's pre=glm4 scheme - both tokenizations decode losslessly, but they are
-    # not identical. If a future converter emits the regex split, the pinned assert
-    # below flips and this comment should be removed along with the mapping review.
     prose = [
         "The quick brown fox jumps over the lazy dog.",
         "Съешь ещё этих мягких французских булок, да выпей чаю.",
         "你好，世界！GLM-5.3-Flash 是一个混合专家模型。",
     ]
-    code = "def f(x):\n    return x + 12345  # comment"
+    # Digit survival: pre-fix the converter kept the GPT-2 ByteLevel regex and the
+    # glm4-trained vocab had no merges for its "Ġ100"-style digit pre-tokens, so
+    # numerals in user input byte-split into garbage ("in 100 days" -> "in <blank>
+    # days", "2^10" -> "<image?> ^10"). With the ported glm4 pre_tokenizer these
+    # must match the reference exactly (no unk, lossless).
+    digits = [
+        "in 100 days",
+        "2^10",
+        "2+2",
+        "What is 2+2?",
+        "for i in range(10):\n    x[i] = i * 2  # 12345",
+    ]
+    # reference-shape pins (stable constants of the released reference tokenizer)
+    assert ref.tokenize("in 100 days") == ["in", "Ġ", "100", "Ġdays"]
+    assert ref.tokenize("2+2") == ["2", "+", "2"]
 
-    for s in prose:
+    for s in prose + digits:
         ref_toks = ref.tokenize(s)
-        got_toks = tok.convert_ids_to_tokens(tok.encode(s))
+        ids = tok.encode(s)
+        got_toks = tok.convert_ids_to_tokens(ids)
         assert got_toks == ref_toks, (
-            f"prose sample {s[:20]!r} diverges from the reference: "
+            f"sample {s[:20]!r} diverges from the reference: "
             f"gguf={got_toks[:10]} ref={ref_toks[:10]}"
         )
-        assert tok.decode(tok.encode(s)) == s
+        assert tok.decode(ids) == s
+        assert tok.unk_token_id not in ids
 
-    got_code = tok.convert_ids_to_tokens(tok.encode(code))
+    code = "def f(x):\n    return x + 12345  # comment"
     ref_code = ref.tokenize(code)
-    # pinned known divergence (reported finding): ByteLevel-only pre-tokenization
-    # vs the reference's regex Split - gguf splits '(x' as '(' + 'x', keeps the
-    # newline as a separate 'Ċ' token, and does not merge '):' + newline.
-    assert got_code[:7] == ["def", "Ġf", "(", "x", "):", "Ċ", "ĠĠĠ"], got_code[:10]
+    # FLIPPED PIN (was a known divergence): pre-fix the gguf split '(x' as '(' + 'x'
+    # and kept the newline separate from '):'; the glm4 pre_tokenizer port makes
+    # the gguf side identical to the reference ('(x' and '):Ċ' grouped). The
+    # reference-side piece pin stays as the drift guard.
     assert ref_code[:4] == ["def", "Ġf", "(x", "):Ċ"], ref_code[:10]
-    assert tok.decode(tok.encode(code)) == code  # still lossless
+    assert tok.convert_ids_to_tokens(tok.encode(code)) == ref_code
+    assert tok.decode(tok.encode(code)) == code  # lossless
 
     # F3: the serve path renders the chat template to TEXT and re-encodes it
     # (apply_chat_template(tokenize=False) -> encode(..., add_special_tokens=False));

@@ -76,19 +76,58 @@ def test_kv_and_swa_bytes_per_token_from_hybrid_pools():
     assert ub["swa_bytes_per_token"] == 2 * 1 * kv_heads * head_dim * 2  # 1 swa layer
 
 
+def _moe_partition(cache_size, gate_up_cols, down_cols):
+    # Duck-typed OffloadMoeCache partition: cache_size + bank_sources is all the MoE
+    # readouts touch. bank_sources values are per-layer [num_experts, *row] tensors;
+    # one layer carries the byte math.
+    return SimpleNamespace(
+        cache_size=cache_size,
+        bank_sources={
+            "gate_up": [torch.empty((4, gate_up_cols), dtype=torch.bfloat16)],
+            "down": [torch.empty((4, down_cols), dtype=torch.bfloat16)],
+        },
+    )
+
+
 def test_moe_bytes_per_expert_sums_bank_rows():
-    # bank_caches: name -> (cache_size, *row_shape); one slot = summed row bytes over banks.
-    cache_size = 8
-    gate_up = torch.empty((cache_size, 512), dtype=torch.bfloat16)  # 512 * 2 = 1024 B/row
-    down = torch.empty((cache_size, 256), dtype=torch.bfloat16)  # 256 * 2 = 512 B/row
+    # bank_sources: role -> per-layer [num_experts, *row] tensors; one slot = summed row
+    # bytes over banks (expert_bytes_per_slot).
     eng = SimpleNamespace(
         kv_cache=None,
-        moe_offload_cache=SimpleNamespace(bank_caches={"gate_up": gate_up, "down": down}),
+        moe_offload_caches=[_moe_partition(8, 512, 256)],
         linear_state_pool=None,
     )
     ub = compute_cache_unit_bytes(eng)
     assert ub["moe_bytes_per_expert"] == 1024 + 512
     assert ub["kv_bytes_per_token"] == 0
+
+
+def test_moe_bytes_per_expert_byte_weighted_across_partitions():
+    # Three per-signature partitions (glm5next gguf banks): the readout is byte-weighted
+    # over ALL partitions, not the dominant one's row width (1536 here).
+    eng = SimpleNamespace(
+        kv_cache=None,
+        moe_offload_caches=[
+            _moe_partition(8, 512, 256),  # 1536 B/slot
+            _moe_partition(4, 384, 192),  # 1152 B/slot
+            _moe_partition(4, 256, 128),  # 768 B/slot
+        ],
+        linear_state_pool=None,
+    )
+    ub = compute_cache_unit_bytes(eng)
+    # (8*1536 + 4*1152 + 4*768) // 16 = 1248
+    assert ub["moe_bytes_per_expert"] == 1248
+    assert ub["moe_bytes_per_expert"] != 1536  # dominant partition alone would say 1536
+
+
+def test_moe_single_cache_fallback_without_partition_list():
+    # Engines that only expose moe_offload_cache (no partition list) keep working.
+    eng = SimpleNamespace(
+        kv_cache=None,
+        moe_offload_cache=_moe_partition(8, 512, 256),
+        linear_state_pool=None,
+    )
+    assert compute_cache_unit_bytes(eng)["moe_bytes_per_expert"] == 1024 + 512
 
 
 def test_mamba_bytes_per_slot_from_pool_method():
@@ -103,13 +142,11 @@ def test_mamba_bytes_per_slot_from_pool_method():
 
 def test_all_units_present_for_hybrid_moe_model():
     eng = _mha_engine()
-    eng.moe_offload_cache = SimpleNamespace(
-        bank_caches={"w": torch.empty((4, 100), dtype=torch.bfloat16)}
-    )
+    eng.moe_offload_caches = [_moe_partition(4, 100, 50)]
     eng.linear_state_pool = SimpleNamespace(bytes_per_slot=lambda: 999)
     ub = compute_cache_unit_bytes(eng)
     assert ub["kv_bytes_per_token"] > 0
-    assert ub["moe_bytes_per_expert"] == 100 * 2
+    assert ub["moe_bytes_per_expert"] == 200 + 100  # gate_up 100 cols + down 50 cols, bf16
     assert ub["mamba_bytes_per_slot"] == 999
 
 
@@ -292,3 +329,21 @@ def test_status_meta_includes_pools():
     meta = compute_cache_status_meta(eng)
     assert meta["pools"]["num_pages"] == 100
     assert meta["pools"]["page_size"] == 16
+
+
+def test_floors_and_pools_sum_partitions():
+    # Three per-signature partitions: the floor funds each partition at one layer's
+    # experts (3 * num_experts) and the pool readout sums every partition's slots --
+    # neither may report the dominant partition only.
+    caches = [_moe_partition(8, 512, 256), _moe_partition(4, 384, 192), _moe_partition(4, 256, 128)]
+    eng = SimpleNamespace(
+        config=_config(),
+        moe_offload_caches=caches,
+        linear_state_pool=None,
+        kv_cache=None,
+        num_pages=0,
+    )
+    from freetoken.kvcache.cache_status import compute_cache_pools
+
+    assert compute_cache_floors(eng)["moe_experts"] == 3 * 128
+    assert compute_cache_pools(eng)["moe_cache_size"] == 16

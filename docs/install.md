@@ -6,6 +6,14 @@
 - Python >= 3.10, with [uv](https://docs.astral.sh/uv/) recommended (plain
   `pip` + `venv` works too)
 
+## GGUF model kernels
+
+Serving GGUF checkpoints JIT-compiles extra CUDA kernels. Their host compiler
+must be `clang++` on PATH (override with `FREETOKEN_GGUF_HOST_CXX`): with a gcc
+host, nvcc trips a conformance error in torch's ATen `List_inl.h` (g++-13/15
+verified; `-allow-unsupported-compiler` does not help). A missing `clang++`
+silently falls back to gcc and fails at JIT time; the first build takes minutes.
+
 ## Method 1: Install from PyPI
 
 ```bash

@@ -12,6 +12,16 @@ def _supports_swa_ratio(config) -> bool:
     return mc.has_swa_attention and config.cache_type == "swa_radix"
 
 
+def _moe_offload_caches(engine) -> list:
+    # The per-signature partition list; engines without it (pre-partition builds, fake
+    # test engines) fall back to the single dominant moe_offload_cache.
+    caches = getattr(engine, "moe_offload_caches", None)
+    if caches:
+        return list(caches)
+    single = getattr(engine, "moe_offload_cache", None)
+    return [single] if single is not None else []
+
+
 def compute_cache_unit_bytes(engine: "Engine") -> Dict[str, int]:
     """Per-unit VRAM byte cost of each runtime cache, measured from the real allocated pool
     tensors so the desktop cache panel can show a true VRAM delta per slider step:
@@ -36,9 +46,7 @@ def compute_cache_unit_bytes(engine: "Engine") -> Dict[str, int]:
         return int(kv), int(swa)
 
     def _moe() -> int:
-        caches = getattr(engine, "moe_offload_caches", None) or (
-            [engine.moe_offload_cache] if getattr(engine, "moe_offload_cache", None) else []
-        )
+        caches = _moe_offload_caches(engine)
         if not caches:
             return 0
         # byte-weighted per-slot across the per-signature partitions (review B3): the
@@ -120,9 +128,7 @@ def compute_cache_floors(engine: "Engine") -> Dict[str, int]:
     def _moe() -> int:
         # funding-aware floor: each per-signature partition is floored at num_experts,
         # so the rebuild/resize floor is the SUM over partitions (review B3)
-        caches = getattr(engine, "moe_offload_caches", None) or (
-            [engine.moe_offload_cache] if getattr(engine, "moe_offload_cache", None) else []
-        )
+        caches = _moe_offload_caches(engine)
         return int(len(caches) * config.model_config.num_experts)
 
     def _mamba() -> int:
@@ -186,9 +192,7 @@ def compute_cache_pools(engine: "Engine") -> Dict[str, int]:
             elif mc.has_swa_attention and config.cache_type == "swa_radix":
                 pools["swa_page_size"] = 1  # usable = pool tokens minus the slot-0 sentinel
                 pools["num_swa_pages"] = max(0, int(getattr(engine.kv_cache, "swa_num_tokens", 0) or 0) - 1)
-        caches = getattr(engine, "moe_offload_caches", None) or (
-            [engine.moe_offload_cache] if getattr(engine, "moe_offload_cache", None) else []
-        )
+        caches = _moe_offload_caches(engine)
         if caches:
             pools["moe_cache_size"] = int(sum(c.cache_size or 0 for c in caches))
         lsp = engine.linear_state_pool

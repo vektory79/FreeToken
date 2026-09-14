@@ -302,12 +302,71 @@ def ftw_bank_bytes(model_path: str) -> int | None:
     return sum(t["nbytes"] for t in tensors if t.get("kind") == "experts_bank")
 
 
-def bank_bytes_estimate(model_config, method=None) -> int | None:
+# "ffn_{role}_exps.weight" is the llama.cpp MoE stacking convention; the stem's
+# checkpoint layer ("blk.N.") maps to a bank layer through bank_layer_of.
+_GGUF_BANK_ROLE_SUFFIXES = {
+    "ffn_gate_exps.weight": "gate",
+    "ffn_up_exps.weight": "up",
+    "ffn_down_exps.weight": "down",
+}
+
+
+def _gguf_bank_bytes(model_path, model_config) -> int | None:
+    """Exact routed-expert bank bytes of a bare .gguf file, from its tensor table alone.
+
+    Header-only scan: GGUFReader mmaps the file and parses the KV + tensor infos
+    without touching tensor data, so the 147 GB checkpoint parses in milliseconds
+    and never enters RAM. Every ffn_{gate,up,down}_exps stack is sized from its own
+    recorded ggml type and geometry, summing the real per-layer quant mix instead
+    of the conservative per-expert table. ``None`` - keep that table's estimate -
+    when the path is not a local .gguf file, the scan fails, or the trunk's bank
+    set is incomplete: a wrong exact number must never undercount the pin-budget
+    checks, so the scan only answers when it can prove a complete bank set.
+    """
+    from freetoken.models.gguf.reader import is_gguf_path, iter_gguf_tensors
+    from freetoken.moe.expert_pieces import bank_layer_of
+
+    if not model_path or not is_gguf_path(model_path):
+        return None
+    per_layer: dict[int, dict[str, int]] = {}
+    try:
+        for t in iter_gguf_tensors(model_path):
+            for suffix, role in _GGUF_BANK_ROLE_SUFFIXES.items():
+                if t.name.endswith(suffix):
+                    break
+            else:
+                continue
+            head, _, layer_id = t.name[: -len(suffix) - 1].rpartition(".")
+            if head != "blk":
+                continue
+            bank_layer = bank_layer_of(model_config, int(layer_id))
+            if bank_layer is None:
+                continue  # leading dense layers and MTP slots never load a bank
+            per_layer.setdefault(bank_layer, {})[role] = t.rows * t.row_bytes
+    except Exception:
+        return None
+    roles = set(_GGUF_BANK_ROLE_SUFFIXES.values())
+    if any(set(stacks) != roles for stacks in per_layer.values()):
+        return None
+    if len(per_layer) != int(getattr(model_config, "num_moe_layers", 0) or 0):
+        return None
+    return sum(sum(stacks.values()) for stacks in per_layer.values())
+
+
+def bank_bytes_estimate(model_config, method=None, model_path=None) -> int | None:
     """Estimated total expert-bank bytes of a raw checkpoint before loading it.
 
-    With a bound expert ``method`` the kernel's layout gives the exact host bytes; otherwise the
-    format-tag table sizes the GGUF format. ``None`` for unknown formats or missing dims
-    (callers then skip the pre-load sizing)."""
+    With ``model_path`` on a bare .gguf file the estimate is exact: a header-only
+    tensor-table scan sizes every layer's ffn_{gate,up,down}_exps stack from its
+    own ggml type and geometry, never touching tensor data. With a bound expert
+    ``method`` the kernel's layout gives the exact host bytes; otherwise the
+    format-tag table sizes the format. ``None`` for unknown formats, missing dims,
+    or a gguf the scan cannot resolve (callers then skip the pre-load sizing or
+    keep the table)."""
+    if model_path is not None:
+        exact = _gguf_bank_bytes(model_path, model_config)
+        if exact is not None:
+            return exact
     layers = getattr(model_config, "num_moe_layers", None)
     if method is not None and layers:
         per_expert = sum(

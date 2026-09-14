@@ -657,6 +657,90 @@ def test_partition_prefill_overlap_degrade_rule():
     assert Engine._partition_prefill_overlap(False, 4096, E) is False
 
 
+def test_prefill_choreography_group_boundary_no_hop_contract():
+    # Pins the B3 boundary decision (the comment at Engine._init_offload_moe_cache):
+    # a group's last-layer +1 prefetch no-ops on the LOCAL id guard and hands
+    # nothing to the next cache; the next group's first layer self-begins its own
+    # choreography, or (degraded below 2E) runs synchronous materialize with no
+    # copy stream / double buffer at all. The cross-group prefetch hop was
+    # evaluated and skipped (2026-09-14): the tuned plan leaves every partition
+    # below 2E so no choreography runs at all, and the only boundaries that can
+    # exist here lead into degraded minorities with nowhere to land a prefetch.
+    # A future hop must deliberately change what this test pins.
+    import torch
+
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    E, H, I = 4, 512, 256
+    rows_ne0 = {"gate": (I, H), "up": (I, H), "down": (H, I)}
+
+    def make_cache(sig, num_layers, size_g, overlap):
+        cache = OffloadMoeCache(
+            num_layers=num_layers, num_experts=E, cache_size=size_g,
+            device=torch.device("cuda"), quant_format="gguf",
+            gguf_types=tuple([sig] * num_layers), prefill_overlap=overlap,
+            prefill_hit_d2d=False,
+        )
+        cache.set_bank_sources({
+            role: [
+                _craft_uniform_gguf_banks((sig, sig, sig), E, rows_ne0)[role].cuda()
+                for _ in range(num_layers)
+            ]
+            for role in ("gate", "up", "down")
+        })
+        return cache
+
+    def layer_for(cache, local):
+        layer = OffloadMoELayer.__new__(OffloadMoELayer)
+        layer.offload_cache = cache
+        layer.layer_id = local
+        return layer
+
+    # the overlap-ON group runs the real double-buffer choreography
+    cache_a = make_cache(8, 2, 2 * E, True)
+    views = layer_for(cache_a, 0)._wait_prefill_overlap(cache_a)
+    cache_a.release_prefill_layer(0)
+    assert cache_a._prefill_buffer_layer == [0, 1]  # layer 1 was prefetched by layer 0's +1 call
+    views_last = layer_for(cache_a, 1)._wait_prefill_overlap(cache_a)
+    cache_a.release_prefill_layer(1)
+    assert len(views) == len(views_last) == 3
+
+    # THE BOUNDARY: the +1 prefetch targets LOCAL id == num_layers and no-ops
+    # without touching any other cache's state
+    cache_a.prefetch_prefill_layer(cache_a.num_layers)
+    assert cache_a._prefill_buffer_layer == [0, 1]
+
+    # hypothetical overlap->overlap successor: nothing was hopped - the next
+    # group's layer 0 is fully self-contained (begin + prefetch + wait), and its
+    # buffers hold ITS layer's bytes, not the previous group's
+    cache_b = make_cache(14, 1, 2 * E, True)
+    assert cache_b._prefill_buffer_layer == [None, None]
+    views_b = layer_for(cache_b, 0)._wait_prefill_overlap(cache_b)
+    cache_b.release_prefill_layer(0)
+    torch.cuda.synchronize()
+    for view, role in zip(views_b, ("gate", "up", "down")):
+        assert torch.equal(view, cache_b.bank_sources[role][0])
+
+    # the real-rig successor: degraded below 2E, so it owns no copy stream and no
+    # double buffer - a boundary hop has nowhere to land
+    cache_c = make_cache(14, 1, E, False)
+    assert not cache_c.prefill_overlap
+    assert getattr(cache_c, "prefill_copy_stream", None) is None
+    assert not getattr(cache_c, "prefill_bank_buffers", None)
+    assert cache_a.prefetch_prefill_layer(cache_a.num_layers) is None
+    assert cache_c.prefetch_prefill_layer(0) is None  # sync group: choreography no-ops
+
+    # degenerate single-group (uniform file): identical semantics on ONE cache
+    cache_d = make_cache(8, 2, 2 * E, True)
+    layer_for(cache_d, 0)._wait_prefill_overlap(cache_d)
+    cache_d.release_prefill_layer(0)
+    layer_for(cache_d, 1)._wait_prefill_overlap(cache_d)
+    cache_d.release_prefill_layer(1)
+    cache_d.prefetch_prefill_layer(cache_d.num_layers)
+    assert cache_d._prefill_buffer_layer == [0, 1]
+
+
 def test_engine_partitions_attach_routing():
     # delta review F4: behavioral pin of the attach loop - each stub layer must end
     # up on ITS signature's cache with the LOCAL layer id, the group's gguf_types at
@@ -957,6 +1041,167 @@ def test_bank_bytes_estimate_gguf_real_geometry():
     true_bytes = 41 * E * gate_up_iq3 + E * gate_up_iq4xs + 39 * E * down_iq4xs + 3 * E * down_q6k
     assert est == true_bytes + 39 * E * (down_q6k - down_iq4xs) - E * (gate_up_iq4xs - gate_up_iq3)
     assert est > true_bytes  # conservative in aggregate (overcount >> undercount)
+
+
+def _write_bank_table_gguf(path, layer_types, ne) -> str:
+    """GGUF whose tensor table declares routed-expert stacks over a sparse, never-read
+    data section: real per-layer types and real geometry (H, I, E) for kilobytes on
+    disk instead of the ~134 GB the real table would weigh. GGUFReader builds lazy
+    memmap views over the hole and the header-only sizing scan never touches a page;
+    the file is not loadable - the sizing scan is its only consumer.
+    """
+    import math
+    import struct
+
+    from gguf.constants import (
+        GGML_QUANT_SIZES,
+        GGMLQuantizationType,
+        GGUF_DEFAULT_ALIGNMENT,
+        GGUF_MAGIC,
+        GGUF_VERSION,
+    )
+
+    hidden, inter, n_exp = ne
+    align = GGUF_DEFAULT_ALIGNMENT
+    table = bytearray(struct.pack("<IIQQ", GGUF_MAGIC, GGUF_VERSION, 3 * len(layer_types), 0))
+    cursor = 0  # next tensor's offset within the data section
+    for layer, (t_gate, t_up, t_down) in sorted(layer_types.items()):
+        for role, dims, ggml_type in (
+            ("gate", (hidden, inter, n_exp), t_gate),
+            ("up", (hidden, inter, n_exp), t_up),
+            ("down", (inter, hidden, n_exp), t_down),
+        ):
+            block, type_size = GGML_QUANT_SIZES[GGMLQuantizationType(ggml_type)]
+            cursor = -(-cursor // align) * align
+            name = f"blk.{layer}.ffn_{role}_exps.weight"
+            encoded = name.encode()
+            table += struct.pack("<Q", len(encoded)) + encoded
+            table += struct.pack("<I", len(dims))
+            table += struct.pack(f"<{len(dims)}Q", *dims)
+            table += struct.pack("<IQ", ggml_type, cursor)
+            cursor += math.prod(dims) * type_size // block
+    data_start = -(-len(table) // align) * align
+    with open(path, "wb") as f:
+        f.write(table)
+        f.truncate(data_start + cursor)  # the data section stays a hole
+    return str(path)
+
+
+def test_bank_bytes_estimate_gguf_exact_header_scan(tmp_path):
+    # a 3-signature synthetic table (the real file's three (gate, up, down) type
+    # mixes) at non-square dims: the estimate must be the signature-weighted true
+    # sum read off the header scan, not the conservative per-expert mix
+    from types import SimpleNamespace
+
+    from freetoken.moe.expert_banks import bank_bytes_estimate
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE
+
+    H, I, E = 512, 256, 4
+    sigs = {0: (18, 18, 23), 1: (18, 18, 14), 2: (23, 23, 14)}
+    path = _write_bank_table_gguf(tmp_path / "signatures.gguf", sigs, (H, I, E))
+    cfg = SimpleNamespace(
+        first_k_dense_replace=0, num_layers=3, num_moe_layers=3, num_experts=E,
+        hidden_size=H, moe_intermediate_size=I, expert_quant="none",
+        moe_weight_format="gguf",
+    )
+
+    def stack(rows, row_len, ggml_type):
+        block, type_size = BLOCK_SHAPE[ggml_type]
+        return rows * (row_len // block) * type_size
+
+    gate_iq3, gate_iq4 = stack(I, H, 18), stack(I, H, 23)
+    down_iq4, down_q6k = stack(H, I, 23), stack(H, I, 14)
+    est = bank_bytes_estimate(cfg, model_path=str(path))
+    assert est == sum(
+        E * (2 * gate_iq3 + down_iq4) if sig == (18, 18, 23)
+        else E * (2 * gate_iq3 + down_q6k) if sig == (18, 18, 14)
+        else E * (2 * gate_iq4 + down_q6k)
+        for sig in sigs.values()
+    )
+    # without the path every layer is priced at the extreme (IQ3_XXS gate/up + Q6_K down)
+    assert bank_bytes_estimate(cfg) == 3 * E * (2 * gate_iq3 + down_q6k)
+    assert est != bank_bytes_estimate(cfg)
+
+
+def test_bank_bytes_estimate_gguf_real_distribution_pin(tmp_path):
+    # the real GLM-5.3-Flash UD-Q3_K_XL bank table, header-only: 39x (18,18,23) +
+    # 2x (18,18,14) + 1x (23,23,14) across 42 MoE layers (ckpt 3..44; the Q6_K
+    # downs sit on 11/12/44 and the single IQ4_XS gate/up pair on 11). The expected
+    # value is derived here from BLOCK_SHAPE and only then pinned to the measured
+    # ground truth, so the constant can never drift silently.
+    from types import SimpleNamespace
+
+    from freetoken.moe.expert_banks import bank_bytes_estimate
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE
+
+    H, I, E = 4096, 2048, 288
+    layer_types = {}
+    for layer in range(3, 45):
+        if layer == 11:
+            layer_types[layer] = (23, 23, 14)
+        elif layer in (12, 44):
+            layer_types[layer] = (18, 18, 14)
+        else:
+            layer_types[layer] = (18, 18, 23)
+    assert len(layer_types) == 42
+
+    def stack(rows, row_len, ggml_type):
+        block, type_size = BLOCK_SHAPE[ggml_type]
+        return rows * (row_len // block) * type_size
+
+    gate_iq3, gate_iq4 = stack(I, H, 18), stack(I, H, 23)
+    down_iq4, down_q6k = stack(H, I, 23), stack(H, I, 14)
+    cfg = SimpleNamespace(
+        first_k_dense_replace=3, num_layers=45, num_moe_layers=42, num_experts=E,
+        hidden_size=H, moe_intermediate_size=I, expert_quant="none",
+        moe_weight_format="gguf",
+    )
+    path = _write_bank_table_gguf(tmp_path / "glm53-flash-banks.gguf", layer_types, (H, I, E))
+    est = bank_bytes_estimate(cfg, model_path=str(path))
+    exact = E * (
+        39 * (2 * gate_iq3 + down_iq4) + 2 * (2 * gate_iq3 + down_q6k) + (2 * gate_iq4 + down_q6k)
+    )
+    assert est == exact
+    assert exact == 134_404_374_528  # the measured real-file bank bytes
+    conservative = bank_bytes_estimate(cfg)
+    assert conservative == 42 * E * (2 * gate_iq3 + down_q6k)
+    assert conservative == 160_922_861_568  # the old estimate: +24.7 GiB over exact
+    assert conservative - est == 39 * E * (down_q6k - down_iq4) - 2 * E * (gate_iq4 - gate_iq3)
+    assert conservative > est
+
+
+def test_bank_bytes_estimate_gguf_writer_fixture_path(tmp_path):
+    # the scan must agree with a gguf-py-written file (the writer owns offsets and
+    # alignment), and blk.3's stray MTP gate bank must stay out: it is not a trunk
+    # layer. A table-only twin of the same stacks must scan to the same number.
+    from freetoken.moe.expert_banks import bank_bytes_estimate
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE
+
+    path = _write_iter_gguf(tmp_path / "banks.gguf")
+    cfg = _bank_cfg()
+    block, type_size = BLOCK_SHAPE[8]
+    gate_q8 = _EFF * (_H // block) * type_size  # per-expert gate/up stack
+    block, type_size = BLOCK_SHAPE[14]
+    down_q6k = _H * (_EFF // block) * type_size  # per-expert down stack
+    est = bank_bytes_estimate(cfg, model_path=str(path))
+    assert est == 2 * _NE * (2 * gate_q8 + down_q6k)
+    twin = _write_bank_table_gguf(tmp_path / "twin.gguf", {1: (8, 8, 14), 2: (8, 8, 14)}, (_H, _EFF, _NE))
+    assert bank_bytes_estimate(cfg, model_path=twin) == est
+    assert est != bank_bytes_estimate(cfg)
+
+
+def test_bank_bytes_estimate_gguf_path_fallbacks(tmp_path):
+    # no path, a non-file path, and a trunk short one bank layer must all keep the
+    # conservative per-expert table - the exact scan never undercounts
+    from freetoken.moe.expert_banks import bank_bytes_estimate
+
+    cfg = _bank_cfg()
+    est = bank_bytes_estimate(cfg)
+    assert bank_bytes_estimate(cfg, model_path=None) == est
+    assert bank_bytes_estimate(cfg, model_path=str(tmp_path / "absent.gguf")) == est
+    assert bank_bytes_estimate(cfg, model_path=str(tmp_path)) == est  # a dir, e.g. FTW
+    path = _write_bank_table_gguf(tmp_path / "short.gguf", {0: (18, 18, 23)}, (256, 256, _NE))
+    assert bank_bytes_estimate(cfg, model_path=path) == est
 
 
 def test_gguf_expert_sources_missing_bank_layer_raises(tmp_path):
