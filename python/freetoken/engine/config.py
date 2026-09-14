@@ -46,8 +46,9 @@ class EngineConfig:
     # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
     moe_prefill_hit_d2d: bool = False
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
-    # CPU MoE backend (--moe-strategy cpu): number of CPU worker threads computing
-    # the decode experts. 0 = auto (physical cores). Ignored by other backends.
+    # CPU decode expert threads (--moe-strategy cpu/hybrid, or offload with
+    # --moe-cpu-layers): 0 = auto (one per physical core). Split across per-partition
+    # executor pools on disjoint cores when the banks have multiple signature partitions.
     moe_cpu_threads: int = 0
     # Hybrid CPU/GPU decode (--moe-strategy offload only): which MoE layers decode on
     # the CPU executor instead of the GPU offload/PCIe path. Spec is an explicit id

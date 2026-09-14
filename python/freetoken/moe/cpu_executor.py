@@ -123,8 +123,33 @@ def _split_gguf_formats(fmt: str, cache) -> tuple[str, str, str] | None:
     except KeyError as e:
         raise NotImplementedError(
             f"gguf expert bank type {e.args[0]} has no CPU GEMV (supported: "
-            f"{sorted(_GGUF_TYPE_FMTS)}); use --moe-strategy offload instead"
+            f"{sorted(_GGUF_TYPE_FMTS)}); {_cpu_layers_advice(cache)}"
         ) from e
+
+
+def partition_label(cache) -> str:
+    """Short partition identity for error/log attribution (which pool failed).
+
+    Multi-partition boots run one executor pool per signature cache; the engine
+    prefixes the pool index, this supplies the partition's own signature."""
+    fmt = getattr(cache, "quant_format", None)
+    types = getattr(cache, "gguf_types", None)
+    n = getattr(cache, "num_layers", "?")
+    if fmt == "gguf" and types:
+        return f"gguf {tuple(types[0])} x{n} layers"
+    return f"{fmt!r} x{n} layers"
+
+
+def _cpu_layers_advice(cache) -> str:
+    """Remedy for an executor-capability failure, truthful about how the executor
+    was reached: a boot that pinned a strict subset of this partition's layers onto
+    the CPU executor (offload/hybrid + --moe-cpu-layers) fixes itself by dropping
+    those ids; plain cpu/hybrid strategies fall back to the GPU offload strategy."""
+    cpu_ids = getattr(cache, "cpu_layer_ids", None) or frozenset()
+    layers = int(getattr(cache, "num_layers", 0) or 0)
+    if cpu_ids and layers and len(cpu_ids) < layers:
+        return "adjust or drop --moe-cpu-layers so these layers decode on the GPU offload path"
+    return "use --moe-strategy offload instead"
 
 
 def partition_executor_rejection(cache) -> str | None:
@@ -211,7 +236,9 @@ def resolve_threads_and_affinity(
     (so distinct hardware threads are used before any core is doubled up).
     ``allow_cores`` restricts the pool to a subset (the per-cache split from
     :func:`resolve_pool_affinities`); an explicit count may then double up within
-    the subset only when it exceeds the subset size.
+    the subset only when it exceeds the subset size. The auto count is never 0:
+    a subset with no physical-core representative falls back to one worker per
+    allowed core.
     """
     reps = physical_core_cpus()
     if allow_cores is not None:
@@ -231,7 +258,10 @@ def resolve_threads_and_affinity(
             order = [0]
         core_ids = [order[i % len(order)] for i in range(n)]
         return n, core_ids
-    return len(reps), list(reps) or list(allow_cores or []) or [0]
+    core_ids = list(reps) or list(allow_cores or []) or [0]
+    # a physical-core-free subset (logical-only allow_cores) must still yield a
+    # coherent pool: one worker per handed-out core, never a zero-thread pool
+    return max(1, len(core_ids)), core_ids
 
 
 def resolve_pool_affinities(num_pools: int, requested: int) -> list[list[int]]:
@@ -243,9 +273,11 @@ def resolve_pool_affinities(num_pools: int, requested: int) -> list[list[int]]:
     an explicit ``--moe-cpu-threads`` count is split as evenly as possible (the
     remainder to the earlier pools, each share floored at one worker -- a starved
     pool is worse than overspending the flag by pools-1 threads) and assigned cores
-    physical-first; ``requested == 0`` (auto) splits the physical cores evenly and
-    keeps one worker per core. Degenerate cases (more pools than cores) share cores
-    rather than starve a pool.
+    physical-first, CLAMPED to the usable core set so the pools stay disjoint (an
+    over-budget flag is dropped with a warning instead of wrapping onto cores that
+    an earlier pool already pins); ``requested == 0`` (auto) splits the physical
+    cores evenly and keeps one worker per core. Degenerate cases (more pools than
+    cores) share cores rather than starve a pool.
     """
     reps = physical_core_cpus()
     if requested and requested > 0:
@@ -254,11 +286,26 @@ def resolve_pool_affinities(num_pools: int, requested: int) -> list[list[int]]:
         except AttributeError:
             allowed = list(range(os.cpu_count() or 1))
         order = reps + [c for c in allowed if c not in set(reps)] or [0]
-        base, extra = divmod(int(requested), num_pools)
+        total = int(requested)
+        if total > len(order):
+            # the assignment below never wraps, so an over-budget flag would hand a
+            # later pool cores an earlier pool already pins: clamp instead (the
+            # overspend is dropped, and said so)
+            logger.warning(
+                f"--moe-cpu-threads {total} exceeds the {len(order)} usable cores; "
+                f"clamping the per-pool split budget to {len(order)}"
+            )
+            total = len(order)
+        total = max(total, num_pools)  # every pool keeps at least one worker
+        base, extra = divmod(total, num_pools)
         pools, start = [], 0
         for i in range(num_pools):
             n = max(1, base + (1 if i < extra else 0))
-            pools.append([order[(start + j) % len(order)] for j in range(n)])
+            if start + n <= len(order):
+                pools.append(list(order[start:start + n]))
+            else:
+                # degenerate (more pools than cores): share cores rather than starve
+                pools.append([order[(start + j) % len(order)] for j in range(n)])
             start += n
         return pools
     size, extra = divmod(len(reps), num_pools)
@@ -290,6 +337,7 @@ class CpuMoeExecutor:
         swiglu_limit: float | None = None,
         fmt: str | None = None,
         allow_cores: list[int] | None = None,
+        label: str | None = None,
     ) -> None:
         from freetoken.kernel import _cpu_moe
         from freetoken.moe.legacy_format import canonical_role
@@ -305,10 +353,8 @@ class CpuMoeExecutor:
         if fmt not in _WFMT_IDS or fmt_up_name not in _WFMT_IDS or fmt_down_name not in _WFMT_IDS:
             # "gguf" stays out of the list: it is the -1 dispatch sentinel, not a format.
             raise NotImplementedError(
-                f"--moe-strategy cpu/hybrid computes experts on the CPU and supports "
-                f"{sorted(k for k in _WFMT_IDS if k != 'gguf')} formats, but this "
-                f"checkpoint's experts are {fmt!r}; use --moe-strategy offload "
-                f"(GPU-side dequant) instead."
+                f"the CPU MoE executor supports {sorted(k for k in _WFMT_IDS if k != 'gguf')} "
+                f"formats, but this partition's experts are {fmt!r}; {_cpu_layers_advice(cache)}"
             )
         if activation not in _ACT_IDS:
             raise NotImplementedError(f"CPU MoE backend: unsupported activation {activation!r}")
@@ -328,6 +374,9 @@ class CpuMoeExecutor:
 
         self.num_layers = int(cache.num_layers)
         self.num_experts = int(cache.num_experts)
+        # pool/partition identity for the watchdog / health errors (the engine passes
+        # "pool i/n: <signature>" for multi-partition boots; derived otherwise)
+        self.label = label or partition_label(cache)
         self.top_k = int(top_k)
         self.quant_format = fmt
         self.fmt_up = fmt_up_name  # per-projection formats (gate/up/down may differ)
@@ -468,8 +517,9 @@ class CpuMoeExecutor:
             if (fmt_up_name == fmt and fmt_down_name == fmt)
             else f"{fmt} (up={fmt_up_name}, down={fmt_down_name})"
         )
+        pool_note = f" [{label}]" if label else ""
         logger.info_rank0(
-            f"CPU MoE executor ready: threads={nthreads} (pinned to cores "
+            f"CPU MoE executor ready{pool_note}: threads={nthreads} (pinned to cores "
             f"{core_ids[0]}..{core_ids[-1]}) isa={self.isa} fmt={fmt_log} "
             f"H={self.H} I={self.I} experts={self.num_experts} layers={self.num_layers} "
             f"top_k={self.top_k} act={activation} max_tokens={self.max_tokens}"
@@ -868,7 +918,7 @@ class CpuMoeExecutor:
         if not dead:
             return
         logger.error(
-            f"cpu-moe flag watchdog: slots {dead} unanswered for >10s with no coordinator "
+            f"cpu-moe flag watchdog [{self.label}]: slots {dead} unanswered for >10s with no coordinator "
             "progress (wedged/dead); poisoning done[] and failing the next step"
         )
         for i in dead:
@@ -884,7 +934,7 @@ class CpuMoeExecutor:
         instead of silently shipping stale expert outputs."""
         if self._err is not None and bool((self._err != 0).any()):
             raise RuntimeError(
-                "CPU MoE flag-handshake watchdog fired: a decode step's doorbell was "
+                f"CPU MoE flag-handshake watchdog fired [{self.label}]: a decode step's doorbell was "
                 "never answered by the coordinator thread (its outputs cannot be "
                 "trusted). This indicates a wedged/killed coordinator; restart the "
                 "engine, or set FREETOKEN_CPU_MOE_FLAG_SYNC=0 to use the "

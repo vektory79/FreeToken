@@ -908,7 +908,7 @@ class Engine:
                 raise ValueError(
                     "multi-signature expert banks cannot serve cpu/hybrid: not every "
                     f"partition's bank types are CPU-executor capable ({detail}); "
-                    "use --moe-strategy offload instead"
+                    f"{_multi_partition_gate_advice(config)}"
                 )
         # Attach per group: each OffloadMoELayer points at ITS signature's cache and
         # carries that cache's LOCAL layer id (the cache machinery - slot tables,
@@ -991,7 +991,11 @@ class Engine:
         The dominant partition's executor rides ``self.cpu_moe_executor`` for the
         legacy single-pointer readers; the full list is ``self.cpu_moe_executors``.
         """
-        from freetoken.moe.cpu_executor import CpuMoeExecutor, resolve_pool_affinities
+        from freetoken.moe.cpu_executor import (
+            CpuMoeExecutor,
+            partition_label,
+            resolve_pool_affinities,
+        )
 
         # borrows hyperparams/fmt for all partitions: flat formats are single-group; gguf types are per-cache.
         sample = layers[0]
@@ -1015,7 +1019,10 @@ class Engine:
                 len(cores) if config.moe_cpu_threads > 0 else 0 for cores in pool_cores
             ]
         self.cpu_moe_executors = []
-        for cache, num_threads, allow_cores in zip(caches, pool_threads, pool_cores):
+        multi_pool = len(caches) > 1
+        for pool_idx, (cache, num_threads, allow_cores) in enumerate(
+            zip(caches, pool_threads, pool_cores)
+        ):
             executor = CpuMoeExecutor(
                 cache,
                 top_k=sample.top_k,
@@ -1029,6 +1036,12 @@ class Engine:
                 # FIXME: the None branch serves GGUF q4_0 banks, which have no quant method yet; drop it once GGUF joins the quant path
                 fmt=sample.quant_method.cpu_format if sample.quant_method is not None else None,
                 allow_cores=allow_cores,
+                # the watchdog / health errors must say WHICH pool failed
+                label=(
+                    f"pool {pool_idx + 1}/{len(caches)}: {partition_label(cache)}"
+                    if multi_pool
+                    else None
+                ),
             )
             cache.set_cpu_executor(executor)
             self.cpu_moe_executors.append(executor)
@@ -1263,7 +1276,8 @@ class Engine:
             # One pinned read per executor: surfaces a fired flag-handshake watchdog
             # (dead coordinator -> stale expert outputs) as a loud error instead of
             # silent corruption. Per-cache executors (partition-aware hybrid) each
-            # run their own coordinator + watchdog.
+            # run their own coordinator + watchdog; every error carries the
+            # executor's pool/partition label, so the failed pool is identifiable.
             executor.raise_if_unhealthy()
 
         for req in batch.reqs:
@@ -1482,6 +1496,16 @@ def _decode_target(config: EngineConfig) -> str:
     if config.moe_strategy == "cpu" or (config.moe_cpu_layers and is_offload_moe_strategy(config.moe_strategy)):
         return "cpu"
     return "gpu"
+
+
+def _multi_partition_gate_advice(config) -> str:
+    """Remedy half of the multi-partition cpu/hybrid gate error, truthful about how
+    the gate was reached: a boot that explicitly pinned layers onto the CPU executor
+    (offload + --moe-cpu-layers) fixes itself by adjusting/dropping those ids, while
+    explicit cpu/hybrid strategies fall back to the always-safe GPU offload strategy."""
+    if config.moe_strategy == "offload" and config.moe_cpu_layers:
+        return "adjust or drop --moe-cpu-layers so every layer decodes on the GPU offload path"
+    return "use --moe-strategy offload instead"
 
 
 # expert activations the CPU MoE executor supports (csrc ActKind)

@@ -715,6 +715,23 @@ def test_engine_multi_partition_lift_is_capability_gated():
     assert "cannot span partitions" not in src
 
 
+def test_engine_multi_partition_screen_names_incapable_partition_mid_and_last():
+    # Task 07 B-5(b): the screen walks the group list in order, so the incapable
+    # partition must be named with its members no matter WHERE it sits - not just
+    # in the leading group the rejection test above covers.
+    from freetoken.engine.engine import Engine
+
+    good_a = _hybrid_capability_stub((18, 18, 23), 1, 4)
+    bad = _hybrid_capability_stub((11, 11, 11), 1, 4)  # Q3_K: no CPU GEMV
+    good_b = _hybrid_capability_stub((18, 18, 14), 1, 4)
+
+    mid = Engine._partition_executor_rejections([[0], [1], [2]], [good_a, bad, good_b])
+    assert [(m, "no CPU GEMV" in r and "11" in r) for m, r in mid] == [([1], True)]
+
+    last = Engine._partition_executor_rejections([[0], [1], [2]], [good_a, good_b, bad])
+    assert [(m, "no CPU GEMV" in r and "11" in r) for m, r in last] == [([2], True)]
+
+
 def test_prefill_choreography_group_boundary_no_hop_contract():
     # Pins the B3 boundary decision (the comment at Engine._init_offload_moe_cache):
     # a group's last-layer +1 prefetch no-ops on the LOCAL id guard and hands

@@ -335,6 +335,43 @@ def test_hybrid_multi_partition_executors_mixed_signatures():
     assert [len(p) for p in resolve_pool_affinities(3, 2)] == [1, 1, 1]  # floor at one
 
 
+def test_resolve_pool_affinities_clamps_explicit_overspend():
+    # Task 07 B-2: explicit --moe-cpu-threads above the usable core count used to
+    # wrap the WHOLE core order, so a later pool received cores an earlier pool
+    # already pins (the documented disjoint invariant broken). Clamped now: the
+    # pools stay a disjoint physical-core cover and the overspend is dropped.
+    import os
+
+    from freetoken.moe.cpu_executor import physical_core_cpus, resolve_pool_affinities
+
+    reps = physical_core_cpus()
+    allowed = sorted(os.sched_getaffinity(0))
+    usable = len(reps) + len([c for c in allowed if c not in set(reps)])
+    pools = resolve_pool_affinities(3, usable + 10)
+    flat = [c for p in pools for c in p]
+    assert len(flat) == len(set(flat)), f"pools share cores: {pools}"
+    # clamped to the usable core set: a disjoint cover of every allowed CPU
+    assert sorted(flat) == sorted(allowed)
+    assert all(len(p) >= 1 for p in pools)
+    # sane budgets keep the exact split / floor-at-one semantics
+    assert [len(p) for p in resolve_pool_affinities(3, 4)] == [2, 1, 1]
+    assert [len(p) for p in resolve_pool_affinities(3, 2)] == [1, 1, 1]
+
+
+def test_resolve_threads_and_affinity_physical_core_free_subset_is_coherent():
+    # Task 07 A-info: auto sizing inside an allow_cores subset with NO physical-core
+    # representative used to return nthreads=0 with non-empty core ids.
+    import os
+
+    from freetoken.moe.cpu_executor import physical_core_cpus, resolve_threads_and_affinity
+
+    logical_only = [c for c in sorted(os.sched_getaffinity(0)) if c not in set(physical_core_cpus())]
+    if not logical_only:
+        pytest.skip("no SMT siblings: every allowed CPU is a physical-core rep")
+    n, cores = resolve_threads_and_affinity(0, logical_only)
+    assert n == len(cores) >= 1
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_hybrid_cpu_miss_rows_match_gpu_path():
     """S2, multi-partition hybrid dispatch: a layer whose cache splits CPU-miss +
@@ -352,10 +389,8 @@ def test_hybrid_cpu_miss_rows_match_gpu_path():
 
 
 def _hybrid_cpu_miss_rows_match_gpu_path_body():
-    import pathlib
-    import sys
-
-    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    # the wrapper test already put this directory on sys.path and imported the
+    # sibling fixture module
     from test_cpu_moe_gguf_iq import _make_gguf_cache
 
     from freetoken.layers.moe import OffloadMoELayer
@@ -440,3 +475,169 @@ def _hybrid_cpu_miss_rows_match_gpu_path_body():
     # merged hybrid output == the pure-GPU answer for the FULL routing
     rel = (out.float() - gpu_full).abs().max() / (gpu_full.abs().max() + 1e-6)
     assert rel < 2e-2, f"hybrid merge diverges from the GPU path: rel {rel.item()}"
+
+
+def _stub_gguf_cache(sig, num_layers, E, H, I, device):
+    """OffloadMoeCache + shape-correct zero banks the executor construction can
+    resolve (per-role widths follow the ROLE's own gguf type)."""
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    cache = OffloadMoeCache(
+        num_layers=num_layers, num_experts=E, cache_size=2 * E, device=device,
+        quant_format="gguf", gguf_types=tuple([tuple(sig)] * num_layers),
+        decode_target="hybrid",
+    )
+    cache.bank_sources = {
+        "gate": [torch.zeros(E, I, (H // 256) * BLOCK_SHAPE[sig[0]][1], dtype=torch.uint8) for _ in range(num_layers)],
+        "up": [torch.zeros(E, I, (H // 256) * BLOCK_SHAPE[sig[1]][1], dtype=torch.uint8) for _ in range(num_layers)],
+        "down": [torch.zeros(E, H, (I // 256) * BLOCK_SHAPE[sig[2]][1], dtype=torch.uint8) for _ in range(num_layers)],
+    }
+    return cache
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_multi_pool_auto_executors_carve_a_coordinator_core_per_pool():
+    # Task 07 B-5(c): the AUTO (--moe-cpu-threads 0) multi-pool boot on CUDA was
+    # unexercised - each pool must get a disjoint physical-core slice and carve its
+    # OWN coordinator core out of that slice (allow_cores), so workers +
+    # coordinators still cover every physical core exactly once, and the health
+    # error must say WHICH pool fired (the engine-passed label).
+    from types import SimpleNamespace
+
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.cpu_executor import physical_core_cpus, resolve_pool_affinities
+
+    E, H, I = 4, 512, 256
+    sigs = [(18, 18, 23), (18, 18, 14), (23, 23, 14)]
+    caches = [_stub_gguf_cache(sig, 1, E, H, I, torch.device("cuda")) for sig in sigs]
+    config = SimpleNamespace(moe_cpu_threads=0, max_running_req=4, cuda_graph_max_bs=2)
+    layers = [
+        SimpleNamespace(
+            top_k=2, activation="swiglu_clamp", apply_router_weight_on_input=False,
+            quant_method=None, alpha=1.0, limit=10.0,
+        )
+    ]
+    fake = SimpleNamespace(device=torch.device("cuda"), cpu_moe_executors=[])
+    Engine._init_cpu_moe_executors(fake, config, caches, layers)
+
+    executors = fake.cpu_moe_executors
+    assert len(executors) == 3
+    if not executors[0]._flag_sync:
+        pytest.skip("flag-sync stream memops unavailable on this driver")
+    pools = resolve_pool_affinities(len(caches), 0)
+    if min(len(p) for p in pools) <= 2:
+        pytest.skip("too few physical cores for a per-pool coordinator carve-out")
+
+    for pool_idx, (ex, cache, pool) in enumerate(zip(executors, caches, pools)):
+        assert cache.cpu_executor is ex
+        assert ex.num_threads == len(pool) - 1  # the coordinator core is carved out
+        assert ex.core_ids == pool[:-1]
+        assert ex._coord_core == pool[-1]
+        assert ex.label.startswith(f"pool {pool_idx + 1}/{len(caches)}")
+    assigned = [c for ex in executors for c in ex.core_ids] + [ex._coord_core for ex in executors]
+    assert len(assigned) == len(set(assigned)), "workers/coordinators must be disjoint"
+    assert sorted(assigned) == sorted(physical_core_cpus())
+
+    # B-1: the health error carries the failing pool's label
+    executors[1]._err[0] = 1
+    with pytest.raises(RuntimeError, match=r"pool 2/3"):
+        executors[1].raise_if_unhealthy()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_hybrid_overlap_disabled_multi_partition_serial_path(monkeypatch):
+    # Task 07 B-5(d): FREETOKEN_HYBRID_OVERLAP=0 (the A/B escape hatch) was only
+    # ever exercised single-partition; across per-partition executors each
+    # partition's _decode_hybrid must sync ITS OWN executor's pending handle before
+    # the PCIe fetch (the serial path) and still match the pure-GPU answer.
+    import pathlib
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from test_cpu_moe_gguf_iq import _make_gguf_cache
+
+    from freetoken.layers import moe as moe_module
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.cpu_executor import CpuMoeExecutor
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    monkeypatch.setattr(moe_module, "_HYBRID_OVERLAP", False)
+
+    E, H, I, bs, top_k = 8, 512, 256, 3, 4
+    dev = torch.device("cuda")
+    gen = torch.Generator().manual_seed(9)
+    hidden = (torch.randn(bs, H, generator=gen) * 0.5).to(torch.bfloat16).to(dev)
+    raw = torch.stack(
+        [torch.randperm(E, generator=gen)[:top_k] for _ in range(bs)]
+    ).to(torch.int32).to(dev)
+    raw[:, 0] = 0  # lane 0 pre-resident: the GPU hit
+    w = torch.rand(bs, top_k, generator=gen).to(dev)
+
+    def layer_for(c):
+        layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+        layer.quant_method = None
+        layer.activation = "silu"
+        layer.alpha = 1.0
+        layer.limit = None
+        layer.offload_cache = c
+        layer.layer_id = 0
+        return layer
+
+    for sig in ((18, 18, 23), (23, 23, 14)):  # dominant + minority partition
+        # uniform analytic banks: the random fixture's weight magnitudes push the
+        # unbounded silu intermediate past the GPU path's activation-quant range
+        # (inf * the zero-weighted hit lanes -> nan) - bounded weights keep the
+        # CPU-vs-GPU comparison about the routing, not the fixture
+        stub = _make_gguf_cache(sig, 1, E, H, I, seed=13, uniform=True)
+        banks = {role: list(per_layer) for role, per_layer in stub.bank_sources.items()}
+
+        def make(decode_target, fetch):
+            cache = OffloadMoeCache(
+                num_layers=1, num_experts=E, cache_size=2 * E, device=dev,
+                quant_format="gguf", gguf_types=(tuple(sig),), decode_target=decode_target,
+                hybrid_max_fetch=fetch,
+            )
+            cache.set_bank_sources(banks)
+            return cache
+
+        cache = make("hybrid", fetch=1)
+        ref_cache = make("gpu", fetch=1)
+        ex = CpuMoeExecutor(
+            cache, top_k=top_k, activation="silu", apply_router_weight_on_input=False,
+            num_threads=2, max_tokens=bs, device=dev,
+        )
+        cache.set_cpu_executor(ex)
+
+        ids = raw.clone()
+        out = layer_for(cache)._decode_hybrid(cache, hidden, w, ids)
+        torch.cuda.synchronize()
+        cpu_lanes = ids < 0  # rewritten in place: slot (hit/fetched) or -1 (CPU-owned)
+        assert cpu_lanes.any() and (~cpu_lanes).any(), "fixture must mix CPU misses and GPU hits"
+
+        # CPU partial for exactly the overflow-missed rows (raw ids, -1 on GPU lanes)
+        w_miss = torch.where(cpu_lanes, w, w.new_zeros(())).contiguous()
+        cpu_ids = torch.where(cpu_lanes, raw, raw.new_full((), -1)).contiguous()
+        cpu_part = ex.decode(0, hidden, w_miss, cpu_ids).float()
+        torch.cuda.synchronize()
+
+        ref_ids = raw.clone()
+        ref_cache.ensure_experts(0, ref_ids)
+        ref_cache.copy_missing()
+        gpu_miss = layer_for(ref_cache)._expert_gemm(
+            ref_cache, hidden, w_miss, ref_ids,
+            views=ref_cache.bank_views(), n=None, alphas=None, is_prefill=False,
+        ).float()
+        gpu_full = layer_for(ref_cache)._expert_gemm(
+            ref_cache, hidden, w, ref_ids,
+            views=ref_cache.bank_views(), n=None, alphas=None, is_prefill=False,
+        ).float()
+        torch.cuda.synchronize()
+
+        # 3e-2, not the parity tests' 2e-2: the CPU-vs-GPU gap is the GPU down-GEMV's
+        # q8_1 activation quant, whose relative size on small outputs is
+        # fixture-dependent (the dequant contract itself is pinned by the parity tests)
+        rel = (cpu_part - gpu_miss).abs().max() / (gpu_miss.abs().max() + 1e-6)
+        assert rel < 3e-2, f"[{sig}] CPU-miss rows diverge from the GPU path: rel {rel.item()}"
+        rel = (out.float() - gpu_full).abs().max() / (gpu_full.abs().max() + 1e-6)
+        assert rel < 2e-2, f"[{sig}] serial merge diverges from the GPU path: rel {rel.item()}"

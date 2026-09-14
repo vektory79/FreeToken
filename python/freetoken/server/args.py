@@ -650,8 +650,10 @@ def parse_args(
         type=int,
         default=ServerArgs.moe_cpu_threads,
         help=(
-            "Number of CPU worker threads for --moe-strategy cpu decode experts. "
-            "0 = auto (physical cores)."
+            "CPU worker threads for decode expert compute (--moe-strategy cpu or "
+            "hybrid, or offload with --moe-cpu-layers). 0 = auto (one per physical "
+            "core). Multiple signature partitions split this budget across "
+            "per-partition pools on disjoint cores."
         ),
     )
 

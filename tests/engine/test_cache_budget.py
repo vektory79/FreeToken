@@ -743,3 +743,134 @@ def test_cpu_moe_executor_viable_reads_gguf_types(tmp_path):
     # flat formats keep their alias behavior
     flat = SimpleNamespace(hidden_act="silu", expert_quant="nvfp4")
     assert _cpu_moe_executor_viable(flat) is True
+
+
+# ---- Task 07: offload + explicit --moe-cpu-layers on gguf (engine-stage failures) ----
+
+
+def _capability_stub(sig, num_layers, E=4):
+    """Minimal decode_target=cpu gguf cache for the partition screen (no banks: the
+    screen reads quant_format + gguf_types only)."""
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    return OffloadMoeCache(
+        num_layers=num_layers, num_experts=E, cache_size=2 * E,
+        device=torch.device("cpu"), quant_format="gguf",
+        gguf_types=tuple([tuple(sig)] * num_layers), decode_target="cpu",
+    )
+
+
+def _bank_stub_cache(sig, num_layers, E=4, H=512, I=256):
+    """OffloadMoeCache + shape-correct zero banks the executor construction can
+    resolve (per-role widths follow the ROLE's own gguf type, never one shared row
+    width)."""
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    cache = OffloadMoeCache(
+        num_layers=num_layers, num_experts=E, cache_size=2 * E,
+        device=torch.device("cpu"), quant_format="gguf",
+        gguf_types=tuple([tuple(sig)] * num_layers), decode_target="cpu",
+    )
+    cache.bank_sources = {
+        "gate": [torch.zeros(E, I, (H // 256) * BLOCK_SHAPE[sig[0]][1], dtype=torch.uint8) for _ in range(num_layers)],
+        "up": [torch.zeros(E, I, (H // 256) * BLOCK_SHAPE[sig[1]][1], dtype=torch.uint8) for _ in range(num_layers)],
+        "down": [torch.zeros(E, H, (I // 256) * BLOCK_SHAPE[sig[2]][1], dtype=torch.uint8) for _ in range(num_layers)],
+    }
+    return cache
+
+
+def test_adjust_config_leaves_offload_explicit_cpu_layers_to_the_engine(tmp_path):
+    # Unlike hybrid, offload + EXPLICIT --moe-cpu-layers ids has no config-time type
+    # gate: the loud failure is the engine's partition screen / eager executor
+    # construction, both strictly before CUDA graph capture.
+    from freetoken.engine.engine import _adjust_config
+
+    path = _write_expert_types_gguf(tmp_path / "incapable.gguf", {0: (18, 18, 23), 1: (8, 8, 14)})
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "offload", model_path=path)
+    cfg.moe_cpu_layers = "1"
+    _adjust_config(cfg)  # must not raise: the engine stage owns the loud failure
+
+
+def test_multi_partition_gate_advice_follows_the_strategy():
+    # When the failing boot IS offload + --moe-cpu-layers, "use --moe-strategy
+    # offload instead" is stale advice: the remedy is adjusting/dropping the flag.
+    # Explicit cpu/hybrid strategies keep the offload fallback advice.
+    from freetoken.engine.engine import _multi_partition_gate_advice
+
+    offload = _multi_partition_gate_advice(SimpleNamespace(moe_strategy="offload", moe_cpu_layers="1"))
+    assert "moe-cpu-layers" in offload
+    assert "moe-strategy offload" not in offload
+    for strategy in ("cpu", "hybrid"):
+        advice = _multi_partition_gate_advice(SimpleNamespace(moe_strategy=strategy, moe_cpu_layers=None))
+        assert "--moe-strategy offload" in advice
+
+
+def test_offload_cpu_layers_gguf_partition_screen_names_mid_partition(tmp_path):
+    # Task 07 B-5(a): a real mixed-signature file -> header scan -> capability
+    # stubs. The incapable partition sits MID-list and is named with its members;
+    # the offload + --moe-cpu-layers boot gets the adjust/drop remedy, and the
+    # raise site is wired to the strategy-aware advice.
+    import inspect
+
+    from freetoken.engine.engine import Engine, _multi_partition_gate_advice
+    from freetoken.moe.expert_banks import gguf_expert_bank_types
+
+    path = _write_expert_types_gguf(
+        tmp_path / "mixed.gguf", {0: (18, 18, 23), 1: (8, 8, 14), 2: (18, 18, 14)}
+    )
+    model_config = _gguf_gate_model_config()
+    model_config.num_moe_layers = 3  # the scan only answers on a complete bank set
+    types_by_layer = gguf_expert_bank_types(path, model_config)
+    assert types_by_layer is not None
+
+    groups: dict[tuple, list[int]] = {}
+    for lid, types in types_by_layer.items():
+        groups.setdefault(tuple(types), []).append(lid)
+    members_lists = list(groups.values())
+    caches = [_capability_stub(sig, len(members)) for sig, members in groups.items()]
+
+    rejections = Engine._partition_executor_rejections(members_lists, caches)
+    assert [(m, "no CPU GEMV" in r and "8" in r) for m, r in rejections] == [([1], True)]
+
+    advice = _multi_partition_gate_advice(SimpleNamespace(moe_strategy="offload", moe_cpu_layers="1"))
+    assert "moe-cpu-layers" in advice and "moe-strategy offload" not in advice
+    assert "_multi_partition_gate_advice" in inspect.getsource(Engine._init_offload_moe_cache)
+
+
+def test_offload_cpu_layers_gguf_capable_ids_boot_and_incapable_die_eagerly():
+    # Task 07 B-5(a): with capable explicit ids the executor stage BOOTS (one pool
+    # per signature partition, disjoint cores); an incapable single-signature boot
+    # dies in eager CpuMoeExecutor construction (strictly before graph capture),
+    # naming the type and the adjust/drop remedy for the offload + cpu-layers boot.
+    from freetoken.engine.engine import Engine
+
+    config = SimpleNamespace(moe_cpu_threads=3, max_running_req=4, cuda_graph_max_bs=2)
+    layers = [
+        SimpleNamespace(
+            top_k=2, activation="swiglu_clamp", apply_router_weight_on_input=False,
+            quant_method=None, alpha=1.0, limit=10.0,
+        )
+    ]
+
+    # capable ids: the boot gets its per-partition executors
+    caches = []
+    for sig in ((18, 18, 23), (18, 18, 14), (23, 23, 14)):
+        cache = _bank_stub_cache(sig, 1)
+        cache.cpu_layer_ids = frozenset({0})  # the engine attaches per-partition residency
+        caches.append(cache)
+    fake = SimpleNamespace(device=torch.device("cpu"), cpu_moe_executors=[])
+    Engine._init_cpu_moe_executors(fake, config, caches, layers)
+    assert len(fake.cpu_moe_executors) == 3
+    assert fake.cpu_moe_executors[0].label.startswith("pool 1/3")
+    flat = [c for ex in fake.cpu_moe_executors for c in ex.core_ids]
+    assert len(flat) == len(set(flat)), "per-partition pools must pin disjoint cores"
+
+    # incapable id on a single-signature file: eager construction fails first
+    bad = _bank_stub_cache((18, 18, 8), 3)  # Q8_0 down rows: no CPU GEMV
+    bad.cpu_layer_ids = frozenset({1})  # a strict subset: offload + --moe-cpu-layers 1
+    with pytest.raises(NotImplementedError, match=r"type 8 has no CPU GEMV.*moe-cpu-layers"):
+        Engine._init_cpu_moe_executors(
+            SimpleNamespace(device=torch.device("cpu"), cpu_moe_executors=[]),
+            config, [bad], layers,
+        )
