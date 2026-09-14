@@ -254,3 +254,30 @@ def test_dense_gguf_modules_forward_packed():
     torch.testing.assert_close(
         logits, want_logits, rtol=2e-2, atol=2e-2 * want_logits.abs().max().item()
     )
+
+
+@cuda
+@pytest.mark.parametrize("batch", (4, 27))  # MMVQ GEMV path and MMQ path
+def test_dense_gguf_noncontig_activations(batch):
+    # KDA f_b_proj/g_b_proj feed torch.split views of the in_proj output (stride
+    # (24896, 1)) into the GGUF GEMM. The CUDA kernels assume row-major
+    # activations and silently returned garbage for non-contiguous x - the root
+    # cause of the Phase 6 off-topic generation defect. The dispatch normalizes
+    # x; this pins the guard on both kernel paths.
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+
+    rng = np.random.default_rng(7)
+    k, out_dim = 128, 96  # K = 4 Q8_0 blocks: the real f_b/g_b geometry
+    raw, ref = _finite_fp16_chain_reference(rng, out_dim, row_bytes(k, GGML_Q8_0), GGML_Q8_0)
+    qw = torch.from_numpy(raw.copy()).cuda()
+    weight = torch.from_numpy(ref).cuda().float()
+
+    wide = torch.randn((batch, 24896), device="cuda", dtype=torch.bfloat16)
+    x = wide[:, :k]
+    assert not x.is_contiguous()
+    got = fused_mul_mat_gguf(x, qw, GGML_Q8_0).float()
+    want = x.float() @ weight.t()
+    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2 * want.abs().max().item())
+
+    got_c = fused_mul_mat_gguf(x.contiguous(), qw, GGML_Q8_0).float()
+    torch.testing.assert_close(got, got_c, rtol=2e-2, atol=2e-2 * want.abs().max().item())

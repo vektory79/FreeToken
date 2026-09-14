@@ -50,6 +50,10 @@ _MMVQ_SAFE = 6
 
 def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
     """y = x @ dequant(qweight).T, dispatched by batch size and quant type."""
+    if not x.is_contiguous():
+        # The MMVQ/MMQ kernels read the activation buffer assuming row-major
+        # strides; split views (e.g. KDA f_a/g_a) would be consumed as garbage.
+        x = x.contiguous()
     from freetoken.kernel.gguf import (
         ggml_dequantize,
         ggml_mul_mat_a8,
