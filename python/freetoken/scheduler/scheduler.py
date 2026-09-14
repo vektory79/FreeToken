@@ -719,7 +719,12 @@ class Scheduler(SchedulerIOMixin):
             num_swa_pages = max(0, int(getattr(eng.kv_cache, "swa_num_tokens", 0) or 0) - 1)
         return dict(
             num_pages=eng.num_pages,
-            moe_cache_size=eng.moe_offload_cache.cache_size if eng.moe_offload_cache is not None else None,
+            # partitions: the rollback snapshot needs the TOTAL slot count
+            moe_cache_size=(
+                sum(c.cache_size for c in eng.moe_offload_caches)
+                if getattr(eng, "moe_offload_caches", None)
+                else (eng.moe_offload_cache.cache_size if eng.moe_offload_cache is not None else None)
+            ),
             num_mamba_slots=(eng.linear_state_pool.num_slots - 1) if eng.linear_state_pool is not None else None,
             num_swa_pages=num_swa_pages,
         )
@@ -749,12 +754,16 @@ class Scheduler(SchedulerIOMixin):
                     f"mamba {pools['num_mamba_slots']} slots"
                     f" ({_gib(pools['num_mamba_slots'] * unit['mamba_bytes_per_slot'])})"
                 )
-            moe = self.engine.moe_offload_cache
-            if moe is not None:
-                parts.append(
-                    f"MoE cache {moe.cache_size}/{moe.num_layers * moe.num_experts}"
-                    f" ({_gib(moe.cache_size * unit['moe_bytes_per_expert'])})"
+            moe_caches = getattr(self.engine, "moe_offload_caches", None) or (
+                [self.engine.moe_offload_cache] if self.engine.moe_offload_cache else []
+            )
+            if moe_caches:
+                slots = sum(c.cache_size for c in moe_caches)
+                capacity = sum(c.num_layers * c.num_experts for c in moe_caches)
+                bytes_total = sum(
+                    c.cache_size * unit["moe_bytes_per_expert"] for c in moe_caches
                 )
+                parts.append(f"MoE cache {slots}/{capacity} ({_gib(bytes_total)})")
             logger.info_rank0(f"{event}: " + ", ".join(parts))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"could not log cache geometry: {e!r}")

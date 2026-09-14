@@ -529,7 +529,13 @@ _ITER_METADATA = {
 # A_log ground truth: the gguf stores -exp(A_log) per head (kimi-k3 convention).
 _SSM_A_TRUE = np.array([0.5, -1.0, 2.0, -0.25], np.float32)
 # Q6_K down bank payload: random bytes are fine, the bank must pass through verbatim.
-_DOWN_BANK_BYTES = np.random.default_rng(1234).integers(0, 256, (_NE, _H, 210), dtype=np.uint8)
+# Q6_K down bank: payload bytes random but the super-block scale (bytes 208:210)
+# pinned to a sane fp16 value - random d would decode to inf/NaN and poison the
+# moe_vec parity smoke (the dequant reference AND the kernel both chain through it).
+_DOWN_BANK_BYTES = np.zeros((_NE, _H, 210), np.uint8)
+_rng = np.random.default_rng(1234)
+_DOWN_BANK_BYTES[:, :, :208] = _rng.integers(0, 256, (_NE, _H, 208), dtype=np.uint8)
+_DOWN_BANK_BYTES[:, :, 208:210] = np.frombuffer(np.float16(1.5).tobytes(), np.uint8)
 
 
 def _q8_vals(rows, cols, tag):

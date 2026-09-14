@@ -713,10 +713,103 @@ def convert_glm5_next_to_gguf(model, config: "ModelConfig") -> None:
     model.lm_head = GGUFLMHead(config.vocab_size, config.hidden_size, GGML_Q6_K)
 
 
+def load_gguf_expert_sources(model_path: str, model_config, *, layer_sink=None):
+    """Offload-bank hook (weight.py resolves it by name): per MoE BANK layer, the
+    three stacked bank tensors as packed uint8 views ([E, rows, row_bytes], bytes
+    and ggml type verbatim - no dequant, no repack; a dim-0 slice is one expert's
+    contiguous rows) plus the per-layer (gate, up, down) ggml type ints, built in
+    ROLE order - never the file's tensor encounter order (the offload dispatch
+    unpacks (gate, up, down)). Checkpoint layer ids offset to bank indices via
+    first_k_dense_replace (bank_layer_of contract).
+
+    Banks are materialized into pinned per-layer HostBanks (q4_0 parity): a
+    device_ptr on the file-backed mmap VA is an illegal access at the first copy,
+    and cudaHostRegister cannot take the GGUF mmap's 32B alignment - so each bank
+    is a one-time copy into its own allocation, pinned as its layer completes.
+    ``layer_sink`` (converter) fires per completed layer instead; nothing is
+    pinned and the sink owns the banks from then on.
+    """
+    from freetoken.layers.gguf import _MMVQ
+    from freetoken.moe.host_banks import HostBank, LayerCompletionTracker, PinPipeline
+
+    first = model_config.first_k_dense_replace
+    num_moe = model_config.num_moe_layers
+    n_expert = model_config.num_experts
+    roles = ("gate", "up", "down")
+
+    # First pass: geometry + type validation, loud, before any allocation. Rows are
+    # PER ROLE - down packs H output rows while gate/up pack I, so a single
+    # gate-derived row count reshapes the down bank wrong (review B1).
+    specs: dict[int, dict[str, tuple[int, int]]] = {}
+    for layer, slots in iter_gguf_expert_sources(model_path, model_config):
+        bank = layer - first
+        if not 0 <= bank < num_moe:
+            raise ValueError(f"gguf expert bank for checkpoint layer {layer} outside the MoE trunk")
+        if set(slots) != set(roles):
+            raise ValueError(
+                f"gguf expert bank for checkpoint layer {layer}: roles "
+                f"{sorted(slots)} != {sorted(roles)}"
+            )
+        per = {}
+        for role in roles:
+            t = slots[role]
+            gt = int(t.ggml_type)
+            if gt not in _MMVQ:
+                raise ValueError(
+                    f"gguf expert bank {t.name!r}: ggml type {gt} has no MMVQ kernel "
+                    f"(supported: {sorted(_MMVQ)}); the moe_vec switch would return zeros"
+                )
+            # ggml ne0 = the linear INPUT dim (drives the row width), ne1 = OUTPUT
+            # rows; packed() is the raw byte view, so the width comes from ne0 +
+            # BLOCK_SHAPE (ggml_type).
+            per[role] = (int(t.shape[1]), row_bytes(int(t.shape[-1]), gt))
+        specs[bank] = per
+    missing = [i for i in range(num_moe) if i not in specs]
+    if missing:
+        raise ValueError(f"gguf expert banks missing for bank layers {missing}")
+
+    hb = {
+        role: [HostBank((n_expert, *specs[bank][role]), torch.uint8) for bank in range(num_moe)]
+        for role in roles
+    }
+    banks = {role: [b.tensor for b in per] for role, per in hb.items()}
+    types: list = [None] * num_moe
+
+    def _fill(sink) -> None:
+        # One pass over the file; a layer completes when all three of its banks have
+        # landed, which is when the tracker hands it to the PinPipeline (serving) or
+        # the converter sink.
+        # ONE completion event per layer: all three of its banks are copied together
+        # above, so the tracker fires the pin immediately after that single note.
+        # (expected_per_layer must MATCH the note count - gemma4 notes per write, 2x
+        # per layer; a mismatch means on_layer never fires and NOTHING gets pinned,
+        # which surfaces as an IMA at the first decode copy, not at load.)
+        tracker = LayerCompletionTracker(1, hb, sink) if sink is not None else None
+        for layer, slots in iter_gguf_expert_sources(model_path, model_config):
+            bank = layer - first
+            for role in roles:
+                t = slots[role]
+                rows, rb = specs[bank][role]
+                banks[role][bank].copy_(t.packed().reshape(n_expert, rows, rb))
+            types[bank] = tuple(int(slots[r].ggml_type) for r in roles)
+            if tracker is not None:
+                tracker.note(bank)
+
+    if layer_sink is not None:
+        _fill(layer_sink)
+    elif torch.cuda.is_available():
+        with PinPipeline() as pins:
+            _fill(pins)
+    else:
+        _fill(None)  # CUDA-less host: banks stay pageable (no device copies happen)
+    return banks, tuple(types)
+
+
 __all__ = [
     "parse_gguf_config",
     "iter_gguf_weights",
     "iter_gguf_expert_sources",
+    "load_gguf_expert_sources",
     "is_gguf_model",
     "convert_glm5_next_to_gguf",
 ]

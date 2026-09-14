@@ -1,5 +1,10 @@
 from .config import parse_config
-from .gguf import iter_gguf_expert_sources, iter_gguf_weights, parse_gguf_config
+from .gguf import (
+    iter_gguf_expert_sources,
+    iter_gguf_weights,
+    load_gguf_expert_sources,
+    parse_gguf_config,
+)
 from .model import Glm5NextForCausalLM
 from .weight import iter_expert_pieces, iter_weights, nvfp4_expert_spec
 
@@ -12,4 +17,5 @@ __all__ = [
     "parse_gguf_config",
     "iter_gguf_weights",
     "iter_gguf_expert_sources",
+    "load_gguf_expert_sources",
 ]

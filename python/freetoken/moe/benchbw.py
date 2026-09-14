@@ -143,6 +143,10 @@ DTYPE_WORKLOADS: dict[str, Workload] = {
     "mxfp4_triton": Workload("dtype:mxfp4", 2880, 2880, 128, 4, ("mxfp4_triton",),
                              activation="gpt_oss_swiglu", swiglu_limit=7.0),
     "ds_fp4": Workload("dtype:ds_fp4", 4096, 2048, 128, 6, ("ds_fp4",), swiglu_limit=7.0),
+    # glm5next native-GGUF banks (glm5.3-flash geometry): CPU MoE has no gguf weight
+    # path, so _bench_format notes it and the verdict is always offload.
+    "gguf": Workload("dtype:gguf", 4096, 2048, 288, 8, ("gguf",),
+                     activation="swiglu_clamp", swiglu_alpha=1.0, swiglu_limit=10.0),
 }
 
 
@@ -308,6 +312,14 @@ def _offload_bank_specs(fmt: str, H: int, I: int) -> dict[str, tuple[int, torch.
         return {
             "gate_up_packed": (2 * I * (H // 2), u8), "gate_up_scale": (2 * I * (H // 32), u8),
             "down_packed": (H * (I // 2), u8), "down_scale": (H * (I // 32), u8),
+        }
+    if fmt == "gguf":
+        # glm5next native-GGUF banks at the representative widths of
+        # offload_cache._BANK_BYTES_PER_EXPERT["gguf"] (IQ3_XXS gate/up rows, Q6_K
+        # down rows); the per-layer type mix does not change the gathered bytes.
+        return {
+            "gate": (I * (H // 256) * 98, u8), "up": (I * (H // 256) * 98, u8),
+            "down": (H * (I // 256) * 210, u8),
         }
     raise NotImplementedError(fmt)
 

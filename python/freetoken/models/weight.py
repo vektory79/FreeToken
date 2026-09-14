@@ -260,8 +260,19 @@ def load_q4_0_moe_expert_sources(
     return loader(model_path, model_config, layer_sink=layer_sink)
 
 
+def load_gguf_moe_expert_sources(model_path: str, model_config, layer_sink=None):
+    """gguf expert banks for the offload path: resolve the model module's
+    ``load_gguf_expert_sources`` hook (the glm5next analog of the q4_0 resolver),
+    returning ``(banks, gguf_types)`` - per MoE bank layer, the three stacked bank
+    tensors as packed uint8 views plus the layer's own ggml types."""
+    _config, spec = _spec_for_model_path(model_path)
+    loader = _load_attr(spec.module, "load_gguf_expert_sources")
+    return loader(model_path, model_config, layer_sink=layer_sink)
+
+
 __all__ = [
     "load_weight",
     "load_q4_0_moe_expert_sources",
+    "load_gguf_moe_expert_sources",
     "iter_expert_tensors_parallel",
 ]

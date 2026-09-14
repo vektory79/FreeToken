@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Dict, List
 import torch
 from freetoken.core import Batch, Req, get_global_ctx
 from freetoken.distributed import get_tp_info
+# runtime import: __init__ isinstance-checks the cache shape (single vs partition list)
+from freetoken.moe.offload_cache import OffloadMoeCache
 from freetoken.utils import init_logger, mem_GB
 from freetoken.utils.progress import emit_progress
 from tqdm import tqdm
@@ -14,7 +16,6 @@ from tqdm import tqdm
 if TYPE_CHECKING:
     from freetoken.attention import BaseAttnBackend
     from freetoken.models import BaseLLMModel
-    from freetoken.moe.offload_cache import OffloadMoeCache
 
 logger = init_logger(__name__)
 
@@ -104,7 +105,7 @@ class GraphRunner:
         max_seq_len: int,
         vocab_size: int,
         dummy_req: Req,
-        moe_offload_cache: OffloadMoeCache | None = None,
+        moe_offload_cache: OffloadMoeCache | list[OffloadMoeCache] | None = None,
     ) -> None:
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
@@ -115,14 +116,20 @@ class GraphRunner:
         self.max_graph_bs = max(cuda_graph_bs) if cuda_graph_bs else 0
         self.graph_bs_list = sorted(cuda_graph_bs)
         self.dummy_req = dummy_req
-        self.moe_offload_cache = moe_offload_cache
+        # per-signature MoE partitions arrive as a list (review B3); reset must cover
+        # every partition at the graph capture boundaries
+        self.moe_offload_caches: list[OffloadMoeCache] = (
+            [moe_offload_cache]
+            if isinstance(moe_offload_cache, OffloadMoeCache)
+            else list(moe_offload_cache or [])
+        )
         self.stream = stream
         self.device = device
         self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _reset_moe_offload_cache(self) -> None:
-        if self.moe_offload_cache is not None:
-            self.moe_offload_cache.reset()
+        for cache in self.moe_offload_caches:
+            cache.reset()
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
         # Mark the post-weights "warmup" phase for /health: this stretch (graph capture — or the

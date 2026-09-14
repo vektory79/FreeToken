@@ -551,3 +551,58 @@ def test_adjust_config_rejects_gguf_experts_on_cpu_paths():
     cfg.moe_strategy = "offload"
     _adjust_config(cfg)  # the only wired expert path passes the gate
     assert cfg.moe_strategy == "offload"
+
+
+def test_adjust_config_auto_keeps_gguf_on_offload_despite_hybrid_profile(monkeypatch):
+    # The benchbw profile may carry a "gguf" row (the reader maps it through the
+    # identity format mapping), but the auto->hybrid upgrade must ignore it: gguf has
+    # no CPU MoE weight path, so the profile can never justify hybrid for it.
+    import freetoken.moe.bench_profile as bench_profile
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bench_profile, "load_backend_recommendation", lambda *a, **k: "hybrid")
+
+    def make_cfg():
+        model_config = SimpleNamespace(
+            single_stream_only=False,
+            is_moe=True,
+            expert_quant="none",
+            moe_weight_format="gguf",
+            hidden_act="swiglu_clamp",
+            has_swa_attention=False,
+            has_linear_attention=False,
+        )
+
+        class Cfg:
+            moe_cache_auto = False
+            moe_cache_size = 0
+            moe_cache_rate = None
+            moe_strategy = "auto"
+            moe_cpu_layers = None
+            max_running_req = 4
+            cuda_graph_max_bs = 2
+            cuda_graph_bs = [1, 2]
+            max_seq_len = 1024
+            page_size = 1
+            attention_backend = "fi"
+            num_page_override = None
+            num_token_override = None
+
+            @property
+            def model_config(self):
+                return model_config
+
+        return Cfg()
+
+    from freetoken.engine.engine import _adjust_config
+
+    cfg = make_cfg()
+    _adjust_config(cfg)
+    assert cfg.moe_strategy == "offload"
+
+    # contrast: the same (monkeypatched) profile DOES upgrade a plain bf16 MoE model,
+    # so the exclusion above is really the gguf format check
+    cfg2 = make_cfg()
+    cfg2.model_config.moe_weight_format = None
+    _adjust_config(cfg2)
+    assert cfg2.moe_strategy == "hybrid"

@@ -75,6 +75,10 @@ _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     # DeepSeek-V4 FP4: packed e2m1 codes + e8m0 per-32 block scales, no global scale
     # (4 banks). Read by DeepSeek-V4's own DS-FP4 grouped GEMV kernels via bank_views().
     "ds_fp4": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
+    # glm5next native-GGUF banks: three separate stacked banks (gate/up/down), each
+    # row packed in the layer's own ggml type (per-layer IQ3_XXS/IQ4_XS/Q6_K mix);
+    # the type rides the cache's gguf_types, not the schema.
+    "gguf": ("gate", "up", "down"),
 }
 
 # lives in kernel/aot_models.py: the AOT row table shares it and must stay importable in the torch-only kernel-cache build env, which cannot import freetoken.moe
@@ -93,6 +97,12 @@ _BANK_BYTES_PER_EXPERT = {
     "nvfp4": lambda H, I: 2 * I * (H // 2 + H // 16 + 2) + H * (I // 2 + I // 16 + 2),
     "mxfp4": lambda H, I: 2 * I * (H // 2 + H // 32 + 2) + H * (I // 2 + I // 32 + 2),
     "ds_fp4": lambda H, I: 2 * I * (H // 2 + H // 32) + H * (I // 2 + I // 32),
+    # glm5next gguf banks: per-role EXTREMES - gate/up at the IQ3_XXS width (the
+    # narrowest real gate/up type) and down at the Q6_K width (the widest down
+    # type). Conservative only in aggregate: against the dominant (18, 18, 23) mix
+    # it overstates the down bank on 39 of 42 layers. Exact per-layer sizing
+    # happens at load from the bank record's gguf_types.
+    "gguf": lambda H, I: 2 * I * (H // 256) * 98 + H * (I // 256) * 210,
 }
 
 # vLLM's marlin grouped-GEMM hands the full [cache_size] slot cache as its expert
@@ -141,6 +151,9 @@ class OffloadMoeCache:
     # pcie_bw / cpu_bw ratio so the PCIe fetch and the CPU overflow GEMV take equal
     # time (perfect overlap): fetched : cpu = pcie : cpu - pcie.
     hybrid_fetch_fraction: float = 0.0
+    # "gguf" banks only: per-layer (gate, up, down) ggml type ints - the kernel
+    # dispatch reads the layer's own types (heterogeneous IQ3_XXS/IQ4_XS/Q6_K mix).
+    gguf_types: tuple | None = None
     # bank layout from the expert kernel (a BankSpec per role); when given it replaces the _BANK_SCHEMAS lookup and the slot cap comes from max_slots
     layout: dict | None = None
     max_slots: int | None = None
@@ -350,9 +363,19 @@ class OffloadMoeCache:
             for layer_id, source in enumerate(per_layer):
                 assert source.is_contiguous(), f"bank {name!r} layer {layer_id} must be contiguous"
                 assert source.size(0) == self.num_experts, (name, layer_id, source.shape)
-                assert source.shape == head.shape and source.dtype == head.dtype, (
-                    name, layer_id, source.shape, source.dtype,
-                )
+                if source.shape != head.shape or source.dtype != head.dtype:
+                    # One unified slot pool per bank requires one row shape across all
+                    # layers: the moe_vec kernel reads slot rows at the layer's packed
+                    # width, so a narrower/wider layer cannot share the pool. The
+                    # glm5next GGUF file carries three width signatures (per-layer
+                    # (gate, up, down) type mixes) - fix by partitioning the caches
+                    # per signature (one OffloadMoeCache per group). Loud on purpose:
+                    # serving this mix through one pool would corrupt every fetch.
+                    raise ValueError(
+                        f"bank {name!r} layers do not share one row shape: layer 0 is "
+                        f"{tuple(head.shape)} but layer {layer_id} is {tuple(source.shape)}; "
+                        f"per-signature cache partitions are required (ggml issue #194)"
+                    )
             self.bank_sources[name] = list(per_layer)
             self.bank_caches[name] = torch.empty(
                 (self.cache_size, *head.shape[1:]),
@@ -411,9 +434,30 @@ class OffloadMoeCache:
                     # a 0 placeholder keeps the descriptor shape
                     layer_src_ptrs[layer_id].append(0)
                     continue
-                # The kernel dereferences these on the GPU, so store each host bank's
-                # device alias (== data_ptr() under UVA identity; differs on
-                # Windows/WDDM).
+                # the fused gather records this bank's host VA as a DEVICE address:
+                # a PAGEABLE cpu bank would boot fine and IMA at the first decode copy
+                # - fail here, at construction, instead (review F2). Pinned host banks
+                # and device-resident banks (cuda() sources in tests) are both valid.
+                if source.device.type == "cpu" and not source.is_pinned():
+                    raise RuntimeError(
+                        f"bank {name!r} layer {layer_id} is not pinned: the fused "
+                        f"gather maps the host VA into device space, which is only "
+                        f"valid for pinned memory (pin the bank before set_bank_sources)"
+                    )
+                # descriptor geometry pinned to the owning tensors: every layer in the
+                # group must pack the SAME row width the plan was built with, and the
+                # slot pool must be exactly cache_size rows of that width
+                if math.prod(source.shape[1:]) * source.element_size() != feat:
+                    raise RuntimeError(
+                        f"bank {name!r} layer {layer_id} row bytes "
+                        f"{math.prod(source.shape[1:]) * source.element_size()} != the "
+                        f"fused-copy row plan ({feat} B/row)"
+                    )
+                if cache.numel() * cache.element_size() != feat * self.cache_size:
+                    raise RuntimeError(
+                        f"bank {name!r} slot pool {tuple(cache.shape)} does not match "
+                        f"the fused-copy row plan ({self.cache_size} slots x {feat} B)"
+                    )
                 src_dev = device_ptr(source)
                 if src_dev % 16 != 0:
                     return

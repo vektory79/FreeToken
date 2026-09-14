@@ -126,3 +126,57 @@ def test_hybrid_fixed_cap_unchanged():
     cache.ensure_experts_hybrid(0, ids)
     assert int(cache.num_missing_full.item()) == 8
     assert int(cache.num_indices.item()) == 1
+
+
+def test_benchbw_gguf_profile_sanity(monkeypatch, tmp_path):
+    # The "gguf" bench row: the workload constructs (glm5.3-flash geometry), the bank
+    # specs yield the three stacked projections at the exact offload_cache widths, the
+    # profile reader resolves the format through the identity mapping, and the bench's
+    # CPU-MoE section skips (no CPU weight path) so the verdict is always offload.
+    import json
+
+    from freetoken.moe import benchbw
+    from freetoken.moe.offload_cache import _BANK_BYTES_PER_EXPERT
+
+    wl = benchbw.DTYPE_WORKLOADS["gguf"]
+    assert (wl.hidden, wl.inter, wl.experts, wl.top_k) == (4096, 2048, 288, 8)  # glm5.3-flash
+    assert wl.formats == ("gguf",)
+    assert wl.activation == "swiglu_clamp" and wl.swiglu_alpha == 1.0 and wl.swiglu_limit == 10.0
+
+    specs = benchbw._offload_bank_specs("gguf", wl.hidden, wl.inter)
+    assert tuple(specs) == ("gate", "up", "down")
+    assert {k: v for k, (v, _) in specs.items()} == {
+        "gate": wl.inter * (wl.hidden // 256) * 98,
+        "up": wl.inter * (wl.hidden // 256) * 98,
+        "down": wl.hidden * (wl.inter // 256) * 210,
+    }
+    assert all(dt is torch.uint8 for _, dt in specs.values())
+    # the bench geometry is the sizing table the engine consults pre-load
+    assert benchbw._expert_bytes("gguf", wl.hidden, wl.inter) == _BANK_BYTES_PER_EXPERT["gguf"](wl.hidden, wl.inter)
+
+    # identity profile row: the reader maps "gguf" through unchanged
+    prof = {
+        "gpu": {"name": "FAKE GPU"},
+        "dtypes": {"gguf": "offload"},
+        "dtype_kernels": {"gguf": {"cpu_moe_gbs": 100.0, "pcie_gather_gbs": 40.0}},
+    }
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps(prof))
+    assert load_backend_recommendation("gguf", path=str(path)) == "offload"
+    assert load_hybrid_fetch_fraction("gguf", path=str(path)) == pytest.approx(0.4)
+
+    # the bench itself: the CPU-MoE section skips (gguf not in _CPU_MOE_FORMATS), so the
+    # verdict is offload even when the PCIe gather side would look slow
+    assert "gguf" not in benchbw._CPU_MOE_FORMATS
+    eb = benchbw._expert_bytes("gguf", wl.hidden, wl.inter)
+    monkeypatch.setattr(
+        benchbw, "measure_pcie_gather_bw",
+        lambda *a, **k: {"bw_gbs": 40.0, "expert_bytes": eb, "synth_experts": 160, "fused": True},
+    )
+    entry = benchbw._bench_format(
+        "gguf", wl, torch.device("cuda"), threshold=1.0, cpu_threads=0, cpu_iters=1, pcie_iters=1
+    )
+    assert entry["recommended"] == "offload"
+    assert entry["cpu_moe_gbs"] is None and entry["cpu_moe_isa"] is None
+    assert entry["ratio"] is None and entry["pcie_gather_gbs"] == 40.0
+    assert "CPU MoE has no gguf weight path" in entry["note"]

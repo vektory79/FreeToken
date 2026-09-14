@@ -1,0 +1,1016 @@
+"""Phase 5: glm5next gguf expert banks -> offload path.
+
+Covers the hook resolution (weight.py -> glm5_next/gguf.load_gguf_expert_sources),
+per-layer ggml-type preservation, bank geometry vs BLOCK_SHAPE, the provider
+dispatch (expert_banks fmt "gguf"), sizing, the issue-#186 moe_vec chunk cap, and
+a GPU smoke that pushes the fixture banks through an OffloadMoeCache into the
+borrowed ggml kernel. The 147 GB checkpoint is never opened (iter fixture only).
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+import numpy as np
+import pytest
+import torch
+
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+
+from test_glm5_next_gguf import (  # reuse the iter fixture + writer helpers
+    _DOWN_BANK_BYTES,
+    _EFF,
+    _H,
+    _ITER_METADATA,
+    _NE,
+    _bank_vals,
+    _iter_tensor_set,
+    _pack_q8_0,
+    _write_iter_gguf,
+)
+
+
+def _bank_cfg():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        first_k_dense_replace=1,
+        num_layers=3,
+        num_moe_layers=2,
+        num_experts=_NE,
+        hidden_size=_H,
+        moe_intermediate_size=_EFF,
+        expert_quant="none",
+        moe_weight_format="gguf",
+    )
+
+
+def test_gguf_expert_sources_hook(tmp_path):
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    path = _write_iter_gguf(tmp_path / "banks.gguf")
+    banks, types = load_gguf_moe_expert_sources(str(path), _bank_cfg())
+
+    # checkpoint layers 1,2 -> bank layers 0,1 (first_k_dense_replace = 1); blk.3
+    # is the iter fixture's MTP slot and must not appear.
+    assert sorted(banks) == ["down", "gate", "up"]
+    for role, rb in (("gate", 272), ("up", 272), ("down", 210)):  # Q8_0/Q6_K row widths
+        assert len(banks[role]) == 2
+        for t in banks[role]:
+            assert t.dtype == torch.uint8
+            assert t.shape == (_NE, _EFF, rb)  # one expert plane per dim-0 slot, packed verbatim
+            assert t.is_contiguous()
+    assert types == ((8, 8, 14), (8, 8, 14))  # Q8_0/Q8_0/Q6_K per bank layer
+
+
+def test_gguf_bank_slicing_matches_source(tmp_path):
+    # a dim-0 slice of the bank tensor must equal the expert's packed rows verbatim
+    from freetoken.models.gguf.reader import iter_gguf_tensors
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    path = _write_iter_gguf(tmp_path / "banks.gguf")
+    bank_list, _ = load_gguf_moe_expert_sources(str(path), _bank_cfg())
+    gate0 = bank_list["gate"][0]
+    src = next(
+        t for t in iter_gguf_tensors(str(path)) if t.name == "blk.1.ffn_gate_exps.weight"
+    )
+    raw = src.packed().reshape(_NE, _EFF, -1)  # [E, rows, row_bytes], packed rows
+    ref = raw
+    # expert e's packed rows are the dim-0 slice verbatim (no dequant, no repack) -
+    # exactly what the offload cache copies per slot
+    assert torch.equal(gate0.reshape(-1), ref.reshape(-1))
+    assert torch.equal(gate0[0], ref[0])
+
+
+def test_provider_dispatch_gguf(tmp_path):
+    from freetoken.moe.expert_banks import load_expert_banks
+
+    path = _write_iter_gguf(tmp_path / "banks.gguf")
+    banks = load_expert_banks(str(path), _bank_cfg(), device=torch.device("cpu"), dtype=torch.bfloat16)
+    assert banks.quant_format == "gguf"
+    assert sorted(banks.sources) == ["down", "gate", "up"]
+    assert banks.gguf_types == ((8, 8, 14), (8, 8, 14))
+    assert banks.streamed is False
+    for role in ("gate", "up", "down"):
+        assert len(banks.sources[role]) == 2
+        assert banks.sources[role][0].shape[0] == _NE and banks.sources[role][0].shape[1] == _EFF
+
+
+def test_bank_bytes_estimate_gguf():
+    from freetoken.moe.expert_banks import bank_bytes_estimate
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE
+
+    cfg = _bank_cfg()
+    est = bank_bytes_estimate(cfg)
+    gate_up = 2 * _EFF * (_H // 256) * 98  # IQ3_XXS rows
+    down = _H * (_EFF // 256) * 210  # conservative Q6_K rows
+    assert est == cfg.num_moe_layers * _NE * (gate_up + down)
+    assert (BLOCK_SHAPE[18][1], BLOCK_SHAPE[23][1], BLOCK_SHAPE[14][1]) == (98, 136, 210)
+
+
+def test_moe_vec_chunk_cap():
+    from freetoken.layers.moe import _MOE_VEC_MAX_GRID, _assert_moe_vec_chunk
+
+    _assert_moe_vec_chunk(4096, 8)  # default max-prefill-length is unaffected
+    _assert_moe_vec_chunk(8191, 8)  # the cap itself
+    _assert_moe_vec_chunk(65535, 1)  # the exact grid boundary passes
+    with pytest.raises(ValueError, match="max-prefill-length"):
+        _assert_moe_vec_chunk(8192, 8)
+    # boundary-exact: 65536 = the first grid value the moe_vec kernel cannot index
+    with pytest.raises(ValueError, match="65536 exceeds the ggml moe_vec grid limit 65535"):
+        _assert_moe_vec_chunk(65536, 1)
+    assert _MOE_VEC_MAX_GRID == 65535
+
+
+def test_cpu_executor_does_not_claim_gguf():
+    from freetoken.moe.cpu_executor import _WFMT_IDS
+
+    assert "gguf" not in _WFMT_IDS
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_offload_cache_smoke_gguf_banks(tmp_path):
+    # end-to-end fixture-level smoke: banks -> OffloadMoeCache -> borrowed kernel
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    path = _write_iter_gguf(tmp_path / "banks.gguf")
+    banks, types = load_gguf_moe_expert_sources(str(path), _bank_cfg())
+    cache = OffloadMoeCache(
+        num_layers=2, num_experts=_NE, cache_size=2 * _NE,
+        device=torch.device("cuda"), quant_format="gguf", gguf_types=types,
+    )
+    cache.set_bank_sources({role: [t.cuda() for t in per_layer] for role, per_layer in banks.items()})
+
+    torch.manual_seed(0)
+    # x scale ~1.0: the kernel quantizes x to q8_1 (fp32 d * int8 in HALF, so the
+    # products must stay inside fp16 range); the byte-random fixture scales then
+    # keep every dot product finite for the parity check.
+    x = torch.randn(5, _H, dtype=torch.float32, device="cuda")
+    topk_ids = torch.stack([torch.randperm(_NE, device="cuda")[:2].to(torch.int32) for _ in range(5)])
+    # identity routing over the (tokens*top_k) slot dimension for the down call:
+    # slot i of the stacked activations reads expert i mod E
+    routed_ids = (torch.arange(10, device="cuda") % _NE).to(torch.int32).unsqueeze(1)
+    from freetoken.kernel.gguf import ggml_moe_a8_vec
+
+    gate_t, up_t, down_t = types[0]
+    # the kernel consumes the stacked weight as [E, row, *] - exactly the bank
+    # layout (expert-first planes); rows inside the plane stay contiguous.
+    gate_w = cache.bank_sources["gate"][0].cuda()
+    up_w = cache.bank_sources["up"][0].cuda()
+    down_w = cache.bank_sources["down"][0].cuda()
+    g = ggml_moe_a8_vec(x, gate_w, topk_ids, 2, gate_t, _EFF, 5)
+    u = ggml_moe_a8_vec(x, up_w, topk_ids, 2, up_t, _EFF, 5)
+    inter = torch.nn.functional.silu(g * u)
+    # the fixture's Q8_0 scales are byte-random, so the intermediate magnitude is
+    # ~1e6 - far outside fp16; the q8_1 quantizer stores its fp32 scale in HALF.
+    # Scale to a realistic activation range before the down projection.
+    inter = inter / inter.abs().amax(dim=1, keepdim=True).clamp(min=1.0) * 8.0
+    # the down projection consumes ONE row per routed expert: identity routing
+    # (slot i -> expert i of the routed set, activations already stacked).
+    d = ggml_moe_a8_vec(inter, down_w, routed_ids, 1, down_t, _H, 10)
+    assert d.shape == (10, _H) and torch.isfinite(d).all()
+
+    # parity vs the dequant reference for the routed experts: the bank packs
+    # [E, rows, row_bytes] with per-row Q8_0 blocks (block 256 / 34 bytes), so the
+    # reference dequantizes row-wise from the same raw bytes.
+    from freetoken.models.gguf.reader import iter_gguf_tensors
+
+    src_t = next(t for t in iter_gguf_tensors(str(path)) if t.name == "blk.1.ffn_gate_exps.weight")
+    # packed rows = E * EFF (one row per output element, 8 Q8_0 blocks of 34 bytes);
+    # row r decodes to output values r*256..r*256+255 -> direct [E, EFF, H] grid
+    packed = src_t.packed().reshape(_NE, _EFF, 8, 34)
+    # _pack_q8_0 layout: byte 0x3C at b*34+1 is the fp16 scale head (LE), quants at
+    # b*34+2..+33; the block d (1.0) then quants int8
+    ds = np.ones((_NE, _EFF, 8), np.float32)  # the fixture's scale is exactly 1.0
+    qs_np = np.ascontiguousarray(packed[..., 2:].numpy()).reshape(_NE, _EFF, 8 * 32).view(np.int8)
+    qs = torch.from_numpy(qs_np).reshape(_NE, _EFF, 8, 32).float()
+    ref_gate = (torch.from_numpy(ds).unsqueeze(-1) * qs).reshape(_NE, _EFF, _H).numpy()
+
+    # ggml_moe_a8_vec quantizes x to q8_1 and the fixture's Q8_0 scales are
+    # byte-random (unlike a real checkpoint), so compare DIRECTIONAL parity only:
+    # the kernel output must correlate with the fp32 reference for each token's
+    # first routed expert.
+    x32 = x.float().cpu().numpy()
+    for t in range(5):
+        ref_g = ref_gate[int(topk_ids[t, 0])].astype(np.float32) @ x32[t]
+        got_g = g.reshape(5, 2, _EFF)[t, 0].float().cpu().numpy()
+        corr = np.corrcoef(ref_g, got_g)[0, 1]
+        assert corr > 0.95, (t, corr)
+
+
+def _craft_uniform_gguf_banks(types, E, rows_ne0=None):
+    """Deterministic packed banks: Q8_0 rows decode to +0.25 everywhere (fp16 d=0.25,
+    q=1); Q6_K rows to -16 (fp16 d=0.5, int8 scales=1, zero nibbles -> q=-32). Uniform
+    weights make the whole MoE output analytic. ``rows_ne0`` maps role -> (output
+    rows, input dim ne0); blocks pack over ne0, so the two are distinct for
+    non-square geometries."""
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE
+
+    rows_ne0 = rows_ne0 or {"gate": (_EFF, _H), "up": (_EFF, _H), "down": (_H, _EFF)}
+    d_bytes = {
+        8: torch.tensor([0.25], dtype=torch.float16).view(torch.uint8),  # block_q8_0 d
+        14: torch.tensor([0.5], dtype=torch.float16).view(torch.uint8),  # block_q6_K d
+    }
+    banks = {}
+    for role, typ in zip(("gate", "up", "down"), types):
+        rows, ne0 = rows_ne0[role]
+        blk, rb = BLOCK_SHAPE[typ]
+        nblk = ne0 // blk
+        t = torch.zeros(E, rows, nblk * rb, dtype=torch.uint8).view(E, rows, nblk, rb)
+        if typ == 8:
+            t[..., 0:2] = d_bytes[typ]  # block_q8_0: half d first, then 32 int8 quants
+            t[..., 2:] = 1
+        else:
+            # block_q6_K keeps d LAST (ql, qh, scales, d; ggml-common.h:104-110) -
+            # the fixture's 208:210 scale pin encodes the same convention
+            t[..., 192:208] = 1  # int8 scales
+            t[..., 208:210] = d_bytes[typ]
+        banks[role] = t.view(E, rows, nblk * rb)
+    return banks
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_expert_gemm_gguf_dispatch():
+    # Drives OffloadMoELayer._expert_gemm's gguf branch end to end: the tokens/top_k
+    # wiring, cache.gguf_types per-layer routing, and the gated epilogue. Layer 0 is
+    # all-Q6_K, layer 1 all-Q8_0 -> the type dispatch must follow the layer, and the
+    # uniform weights pin the output to an analytic reference.
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    layer_types = ((14, 14, 14), (8, 8, 8))  # Q6_K layer, then Q8_0 layer
+    cache = OffloadMoeCache(
+        num_layers=2, num_experts=_NE, cache_size=2 * _NE,
+        device=torch.device("cuda"), quant_format="gguf", gguf_types=layer_types,
+    )
+    assert cache.gguf_types == layer_types
+
+    layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+    layer.quant_method = None
+    layer.activation = "swiglu_clamp"
+    layer.alpha = 1.0
+    layer.limit = 10.0
+
+    torch.manual_seed(0)
+    # Per-token bias pushes every |g| past the swiglu_clamp limit: the clamped
+    # epilogue absorbs the q8_1 x-quant noise exactly, so the analytic reference
+    # stays tight (rtol 0.02) instead of chasing 2*delta_g/g noise on small signals.
+    base = 0.05 * torch.randn(5, _H, dtype=torch.float32, device="cuda")
+    bias = torch.linspace(1.0, 3.0, 5, device="cuda").unsqueeze(-1)
+    x = (base + bias).contiguous()
+    topk_ids = torch.stack(
+        [torch.randperm(_NE, device="cuda")[:2].to(torch.int32) for _ in range(5)]
+    )
+    topk_weights = torch.rand(5, 2, dtype=torch.float32, device="cuda")
+    topk_weights = (topk_weights / topk_weights.sum(-1, keepdim=True)).contiguous()
+
+    outs = {}
+    for lid, types in enumerate(layer_types):
+        banks = _craft_uniform_gguf_banks(types, _NE)
+        views = tuple(banks[role].cuda() for role in ("gate", "up", "down"))
+        layer.layer_id = lid
+        outs[lid] = layer._expert_gemm(
+            cache, x, topk_weights, topk_ids, views=views, n=None, alphas=None,
+            is_prefill=False,
+        )
+        assert outs[lid].shape == (5, _H)
+        assert torch.isfinite(outs[lid]).all()
+
+    # analytic reference: uniform gate/up rows make the per-slot gate/up scalars
+    # w*sum(x); mirror the epilogue with the production kernel on the (5, [gate; up])
+    # pair, then the down projection collapses to w * I * inter per slot.
+    from freetoken.layers import swiglu_clamp_and_mul
+
+    S = x.sum(-1)
+    for lid, types in enumerate(layer_types):
+        w = -16.0 if types[0] == 14 else 0.25
+        pair = torch.stack((w * S, w * S), dim=-1)
+        inter = swiglu_clamp_and_mul(pair, alpha=1.0, limit=10.0)  # (tokens, 1)
+        ref = (topk_weights * (w * _EFF) * inter).sum(-1)
+        ref = ref.unsqueeze(-1).expand(-1, _H)  # uniform down weights: every row identical
+        assert torch.allclose(outs[lid], ref, rtol=0.02, atol=1e-2), lid
+    assert not torch.allclose(outs[0], outs[1])  # per-layer types really dispatched
+
+
+def test_engine_offload_cache_gets_gguf_types():
+    # The wiring fixture tests cannot reach: _init_offload_moe_cache must hand
+    # banks.gguf_types to the built OffloadMoeCache (the None field default keeps
+    # every other format unaffected).
+    import inspect
+
+    from freetoken.engine.engine import Engine
+
+    src = inspect.getsource(Engine._init_offload_moe_cache)
+    assert "banks.gguf_types" in src  # per-group wiring: tuple(banks.gguf_types[l] ...)
+    assert "self.moe_offload_caches = caches" in src  # the partition list is exported
+
+
+def _variant_cfg(hidden, inter):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        first_k_dense_replace=1,
+        num_layers=3,
+        num_moe_layers=2,
+        num_experts=_NE,
+        hidden_size=hidden,
+        moe_intermediate_size=inter,
+        expert_quant="none",
+        moe_weight_format="gguf",
+    )
+
+
+def test_gguf_bank_rows_per_role(tmp_path, monkeypatch):
+    # review B1: down packs H output rows while gate/up pack I - the loader must
+    # take the row count from EACH tensor, not reuse gate's. The stock fixture is
+    # square (_H == _EFF) and masks the bug, so patch the fixture to I = _H // 2.
+    import test_glm5_next_gguf as fixture_mod
+
+    monkeypatch.setattr(fixture_mod, "_EFF", _H // 2)
+    path = fixture_mod._write_iter_gguf(
+        tmp_path / "nonsquare.gguf",
+        metadata={
+            **_ITER_METADATA,
+            "glm5next.expert_feed_forward_length": _H // 2,
+            "glm5next.expert_shared_feed_forward_length": _H // 2,
+        },
+    )
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    banks, types = load_gguf_moe_expert_sources(str(path), _variant_cfg(_H, _H // 2))
+    for layer in range(2):
+        assert banks["gate"][layer].shape == (_NE, _H // 2, _H // 32 * 34)
+        assert banks["up"][layer].shape == (_NE, _H // 2, _H // 32 * 34)
+        assert banks["down"][layer].shape == (_NE, _H, 210)  # rows stay H (Q6_K width)
+    assert types == ((8, 8, 14), (8, 8, 14))
+
+
+def test_gguf_types_role_order_not_file_order(tmp_path):
+    # review B2: the per-layer type tuple must be (gate, up, down) even when the
+    # file lists the down tensor first; distinct per-role types make a swap visible
+    # (the stock Q8_0/Q8_0/Q6_K fixture is symmetric and would not catch it).
+    import gguf as gguf_mod
+
+    import test_glm5_next_gguf as fixture_mod
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    q8 = gguf_mod.GGMLQuantizationType.Q8_0
+    i3 = gguf_mod.GGMLQuantizationType.IQ3_XXS
+    q6k = gguf_mod.GGMLQuantizationType.Q6_K
+    full = fixture_mod._iter_tensor_set()  # full trunk (token_embd etc. for the spec resolver)
+    downs = {n: e for n, e in full.items() if "ffn_down_exps" in n}
+    gates = {n: e for n, e in full.items() if "ffn_gate_exps" in n}
+    ups = {n: e for n, e in full.items() if "ffn_up_exps" in n}
+    rest = {n: e for n, e in full.items() if "exps" not in n}
+    for layer in (1, 2):
+        downs[f"blk.{layer}.ffn_down_exps.weight"] = (fixture_mod._DOWN_BANK_BYTES, q6k)
+        gates[f"blk.{layer}.ffn_gate_exps.weight"] = (
+            fixture_mod._pack_q8_0(fixture_mod._bank_vals(0)), q8,
+        )
+        ups[f"blk.{layer}.ffn_up_exps.weight"] = (
+            np.random.default_rng(layer).integers(0, 256, (_NE, _H, 98), dtype=np.uint8), i3,
+        )
+    ts = {**downs, **gates, **ups, **rest}  # down tensors FIRST in the file
+    path = fixture_mod._write_iter_gguf(tmp_path / "downfirst.gguf", tensors=ts)
+    banks, types = load_gguf_moe_expert_sources(str(path), _bank_cfg())
+    assert types == ((8, 18, 14), (8, 18, 14))  # role order, not encounter order
+    assert banks["gate"][0].shape == (_NE, _EFF, 272)
+    assert banks["up"][0].shape == (_NE, _EFF, 98)
+    assert banks["down"][0].shape == (_NE, _H, 210)
+
+
+def test_gguf_rejects_kernel_unsupported_type(tmp_path):
+    # review B6: Q5_K has no MMVQ case in the moe_vec switch - the loader must
+    # reject it loudly instead of letting the kernel return silent zeros.
+    import gguf as gguf_mod
+
+    import test_glm5_next_gguf as fixture_mod
+
+    q8 = gguf_mod.GGMLQuantizationType.Q8_0
+    q5k = gguf_mod.GGMLQuantizationType.Q5_K
+    ts = fixture_mod._iter_tensor_set()  # full trunk (token_embd etc. for the spec resolver)
+    for layer in (1, 2):
+        ts[f"blk.{layer}.ffn_down_exps.weight"] = (
+            np.random.default_rng(layer).integers(0, 256, (_NE, _H, 176), dtype=np.uint8), q5k,
+        )
+    path = fixture_mod._write_iter_gguf(tmp_path / "q5k.gguf", tensors=ts)
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    with pytest.raises(ValueError, match="no MMVQ kernel"):
+        load_gguf_moe_expert_sources(str(path), _bank_cfg())
+
+
+def test_adjust_config_clamps_gguf_prefill_chunk():
+    # review B5: the default 8192 chunk at top_k 8 is exactly the 65536 moe_vec
+    # grid limit - config time clamps to 8191 on the gguf path; others untouched.
+    from types import SimpleNamespace
+
+    from freetoken.engine.engine import _adjust_config
+
+    model_config = SimpleNamespace(
+        single_stream_only=False,
+        is_moe=True,
+        expert_quant="none",
+        moe_weight_format="gguf",
+        hidden_act="swiglu_clamp",
+        has_swa_attention=False,
+        has_linear_attention=False,
+        num_experts_per_tok=8,
+    )
+
+    class Cfg:
+        moe_cache_auto = False
+        moe_cache_size = 0
+        moe_cache_rate = None
+        moe_strategy = "offload"
+        moe_cpu_layers = None
+        max_running_req = 4
+        cuda_graph_max_bs = 2
+        cuda_graph_bs = [1, 2]
+        max_seq_len = 1024
+        page_size = 1
+        attention_backend = "fi"
+        num_page_override = None
+        num_token_override = None
+        max_extend_tokens = 8192
+
+        @property
+        def model_config(self):
+            return model_config
+
+    cfg = Cfg()
+    _adjust_config(cfg)
+    assert cfg.max_extend_tokens == 8191  # 65535 // 8
+
+    cfg.max_extend_tokens = 8191
+    _adjust_config(cfg)
+    assert cfg.max_extend_tokens == 8191  # already inside the cap: no-op
+
+    model_config.moe_weight_format = None  # non-gguf expert path: no clamp
+    cfg.max_extend_tokens = 8192
+    _adjust_config(cfg)
+    assert cfg.max_extend_tokens == 8192
+
+
+def test_set_bank_sources_rejects_heterogeneous_widths():
+    # review B3: one unified slot pool per bank cannot serve layers with different
+    # packed row widths (the moe_vec kernel reads slot rows at the layer's own
+    # width) - reject loudly instead of tripping an assert (ggml issue #194).
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    cache = OffloadMoeCache(
+        num_layers=2, num_experts=_NE, cache_size=2 * _NE,
+        device=torch.device("cpu"), quant_format="gguf",
+        gguf_types=((8, 8, 14), (8, 8, 8)),
+    )
+    sources = {
+        "gate": [torch.zeros(_NE, _EFF, 272, dtype=torch.uint8) for _ in range(2)],
+        "up": [torch.zeros(_NE, _EFF, 272, dtype=torch.uint8) for _ in range(2)],
+        "down": [
+            torch.zeros(_NE, _H, 210, dtype=torch.uint8),
+            torch.zeros(_NE, _H, 34, dtype=torch.uint8),  # layer 1 packs narrower
+        ],
+    }
+    with pytest.raises(ValueError, match="issue #194"):
+        cache.set_bank_sources(sources)
+
+
+def test_moe_cache_budget_split_rule():
+    # review B3: the slot budget splits proportionally to each group's total bank
+    # bytes (here: equal byte weights -> equal shares), every group is floored at
+    # num_experts, an unfundable explicit budget rejects naming the floors, and the
+    # auto byte envelope shrinks the over-floor groups back inside the plan.
+    from types import SimpleNamespace
+
+    from freetoken.engine.cache_budget import expert_bytes_per_slot
+    from freetoken.engine.engine import Engine
+
+    E = 4
+    # per-layer (gate rows, gate rb, down rows, down rb) chosen so every layer weighs
+    # exactly 278,528 bytes: 2 sig-A layers, 1 sig-B, 1 sig-C
+    sigs = [(128, 272, 256, 272), (128, 272, 256, 272), (256, 272, 512, 272), (128, 544, 256, 544)]
+    sources = {
+        "gate": [torch.empty(E, gr, grb, dtype=torch.uint8) for gr, grb, _, _ in sigs],
+        "up": [torch.empty(E, gr, grb, dtype=torch.uint8) for gr, grb, _, _ in sigs],
+        "down": [torch.empty(E, dr, drb, dtype=torch.uint8) for _, _, dr, drb in sigs],
+    }
+    banks = SimpleNamespace(sources=sources)
+    groups = Engine._group_bank_layers(banks, len(sigs))
+    assert groups == [[0, 1], [2], [3]]
+
+    sizes = Engine._split_moe_cache_budget(banks, groups, 1000, E)
+    assert sizes == [333, 333, 333]  # equal byte weights -> equal shares (1000//3)
+
+    assert Engine._split_moe_cache_budget(banks, groups, 12, E) == [4, 4, 4]  # exactly the floors
+    with pytest.raises(ValueError, match="cannot fund the per-signature slot floors"):
+        Engine._split_moe_cache_budget(banks, groups, 11, E)
+    # the advice names the TRUE binding group's minimum (ceil(E*W/w_i)), not groups*E
+    with pytest.raises(ValueError, match=r"at least 12"):
+        Engine._split_moe_cache_budget(banks, groups, 11, E)
+
+    # auto envelope: the raw shares of the 400-slot budget are byte-proportional
+    # (133 each); the envelope then shrinks the widest-footprint groups - B to its
+    # floor, C partially - until the partitioned total fits 400 average-width slots
+    b_avg = expert_bytes_per_slot(sources)
+    cap_slots = 400
+    sizes = Engine._split_moe_cache_budget(banks, groups, cap_slots, E, byte_cap_slots=cap_slots)
+    per_group_slot_bytes = [
+        expert_bytes_per_slot({n: [sources[n][l] for l in m] for n in sources})
+        for m in groups
+    ]
+    assert all(s >= E for s in sizes)
+    assert sum(s * b for s, b in zip(sizes, per_group_slot_bytes)) <= cap_slots * b_avg
+    assert sizes == [133, 4, 129]
+
+
+def test_engine_partitions_degenerate_single_signature():
+    # a uniform-signature file must degenerate to ONE group covering every layer and
+    # the untouched single-cache budget (today's exact behavior)
+    from types import SimpleNamespace
+
+    from freetoken.engine.engine import Engine
+
+    sources = {
+        "gate": [torch.empty(_NE, _EFF, 272, dtype=torch.uint8) for _ in range(2)],
+        "up": [torch.empty(_NE, _EFF, 272, dtype=torch.uint8) for _ in range(2)],
+        "down": [torch.empty(_NE, _H, 210, dtype=torch.uint8) for _ in range(2)],
+    }
+    banks = SimpleNamespace(sources=sources)
+    assert Engine._group_bank_layers(banks, 2) == [[0, 1]]
+    assert Engine._split_moe_cache_budget(banks, [[0, 1]], 50, _NE) == [50]
+
+
+def test_engine_partitions_three_groups_end_to_end(tmp_path):
+    # review B3 end to end: a three-signature bank set partitions into per-signature
+    # caches; each layer's _expert_gemm reads ITS cache (local layer ids, per-group
+    # gguf_types - a wrong routing would decode the other group's types and miss the
+    # analytic reference); the single-layer minority group is whole-layer-resident.
+    from types import SimpleNamespace
+
+    from freetoken.engine.engine import Engine
+    from freetoken.layers import swiglu_clamp_and_mul
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    E, H, I = 4, 512, 256  # non-square, like the real file (I != H); I >= 256 so the
+    # Q6_K/IQ blocks pack over the down bank's ne0
+    sigs = [(8, 8, 14), (8, 8, 14), (14, 14, 14), (8, 8, 8)]
+    rows_ne0 = {"gate": (I, H), "up": (I, H), "down": (H, I)}
+
+    def rb(rows, ne0, typ):
+        from freetoken.models.gguf.dequant import BLOCK_SHAPE
+
+        blk, width = BLOCK_SHAPE[typ]
+        return rows, ne0 // blk * width
+
+    per_layer = [_craft_uniform_gguf_banks(t, E, rows_ne0) for t in sigs]
+    sources = {
+        role: [per_layer[l][role] for l in range(4)] for role in ("gate", "up", "down")
+    }
+    banks = SimpleNamespace(
+        sources=sources,
+        gguf_types=tuple(sigs),
+        quant_format="gguf",
+        layer_residency=None,
+        gate_up_alpha=None,
+        down_alpha=None,
+    )
+    groups = Engine._group_bank_layers(banks, 4)
+    assert groups == [[0, 1], [2], [3]]
+    sizes = Engine._split_moe_cache_budget(banks, groups, 20, E)
+    # byte-proportional with floors: every group can hold its whole layer
+    assert all(s >= E for s in sizes) and sum(sizes) <= 20
+    assert sizes[0] == max(sizes)  # the dominant signature keeps the largest share
+
+    caches = []
+    for members, size_g in zip(groups, sizes):
+        cache = OffloadMoeCache(
+            num_layers=len(members), num_experts=E, cache_size=size_g,
+            device=torch.device("cuda"), quant_format="gguf",
+            gguf_types=tuple(sigs[l] for l in members),
+        )
+        cache.set_bank_sources({
+            role: [sources[role][l].cuda() for l in members] for role in ("gate", "up", "down")
+        })
+        caches.append(cache)
+    assert caches[2].cache_size >= E  # the single-layer minority is whole-layer-resident
+
+    torch.manual_seed(0)
+    base = 0.05 * torch.randn(5, H, dtype=torch.float32, device="cuda")
+    bias = torch.linspace(1.0, 3.0, 5, device="cuda").unsqueeze(-1)
+    x = (base + bias).contiguous()  # |gate| >> swiglu limit: clamped, quant-noise-free refs
+    topk_ids = torch.stack(
+        [torch.randperm(E, device="cuda")[:2].to(torch.int32) for _ in range(5)]
+    )
+    topk_weights = torch.rand(5, 2, dtype=torch.float32, device="cuda")
+    topk_weights = (topk_weights / topk_weights.sum(-1, keepdim=True)).contiguous()
+
+    outs = {}
+    for gi, members in enumerate(groups):
+        for local, g in enumerate(members):
+            layer = OffloadMoELayer.__new__(OffloadMoELayer)
+            layer.quant_method = None
+            layer.activation = "swiglu_clamp"
+            layer.alpha = 1.0
+            layer.limit = 10.0
+            layer.offload_cache = caches[gi]
+            layer.layer_id = local
+            types = sigs[g]
+            banks_l = _craft_uniform_gguf_banks(types, E, rows_ne0)
+            views = tuple(banks_l[r].cuda() for r in ("gate", "up", "down"))
+            out = layer._expert_gemm(
+                caches[gi], x, topk_weights, topk_ids,
+                views=views, n=None, alphas=None, is_prefill=False,
+            )
+            assert out.shape == (5, H) and torch.isfinite(out).all()
+            outs[g] = out
+            # the layer's own cache must carry ITS signature at the LOCAL id
+            assert caches[gi].gguf_types[layer.layer_id] == types
+
+    S = x.sum(-1)
+    for g, types in enumerate(sigs):
+        w_gate, w_up, w_down = (0.25 if t == 8 else -16.0 for t in types)
+        pair = torch.stack((w_gate * S, w_up * S), dim=-1)
+        inter = swiglu_clamp_and_mul(pair, alpha=1.0, limit=10.0)
+        ref = (topk_weights * (w_down * I) * inter).sum(-1)
+        ref = ref.unsqueeze(-1).expand(-1, H)
+        assert torch.allclose(outs[g], ref, rtol=0.02, atol=1e-2), g
+    assert not torch.allclose(outs[0], outs[2])
+    assert not torch.allclose(outs[0], outs[3])
+
+
+def test_partition_prefill_overlap_degrade_rule():
+    # delta review F1: a group whose slot share < 2*num_experts degrades to
+    # synchronous materialized prefill instead of flooring every group at 2E (the
+    # wide minority signatures would double their slot cost). Real-file shape: the
+    # 1326-slot auto plan gives the 39-layer dominant group ~1232 slots (overlap
+    # stays on) and the 2-layer/1-layer minorities 56/38 (overlap off).
+    from freetoken.engine.engine import Engine
+
+    E = 288
+    assert Engine._partition_prefill_overlap(True, 1232, E) is True
+    assert Engine._partition_prefill_overlap(True, 56, E) is False
+    assert Engine._partition_prefill_overlap(True, 38, E) is False
+    assert Engine._partition_prefill_overlap(False, 4096, E) is False
+
+
+def test_engine_partitions_attach_routing():
+    # delta review F4: behavioral pin of the attach loop - each stub layer must end
+    # up on ITS signature's cache with the LOCAL layer id, the group's gguf_types at
+    # that local id, and the gathered alpha slice for its global bank layer.
+    from types import SimpleNamespace
+
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    E, H, I = 4, 512, 256
+    sigs = [(8, 8, 14), (8, 8, 14), (14, 14, 14), (8, 8, 8)]
+    rows_ne0 = {"gate": (I, H), "up": (I, H), "down": (H, I)}
+    per_layer = [_craft_uniform_gguf_banks(t, E, rows_ne0) for t in sigs]
+    sources = {role: [per_layer[l][role] for l in range(4)] for role in ("gate", "up", "down")}
+    banks = SimpleNamespace(
+        sources=sources,
+        gguf_types=tuple(sigs),
+        quant_format="gguf",
+        layer_residency=None,
+        gate_up_alpha=torch.arange(4 * E, dtype=torch.float32),
+        down_alpha=torch.arange(4 * E, dtype=torch.float32) + 1000.0,
+    )
+    groups = Engine._group_bank_layers(banks, 4)
+    assert groups == [[0, 1], [2], [3]]
+    caches = []
+    for members in groups:
+        cache = OffloadMoeCache(
+            num_layers=len(members), num_experts=E, cache_size=E,
+            device=torch.device("cpu"), quant_format="gguf",
+            gguf_types=tuple(sigs[l] for l in members),
+        )
+        gu_a, dn_a = Engine._slice_alphas(banks, members, E)
+        cache.set_alphas(gu_a, dn_a)
+        cache.set_bank_sources({
+            role: [sources[role][l] for l in members] for role in ("gate", "up", "down")
+        })
+        caches.append(cache)
+
+    routing = {}
+    for gi, members in enumerate(groups):
+        for local, g in enumerate(members):
+            routing[g] = (caches[gi], local)
+    layers = [SimpleNamespace(layer_id=l, offload_cache=None) for l in range(4)]
+    Engine._route_offload_layers(layers, routing)
+    for gi, members in enumerate(groups):
+        for local, g in enumerate(members):
+            layer = layers[g]
+            assert layer.offload_cache is caches[gi]
+            assert layer.layer_id == local
+            assert caches[gi].gguf_types[local] == sigs[g]
+            gu, dn = caches[gi].alphas_for_layer(local)
+            assert torch.equal(gu, banks.gate_up_alpha[g * E:(g + 1) * E])
+            assert torch.equal(dn, banks.down_alpha[g * E:(g + 1) * E])
+
+
+def test_engine_partitions_real_model_routing(tmp_path):
+    # The missing real-path guard for the layer_id IMA: build the REAL glm5next model
+    # (OPList container -> Glm5NextDecoderLayer -> Glm5NextSparseBlock ->
+    # make_moe_layer), run the REAL iter_offload_moe_layers walk + the attach, and
+    # assert for EVERY OffloadMoELayer: the routed object IS the model's own
+    # .experts module (id identity), layer.layer_id is LOCAL to its partition, and
+    # layer.layer_id * num_experts stays inside the partition's slot/id arrays (the
+    # exact lru_ensure id_base arithmetic that IMA'd on the real boot).
+    from types import SimpleNamespace
+
+    from freetoken.distributed import set_tp_info, try_get_tp_info
+    from freetoken.engine.engine import Engine
+    from freetoken.models.gguf.config import build_gguf_shim
+    from freetoken.models.glm5_next.gguf import parse_gguf_config
+    from freetoken.models.glm5_next.model import Glm5NextForCausalLM
+    from freetoken.models.glm5_next.moe import Glm5NextSparseBlock
+    from freetoken.moe.offload_cache import OffloadMoeCache, iter_offload_moe_layers
+
+    if try_get_tp_info() is None:
+        set_tp_info(rank=0, size=1)
+
+    # five trunk blocks parse to FOUR (the fixture tensors stop at blk.3 - the parse
+    # clamps to the tensor-backed blocks): first_k_dense_replace=1 -> three MoE bank
+    # layers. Two share a signature (the dominant 2-layer partition), one is a
+    # single-layer minority partition; the third signature shape is covered by the
+    # budget/e2e tests below.
+    meta = {
+        **_ITER_METADATA,
+        "glm5next.block_count": 5,
+        "glm5next.attention.head_count_kv": [0, 0, 1, 1, 1],
+        "glm5next.swiglu_clamp_exp": [10.0] * 5,
+        "glm5next.swiglu_clamp_shexp": [10.0] * 5,
+    }
+    path = _write_iter_gguf(tmp_path / "routing.gguf", metadata=meta)
+    config = parse_gguf_config(build_gguf_shim(path))
+    # the layer CLASS (resident MoELayer vs OffloadMoELayer) is chosen at MODEL BUILD
+    # from model_config.moe_strategy - the engine syncs --moe-strategy into the model
+    # config before create_model; mirror that here or the walk finds no offload layers
+    object.__setattr__(config, "moe_strategy", "offload")
+    if not getattr(config, "decode_target", None):
+        object.__setattr__(config, "decode_target", "gpu")
+    E = config.num_experts
+    model = Glm5NextForCausalLM(config)
+
+    sparse = [
+        blk.mlp for blk in model.model.layers.op_list
+        if isinstance(getattr(blk, "mlp", None), Glm5NextSparseBlock)
+    ]
+    assert len(sparse) == config.num_moe_layers == 3
+    from freetoken.layers.moe import OffloadMoELayer as _OffloadMoELayer
+
+    assert all(isinstance(blk.experts, _OffloadMoELayer) for blk in sparse)
+    sigs = [(8, 8, 14), (8, 8, 14), (14, 14, 14)]
+    per_layer = [_craft_uniform_gguf_banks(t, E) for t in sigs]
+    sources = {role: [per_layer[l][role] for l in range(3)] for role in ("gate", "up", "down")}
+    banks = SimpleNamespace(
+        sources=sources,
+        gguf_types=tuple(sigs),
+        quant_format="gguf",
+        layer_residency=None,
+        gate_up_alpha=None,
+        down_alpha=None,
+    )
+    groups = Engine._group_bank_layers(banks, config.num_moe_layers)
+    assert groups == [[0, 1], [2]]
+    sizes = Engine._split_moe_cache_budget(banks, groups, 20, E)
+    assert sizes == [14, 5]  # byte-proportional, both groups above the E floor
+    caches = []
+    routing = {}
+    for gi, (members, size_g) in enumerate(zip(groups, sizes)):
+        cache = OffloadMoeCache(
+            num_layers=len(members), num_experts=E, cache_size=size_g,
+            device=torch.device("cpu"), quant_format="gguf",
+            gguf_types=tuple(sigs[l] for l in members),
+        )
+        cache.set_bank_sources({
+            role: [sources[role][l] for l in members] for role in ("gate", "up", "down")
+        })
+        caches.append(cache)
+        for local, g in enumerate(members):
+            routing[g] = (cache, local)
+
+    # the REAL walk over the REAL module tree must find exactly the model's own
+    # .experts modules (identity, not equality - this is what the boot IMA hinged on)
+    walked = list(iter_offload_moe_layers(model))
+    assert len(walked) == 3
+    assert {id(x) for x in walked} == {id(blk.experts) for blk in sparse}
+    Engine._route_offload_layers(walked, routing)
+
+    for bank, layer in enumerate(walked):
+        cache = layer.offload_cache
+        assert layer.layer_id < cache.num_layers
+        # the IMA invariant: lru_ensure's id_base = layer_id * num_experts must land
+        # inside the partition's (num_layers, num_experts) slot/id arrays
+        assert layer.layer_id * E < cache.slot_for_id.numel()
+        assert cache.gguf_types[layer.layer_id] == sigs[bank]
+    # dominant-group locals 0 and 1, minority single-layer-group local 0
+    assert [walked[g].layer_id for g in (0, 1)] == [0, 1]
+    assert walked[2].layer_id == 0
+
+
+def test_engine_gguf_types_is_a_verbatim_passthrough():
+    # banks.gguf_types reaches OffloadMoeCache as the constructor kwarg and nothing
+    # rewrites it: heterogeneous per-projection tuples (the real file's shape) and
+    # None (every non-gguf format, ExpertBanks.gguf_types default) both flow verbatim.
+    import ast
+    import inspect
+    import textwrap
+
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(Engine._init_offload_moe_cache)))
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "OffloadMoeCache"
+    ]
+    assert len(calls) == 1
+    kw = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+    # per-signature partitions hand each group its members' types verbatim
+    assert "banks.gguf_types[l] for l in members" in kw["gguf_types"]
+
+    # the cache keeps the tuple it was given (CPU fixture; the CUDA paths are covered
+    # by the dispatch tests above)
+    cache = OffloadMoeCache(
+        num_layers=1, num_experts=_NE, cache_size=2 * _NE, device=torch.device("cpu"),
+        quant_format="gguf", gguf_types=((8, 8, 14),),
+    )
+    assert cache.gguf_types == ((8, 8, 14),)
+
+
+def _craft_hetero_bank(rows, typ, E):
+    """One stacked bank [E, rows, row_bytes] whose every block decodes fp16-exact (kernel
+    and gguf-py alike) to the format's crafted constant: IQ3_XXS 0.75 (qs code 71, zero
+    scales, d 0.25), IQ4_XS 0.25 (scale byte 33 -> +1, nibble 8 -> kvalue 1, d 0.25),
+    Q6_K -16 (ql/qh 0 -> q -32, int8 scales 1, d 0.5 - d LAST per ggml-common.h)."""
+    from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K
+
+    blk, rb = BLOCK_SHAPE[typ]
+    nblk = rows // blk
+    t = torch.zeros(E, rows, nblk, rb, dtype=torch.uint8)
+    if typ == GGML_IQ3_XXS:
+        t[..., 0:2] = torch.tensor([0.25], dtype=torch.float16).view(torch.uint8)
+        t[..., 2:66] = 71
+    elif typ == GGML_IQ4_XS:
+        t[..., 0:2] = torch.tensor([0.25], dtype=torch.float16).view(torch.uint8)
+        t[..., 2:4] = 0xAA  # scales_h: every 2-bit high scale = 2
+        t[..., 4:8] = 0x11  # scales_l: every nibble = 1 -> scale index 33 -> +1
+        t[..., 8:136] = 0x88  # both nibbles = 8 -> kvalues_iq4nl[8] = 1
+    elif typ == GGML_Q6_K:
+        t[..., 192:208] = 1
+        t[..., 208:210] = torch.tensor([0.5], dtype=torch.float16).view(torch.uint8)
+    else:
+        raise AssertionError(typ)
+    return t.view(E, rows, nblk * rb)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_expert_gemm_gguf_per_projection_heterogeneity():
+    # The REAL banks file mixes types WITHIN one layer: gate/up IQ3_XXS + down IQ4_XS on
+    # 41 of 42 bank layers, gate/up IQ4_XS + down Q6_K on ckpt layer 11. Each projection
+    # must dispatch on its OWN ggml type from cache.gguf_types[layer_id] - the uniform
+    # per-layer dispatch test cannot catch a one-type-per-layer cache regression.
+    from freetoken.layers import swiglu_clamp_and_mul
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    layer_types = ((18, 18, 23), (23, 23, 14))  # IQ3_XXS/IQ3_XXS/IQ4_XS, IQ4_XS/IQ4_XS/Q6_K
+    consts = {18: 0.75, 23: 0.25, 14: -16.0}
+    cache = OffloadMoeCache(
+        num_layers=2, num_experts=_NE, cache_size=2 * _NE,
+        device=torch.device("cuda"), quant_format="gguf", gguf_types=layer_types,
+    )
+    layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+    layer.quant_method = None
+    layer.activation = "swiglu_clamp"
+    layer.alpha = 1.0
+    layer.limit = 10.0
+
+    torch.manual_seed(0)
+    # g/u stay under the clamp limit so the epilogue is the plain swiglu of the exact
+    # crafted constants; the only kernel-vs-reference deviation left is the q8_1
+    # x-quant noise (the same contract as the moe_vec parity tests, rtol 2e-2).
+    base = 0.05 * torch.randn(5, _H, dtype=torch.float32, device="cuda")
+    bias = torch.linspace(0.015, 0.03, 5, device="cuda").unsqueeze(-1)
+    x = (base + bias).contiguous()
+    topk_ids = torch.stack(
+        [torch.randperm(_NE, device="cuda")[:2].to(torch.int32) for _ in range(5)]
+    )
+    topk_weights = torch.rand(5, 2, dtype=torch.float32, device="cuda")
+    topk_weights = (topk_weights / topk_weights.sum(-1, keepdim=True)).contiguous()
+
+    outs = {}
+    for lid, types in enumerate(layer_types):
+        views = tuple(
+            _craft_hetero_bank(rows, typ, _NE).cuda()
+            for rows, typ in ((_EFF, types[0]), (_EFF, types[1]), (_H, types[2]))
+        )
+        layer.layer_id = lid
+        outs[lid] = layer._expert_gemm(
+            cache, x, topk_weights, topk_ids, views=views, n=None, alphas=None,
+            is_prefill=False,
+        )
+        assert outs[lid].shape == (5, _H)
+        assert torch.isfinite(outs[lid]).all()
+
+    # analytic reference: every bank decodes to its projection's own constant, so the
+    # per-slot gate/up are w*S and the down projection collapses to w_d * I * inter
+    S = x.sum(-1)
+    for lid, types in enumerate(layer_types):
+        w_g, w_u, w_d = consts[types[0]], consts[types[1]], consts[types[2]]
+        pair = torch.stack((w_g * S, w_u * S), dim=-1)
+        inter = swiglu_clamp_and_mul(pair, alpha=1.0, limit=10.0)  # (tokens, 1)
+        ref = (topk_weights * (w_d * _EFF) * inter).sum(-1)
+        ref = ref.unsqueeze(-1).expand(-1, _H)
+        assert torch.allclose(outs[lid], ref, rtol=0.02, atol=1e-2), lid
+    assert not torch.allclose(outs[0], outs[1])  # the two layers really dispatched
+
+
+def test_bank_bytes_estimate_gguf_real_geometry():
+    # glm5.3-flash dims (the real file's metadata; the 147 GB gguf is never opened):
+    # H=4096, I=2048, E=288, 45-3=42 MoE layers. The estimate pins gate/up at the
+    # IQ3_XXS row width and down at the Q6_K width: EXACT for the 3 Q6_K down banks
+    # (ckpt layers 11/12/44) and the IQ3_XXS gate/up pairs, overcounting the 39
+    # IQ4_XS down banks - and UNDERcounting bank layer 8's IQ4_XS gate/up pair.
+    from types import SimpleNamespace
+
+    from freetoken.moe.expert_banks import bank_bytes_estimate
+
+    H, I, E, L = 4096, 2048, 288, 42
+    cfg = SimpleNamespace(
+        num_moe_layers=L, num_experts=E, hidden_size=H, moe_intermediate_size=I,
+        expert_quant="none", moe_weight_format="gguf",
+    )
+    est = bank_bytes_estimate(cfg)
+    gate_up_iq3 = 2 * I * (H // 256) * 98
+    gate_up_iq4xs = 2 * I * (H // 256) * 136
+    down_q6k = H * (I // 256) * 210
+    down_iq4xs = H * (I // 256) * 136
+    assert est == L * E * (gate_up_iq3 + down_q6k)
+    # the real composition (82 IQ3_XXS + 41 IQ4_XS + 3 Q6_K bank tensors): 41 IQ3_XXS
+    # gate/up pairs, 1 IQ4_XS gate/up pair, 39 IQ4_XS downs, 3 Q6_K downs.
+    true_bytes = 41 * E * gate_up_iq3 + E * gate_up_iq4xs + 39 * E * down_iq4xs + 3 * E * down_q6k
+    assert est == true_bytes + 39 * E * (down_q6k - down_iq4xs) - E * (gate_up_iq4xs - gate_up_iq3)
+    assert est > true_bytes  # conservative in aggregate (overcount >> undercount)
+
+
+def test_gguf_expert_sources_missing_bank_layer_raises(tmp_path):
+    # dropping one MoE layer's whole bank group must fail loudly naming the gap, not
+    # hand the offload cache a None bank layer to copy from
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    tensors = _iter_tensor_set()
+    for name in [n for n in tensors if n.startswith("blk.2.ffn_") and n.endswith("_exps.weight")]:
+        del tensors[name]
+    path = _write_iter_gguf(tmp_path / "partial.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="missing for bank layers"):
+        load_gguf_moe_expert_sources(str(path), _bank_cfg())
+
+
+def test_gguf_expert_sources_first_k_dense_offset_and_dense_guard(tmp_path):
+    # the real file's leading_dense_block_count=3: bank index 0 must be CHECKPOINT
+    # layer 3 (bank_layer_of contract), and a bank below first_k_dense_replace is a
+    # corrupt file that must fail loudly.
+    import gguf
+    from types import SimpleNamespace
+
+    from freetoken.models.gguf.reader import iter_gguf_tensors
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    tensors = _iter_tensor_set()
+    for prefix in ("blk.1.", "blk.2.", "blk.3."):
+        for name in [n for n in tensors if n.startswith(prefix) and n.endswith("_exps.weight")]:
+            del tensors[name]
+    q8 = gguf.GGMLQuantizationType.Q8_0
+    q6k = gguf.GGMLQuantizationType.Q6_K
+    tensors["blk.3.ffn_gate_exps.weight"] = (_pack_q8_0(_bank_vals(0)), q8)
+    tensors["blk.3.ffn_up_exps.weight"] = (_pack_q8_0(_bank_vals(7)), q8)
+    tensors["blk.3.ffn_down_exps.weight"] = (_DOWN_BANK_BYTES, q6k)
+    tensors["blk.4.ffn_gate_exps.weight"] = (_pack_q8_0(_bank_vals(0)), q8)
+    tensors["blk.4.ffn_up_exps.weight"] = (_pack_q8_0(_bank_vals(7)), q8)
+    tensors["blk.4.ffn_down_exps.weight"] = (_DOWN_BANK_BYTES, q6k)
+    path = _write_iter_gguf(tmp_path / "offset3.gguf", tensors=tensors)
+    cfg = SimpleNamespace(
+        first_k_dense_replace=3, num_layers=5, num_moe_layers=2, num_experts=_NE,
+        hidden_size=_H, moe_intermediate_size=_EFF, expert_quant="none",
+        moe_weight_format="gguf",
+    )
+    banks, types = load_gguf_moe_expert_sources(str(path), cfg)
+    assert types == ((8, 8, 14), (8, 8, 14))
+    # bank 0 IS ckpt layer 3: the packed rows are the source tensor verbatim
+    src = next(t for t in iter_gguf_tensors(str(path)) if t.name == "blk.3.ffn_gate_exps.weight")
+    raw = src.packed().reshape(_NE, _EFF, -1)
+    assert torch.equal(banks["gate"][0].reshape(-1), raw.reshape(-1))
+    assert torch.equal(banks["gate"][0][0], raw[0])
+    assert torch.equal(banks["down"][1][0], next(
+        t for t in iter_gguf_tensors(str(path)) if t.name == "blk.4.ffn_down_exps.weight"
+    ).packed().reshape(_NE, _H, 210)[0])
+    # and a bank under leading_dense_block_count (the unmodified fixture at first=3)
+    # dies loudly instead of desyncing the bank count
+    with pytest.raises(ValueError, match="on dense layer 1"):
+        load_gguf_moe_expert_sources(str(_write_iter_gguf(tmp_path / "orig.gguf")), cfg)

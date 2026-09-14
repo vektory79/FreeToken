@@ -417,6 +417,39 @@ class OffloadMoELayer(MoELayer):
                 hidden_states, topk_weights, topk_ids, view, layer=self, is_prefill=is_prefill
             )
         fmt = cache.quant_format
+        if fmt == "gguf":
+            # glm5next native-GGUF banks: three stacked banks in the layer's own ggml
+            # type, dispatched to the borrowed ggml MoE MMVQ kernel per projection.
+            # Issue #186: the moe_vec grid dimension is tokens*top_k and must stay
+            # under 65535 (top_k 8 -> chunk cap 8191 tokens); default --max-prefill-
+            # length 4096 is unaffected.
+            from freetoken.kernel.gguf import ggml_moe_a8_vec
+            from freetoken.layers.activation import gated_act_and_mul
+
+            tokens = hidden_states.shape[0]
+            top_k = topk_ids.shape[1]
+            gate_bank, up_bank, down_bank = views
+            _assert_moe_vec_chunk(tokens, top_k)
+            gate_t, up_t, down_t = cache.gguf_types[self.layer_id]
+            gate = ggml_moe_a8_vec(
+                hidden_states, gate_bank, topk_ids, top_k, gate_t, gate_bank.shape[1], tokens
+            )
+            up = ggml_moe_a8_vec(
+                hidden_states, up_bank, topk_ids, top_k, up_t, up_bank.shape[1], tokens
+            )
+            # gated epilogue over UNINTERLEAVED halves: cat before the and_mul (the
+            # kernel splits x[..., :d] / x[..., d:]); alpha/limit ride the layer config
+            inter = gated_act_and_mul(
+                self.activation, torch.cat((gate, up), dim=-1), torch.empty_like(gate),
+                alpha=self.alpha, limit=self.limit if self.limit is not None else float("inf"),
+            )
+            out = ggml_moe_a8_vec(
+                inter, down_bank, topk_ids, 1, down_t, down_bank.shape[1], tokens * top_k
+            )
+            out = out.reshape(tokens, top_k, down_bank.shape[1]) * topk_weights.reshape(
+                tokens, top_k, 1
+            ).to(out.dtype)
+            return out.sum(dim=1)
         if fmt == "q4_0":
             # Native GGUF Q4_0 experts: dequant-in-kernel grouped GEMV (MMVQ) over the
             # streamed packed banks; topk_ids already index the cache slots / layer.
@@ -427,6 +460,21 @@ class OffloadMoELayer(MoELayer):
                 hidden_states, gate_up, down, topk_weights, topk_ids, self.activation
             )
         raise AssertionError(f"offload experts without a quant method only serve q4_0 banks, got {fmt!r}")
+
+
+_MOE_VEC_MAX_GRID = 65535  # issue #186: the ggml moe_vec grid dimension is tokens*top_k
+
+
+def _assert_moe_vec_chunk(tokens: int, top_k: int) -> None:
+    """Issue #186: the ggml moe_vec grid dimension is tokens*top_k and must stay
+    under 65535 (top_k 8 -> chunk cap 8191 tokens); default --max-prefill-length
+    4096 is unaffected."""
+    if tokens * top_k > _MOE_VEC_MAX_GRID:
+        raise ValueError(
+            f"tokens*top_k = {tokens * top_k} exceeds the ggml moe_vec grid limit "
+            f"{_MOE_VEC_MAX_GRID} (issue #186); cap --max-prefill-length "
+            f"(top_k {top_k} -> at most {_MOE_VEC_MAX_GRID // top_k} tokens per chunk)"
+        )
 
 
 def make_moe_layer(

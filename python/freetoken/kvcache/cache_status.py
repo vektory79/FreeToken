@@ -36,12 +36,22 @@ def compute_cache_unit_bytes(engine: "Engine") -> Dict[str, int]:
         return int(kv), int(swa)
 
     def _moe() -> int:
-        banks = getattr(engine.moe_offload_cache, "bank_caches", None)
-        if not banks:
+        caches = getattr(engine, "moe_offload_caches", None) or (
+            [engine.moe_offload_cache] if getattr(engine, "moe_offload_cache", None) else []
+        )
+        if not caches:
             return 0
-        # Each bank cache is (cache_size, *row_shape); one slot's bytes = row bytes summed over
-        # the format's banks (== cache_budget.expert_bytes_per_slot on the source rows).
-        return int(sum(t[0].numel() * t.element_size() for t in banks.values()))
+        # byte-weighted per-slot across the per-signature partitions (review B3): the
+        # dominant cache alone would misprice every other group's row width
+        from freetoken.engine.cache_budget import expert_bytes_per_slot
+
+        total_slots = sum(c.cache_size for c in caches)
+        if not total_slots:
+            return 0
+        total_bytes = sum(
+            c.cache_size * expert_bytes_per_slot(c.bank_sources) for c in caches
+        )
+        return int(total_bytes // total_slots)
 
     def _mamba() -> int:
         pool = engine.linear_state_pool
@@ -108,9 +118,12 @@ def compute_cache_floors(engine: "Engine") -> Dict[str, int]:
         return int(type(pool).min_kv_tokens(config))
 
     def _moe() -> int:
-        if engine.moe_offload_cache is None:
-            return 0
-        return int(config.model_config.num_experts)
+        # funding-aware floor: each per-signature partition is floored at num_experts,
+        # so the rebuild/resize floor is the SUM over partitions (review B3)
+        caches = getattr(engine, "moe_offload_caches", None) or (
+            [engine.moe_offload_cache] if getattr(engine, "moe_offload_cache", None) else []
+        )
+        return int(len(caches) * config.model_config.num_experts)
 
     def _mamba() -> int:
         from .linear_state_pool import _linear_pool_min_slots
@@ -173,9 +186,11 @@ def compute_cache_pools(engine: "Engine") -> Dict[str, int]:
             elif mc.has_swa_attention and config.cache_type == "swa_radix":
                 pools["swa_page_size"] = 1  # usable = pool tokens minus the slot-0 sentinel
                 pools["num_swa_pages"] = max(0, int(getattr(engine.kv_cache, "swa_num_tokens", 0) or 0) - 1)
-        moe = engine.moe_offload_cache
-        if moe is not None:
-            pools["moe_cache_size"] = int(moe.cache_size or 0)
+        caches = getattr(engine, "moe_offload_caches", None) or (
+            [engine.moe_offload_cache] if getattr(engine, "moe_offload_cache", None) else []
+        )
+        if caches:
+            pools["moe_cache_size"] = int(sum(c.cache_size or 0 for c in caches))
         lsp = engine.linear_state_pool
         if lsp is not None:
             pools["num_mamba_slots"] = max(0, int(lsp.num_slots or 0) - 1)

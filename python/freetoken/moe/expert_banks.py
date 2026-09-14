@@ -48,6 +48,9 @@ class ExpertBanks:
     kind: QuantKind | None = None
     kernel: str | None = None
     layout: dict | None = None
+    # "gguf" banks only: per-layer (gate, up, down) ggml type ints - the bank record
+    # carries the layer's own type (heterogeneous IQ3_XXS/IQ4_XS/Q6_K mix).
+    gguf_types: tuple | None = None
 
 
 def _dummy_fill(role: str, tensor: torch.Tensor) -> None:
@@ -172,14 +175,68 @@ def _q4_0_banks(model_path, model_config, device, dtype, dummy, parallel=False, 
     )
 
 
+def _gguf_banks(model_path, model_config, device, dtype, dummy, parallel=False, workers=8, chunk=8 << 20, decode_target="gpu", layer_sink=None) -> ExpertBanks:
+    if parallel:
+        raise NotImplementedError(
+            "parallel reader not implemented for gguf banks: a single packed GGUF file "
+            "is read through its own iterator (mmap, header-only seeks)"
+        )
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+
+    if dummy:
+        from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_IQ3_XXS, GGML_IQ4_XS
+        from freetoken.moe.host_banks import HostBank, pin_banks
+
+        E = model_config.num_experts
+        H, I = model_config.hidden_size, model_config.moe_intermediate_size
+        types = (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ4_XS)
+        ne = {"gate": H, "up": H, "down": I}    # ne0 = input dim -> row width
+        rows = {"gate": I, "up": I, "down": H}  # ne1 = output rows (review B7: the two differ)
+        hb = {
+            role: [
+                HostBank((E, rows[role], ne[role] // 256 * BLOCK_SHAPE[t][1]), torch.uint8)
+                for _ in range(model_config.num_moe_layers)
+            ]
+            for role, t in (("gate", types[0]), ("up", types[1]), ("down", types[2]))
+        }
+        for per in hb.values():
+            for bank in per:
+                bank.tensor.random_(0, 256)
+        if torch.cuda.is_available():
+            pin_banks(hb)  # dummy-weight boots go through the same pinned-bank path
+        banks = {role: [b.tensor for b in per] for role, per in hb.items()}
+        return ExpertBanks("gguf", banks, gguf_types=(types,) * model_config.num_moe_layers)
+
+    banks, types = load_gguf_moe_expert_sources(model_path, model_config, layer_sink=layer_sink)
+    from collections import Counter
+
+    logger.info(
+        "gguf expert bank ggml types, per-layer (gate, up, down) histogram: "
+        f"{dict(sorted(Counter(types).items()))}"
+    )
+    return ExpertBanks("gguf", banks, gguf_types=types, streamed=layer_sink is not None)
+
+
 # expert formats that still load through their own provider (GGUF)
 _PROVIDERS = {
     "q4_0": _q4_0_banks,
+    "gguf": _gguf_banks,
 }
 
 
 def _legacy_expert_banks(model_path, model_config, device, dtype, dummy, parallel, workers, chunk, decode_target="gpu", layer_sink=None) -> ExpertBanks:
     expert_quant = model_config.expert_quant
+    # glm5next gguf: expert_quant stays "none" and the format tag rides
+    # moe_weight_format ("gguf") - resolve the provider from either.
+    fmt = expert_quant if expert_quant != "none" else (
+        getattr(model_config, "moe_weight_format", None) or expert_quant
+    )
+    if fmt in _PROVIDERS:
+        return _PROVIDERS[fmt](
+            model_path, model_config, device, dtype, dummy,
+            parallel=parallel, workers=workers, chunk=chunk, decode_target=decode_target,
+            layer_sink=layer_sink,
+        )
     if expert_quant not in _PROVIDERS:
         raise ValueError(
             f"{expert_quant!r} experts load through their MoE quant method; "

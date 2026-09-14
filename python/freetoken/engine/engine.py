@@ -18,7 +18,7 @@ from freetoken.models import create_model, load_weight
 from freetoken.moe import is_offload_moe_strategy
 from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.host_banks import PinFailed
-from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
+from freetoken.moe.offload_cache import OffloadMoeCache
 from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
 from .config import EngineConfig
@@ -393,6 +393,7 @@ class Engine:
         # graphs, or other processes. Cross-rank MIN, deterministic across ranks.
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
+        self.moe_offload_caches: list[OffloadMoeCache] = []
         self.cpu_moe_executor = None
         # Host-side auxiliary stores (qwen4_exp's pinned PLE table): after the weights so a
         # load failure is not masked, before the MoE offload cache so the bank residency
@@ -484,7 +485,7 @@ class Engine:
             max_seq_len=aligned_max_seq_len,
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
-            moe_offload_cache=self.moe_offload_cache,
+            moe_offload_cache=self.moe_offload_caches or self.moe_offload_cache,
         )
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
@@ -534,6 +535,151 @@ class Engine:
             device=self.device,
         )
 
+
+    @staticmethod
+    def _partition_prefill_overlap(wants_overlap: bool, size_g: int, num_experts: int) -> bool:
+        """Per-partition overlap decision (delta review F1): prefill overlap borrows
+        two full expert-layer buffers (offload_cache __post_init__ enforces
+        cache_size >= 2*num_experts), so a group whose proportional share fell below
+        2E degrades to synchronous materialized prefill instead of flooring every
+        group at 2E - the wide minority signatures would double their slot cost.
+        Mirrors rebuild()'s degrade at offload_cache (same 2E invariant)."""
+        return bool(wants_overlap and size_g >= 2 * num_experts)
+
+    @staticmethod
+    def _route_offload_layers(layers, routing: dict[int, tuple["OffloadMoeCache", int]]) -> None:
+        """Attach each offload MoE layer to ITS signature partition and remap
+        layer.layer_id onto the cache's LOCAL index (review B3; behavioral contract
+        pinned by test_engine_partitions_attach_routing)."""
+        for layer in layers:
+            cache, local = routing[layer.layer_id]
+            layer.offload_cache = cache
+            layer.layer_id = local
+
+    @staticmethod
+    def _slice_alphas(banks, members: list[int], num_experts: int):
+        """Gather a signature group's marlin/b12x alphas out of the global
+        [num_layers * num_experts] tables: non-contiguous members need a gathered
+        per-group copy so alphas_for_layer(local) stays contiguous. ``(None, None)``
+        for formats without alphas."""
+        if banks.gate_up_alpha is None:
+            return None, None
+        return (
+            torch.cat([banks.gate_up_alpha[l * num_experts:(l + 1) * num_experts] for l in members]),
+            torch.cat([banks.down_alpha[l * num_experts:(l + 1) * num_experts] for l in members]),
+        )
+
+    @staticmethod
+    def _group_bank_layers(banks, num_layers: int) -> list[list[int]]:
+        """Partition MoE bank layers by per-layer bank shape signature (review B3,
+        ggml issue #194): one OffloadMoeCache can serve only ONE row width per bank
+        (the moe_vec kernel reads slot rows at the layer's packed width), so layers
+        with identical per-bank shapes share a cache and a heterogeneous file splits
+        into one cache per signature. Groups keep global bank order; a uniform file
+        yields exactly one group covering every layer (the pre-partition behavior)."""
+        groups: dict[tuple, list[int]] = {}
+        for layer_id in range(num_layers):
+            sig = tuple(
+                (tuple(banks.sources[name][layer_id].shape), banks.sources[name][layer_id].dtype)
+                for name in banks.sources
+            )
+            groups.setdefault(sig, []).append(layer_id)
+        return list(groups.values())
+
+    @staticmethod
+    def _split_moe_cache_budget(
+        banks, groups: list[list[int]], total_slots: int, num_experts: int,
+        byte_cap_slots: int | None = None,
+    ) -> list[int]:
+        """Split a slot budget across signature groups, proportional to each group's
+        TOTAL BANK BYTES (review B3 rule): the budget is denominated in slots of the
+        all-bank average width, so a group with wider banks consumes more of the byte
+        envelope per slot and gets proportionally fewer slots. Every group is floored
+        at ``num_experts`` slots - its whole-layer working set; below that the group
+        can never hold one full layer and thrashes unboundedly. A budget that cannot
+        fund all floors rejects loudly naming the unfunded groups. ``byte_cap_slots``
+        (the --moe-cache-auto envelope, denominated in the same layer-0-signature
+        width slots: expert_bytes_per_slot reads the FIRST layer's rows, and the
+        planner's envelope consumes the same figure - the accounting is consistent)
+        shrinks the over-floor groups back into the planned byte footprint so the
+        planner's joint KV-page solve stays valid."""
+        from freetoken.engine.cache_budget import expert_bytes_per_slot
+
+        sub_sources = [
+            {name: [banks.sources[name][l] for l in members] for name in banks.sources}
+            for members in groups
+        ]
+        per_slot = [expert_bytes_per_slot(s) for s in sub_sources]
+        weights = [
+            sum(t.numel() * t.element_size() for tensors in s.values() for t in tensors)
+            for s in sub_sources
+        ]
+        total_weight = sum(weights)
+        raw = [total_slots * w // total_weight for w in weights]
+        sizes = [max(r, num_experts) for r in raw]
+        if byte_cap_slots is None and sum(sizes) > total_slots:
+            names = ", ".join(
+                f"group {i} (layers {groups[i]}, needs {num_experts} slots)"
+                for i, r in enumerate(raw) if r < num_experts
+            )
+            # the true binding group: the smallest TOTAL budget that funds group i's
+            # floor under the byte-proportional rule is ceil(num_experts*W/w_i)
+            need = max(-(-num_experts * total_weight // w) for w in weights)
+            raise ValueError(
+                f"--moe-cache-size {total_slots} cannot fund the per-signature slot "
+                f"floors: {names}; raise it to at least {need} "
+                f"or let --moe-cache-auto size it"
+            )
+        if byte_cap_slots is not None:
+            cap_bytes = byte_cap_slots * expert_bytes_per_slot(banks.sources)
+            excess = sum(s * b for s, b in zip(sizes, per_slot)) - cap_bytes
+            for i in sorted(range(len(sizes)), key=lambda j: sizes[j] * per_slot[j], reverse=True):
+                if excess <= 0:
+                    break
+                reducible = sizes[i] - num_experts
+                if reducible <= 0:
+                    continue
+                take = min(reducible, -(-excess // per_slot[i]))  # ceil division
+                sizes[i] -= take
+                excess -= take * per_slot[i]
+            if excess > 0:
+                # same binding-group bound as the explicit-budget error, expressed
+                # against the auto planner's byte envelope
+                need = max(-(-num_experts * total_weight // w) for w in weights)
+                raise ValueError(
+                    f"--moe-cache-auto budget cannot fund the per-signature slot floors "
+                    f"({num_experts} slots per group; layers {groups}): the expert byte "
+                    f"envelope {cap_bytes / 2**30:.2f} GiB is below the partitioned "
+                    f"minimum of ~{need} slots (the binding group's proportional share)"
+                )
+        return sizes
+
+    def _moe_rebuild_sizes(self, moe_cache_size: int) -> list[int]:
+        """Runtime-rebuild split: the same proportional-to-byte-footprint rule as
+        startup, floored at each partition's num_experts; ValueError when the new
+        budget cannot fund the floors (the caller converts to CacheRebuildRejected
+        so the old caches stay intact)."""
+        caches = self.moe_offload_caches
+        if len(caches) == 1:
+            return [moe_cache_size]
+        from freetoken.engine.cache_budget import expert_bytes_per_slot
+
+        per_slot = [expert_bytes_per_slot(c.bank_sources) for c in caches]
+        # startup splits by BANK FOOTPRINT (num_layers * num_experts * row bytes);
+        # rebuild intentionally splits by CURRENT ALLOCATED footprint (cache_size *
+        # row bytes): the caches don't retain their member bank-id lists, and
+        # redistributing what is actually allocated mid-flight is the honest
+        # quantity - the two rules agree up to the startup floor clamps
+        weights = [c.cache_size * b for c, b in zip(caches, per_slot)]
+        total = sum(weights)
+        sizes = [max(moe_cache_size * w // total, c.num_experts) for w, c in zip(weights, caches)]
+        if sum(sizes) > moe_cache_size:
+            raise ValueError(
+                f"--moe-cache-size {moe_cache_size} cannot fund the per-signature slot "
+                f"floors {[c.num_experts for c in caches]}; raise it to at least "
+                f"{sum(c.num_experts for c in caches)}"
+            )
+        return sizes
 
     def _resolve_auto_moe_cache_size(self, config: EngineConfig, banks, method=None) -> tuple[int, int, bool]:
         """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
@@ -656,38 +802,108 @@ class Engine:
                 )
             layout = method.layout()
             max_slots = method.slot_limit()
-        cache = OffloadMoeCache(
-            # Models with leading dense layers (GLM-4) only have experts on the MoE
-            # layers; num_moe_layers == num_layers when first_k_dense_replace == 0.
-            num_layers=config.model_config.num_moe_layers,
-            num_experts=config.model_config.num_experts,
-            cache_size=config.moe_cache_size,
-            device=self.device,
-            cache_policy=config.moe_cache_policy,
-            prefill_overlap=config.moe_prefill_overlap,
-            prefill_hit_d2d=config.moe_prefill_hit_d2d,
-            quant_format=banks.quant_format,
-            decode_target=decode_target,
-            hybrid_max_fetch=config.moe_hybrid_max_fetch,
-            layout=layout,
-            max_slots=max_slots,
-        )
-        # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
-        cache.cpu_layer_ids = cpu_layer_ids
-        cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
-        cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
-        if decode_target == "hybrid":
-            self._resolve_hybrid_fetch(config, cache)
-        # Must be set before CUDA graph capture so the (device-side) accumulation ops are
-        # captured and re-run on every decode replay.
-        cache.collect_stats = config.moe_collect_stats
-        layers = attach_offload_moe_cache(self.model, cache)
+        # Review B3 (ggml issue #194): per-layer bank shapes may differ (the glm5next
+        # GGUF file carries three width signatures). One slot pool per bank serves one
+        # row width, so the layers are partitioned into signature groups - one
+        # OffloadMoeCache per group, each reusing the full pool/LRU/copy/prefill
+        # machinery. A uniform file yields ONE group and the loop below degenerates to
+        # the exact pre-partition construction (same args, single cache).
+        groups = self._group_bank_layers(banks, config.model_config.num_moe_layers)
+        if len(groups) == 1:
+            sizes = [config.moe_cache_size]
+        else:
+        # for --moe-cache-auto, config.moe_cache_size now holds the planner's slot
+            # count (denominated in layer-0-signature-width slots - the same figure
+            # the planner consumed): pass it back as the byte envelope so the
+            # partitioned total stays inside the planned bytes and the joint KV-page
+            # solve remains valid
+            byte_cap_slots = config.moe_cache_size if config.moe_cache_auto else None
+            sizes = self._split_moe_cache_budget(
+                banks, groups, config.moe_cache_size,
+                config.model_config.num_experts, byte_cap_slots,
+            )
+        caches: list[OffloadMoeCache] = []
+        routing: dict[int, tuple[OffloadMoeCache, int]] = {}
+        for members, size_g in zip(groups, sizes):
+            sub_sources = {
+                name: [banks.sources[name][l] for l in members] for name in banks.sources
+            }
+            overlap_g = self._partition_prefill_overlap(
+                config.moe_prefill_overlap, size_g, config.model_config.num_experts
+            )
+            if config.moe_prefill_overlap and not overlap_g:
+                logger.info_rank0(
+                    f"MoE signature group (layers {members}) got {size_g} slots < "
+                    f"2*{config.model_config.num_experts}: prefill overlap disabled for "
+                    f"this partition (synchronous materialized prefill instead)"
+                )
+            cache = OffloadMoeCache(
+                # Models with leading dense layers (GLM-4) only have experts on the MoE
+                # layers; num_moe_layers == num_layers when first_k_dense_replace == 0.
+                num_layers=len(members),
+                num_experts=config.model_config.num_experts,
+                cache_size=size_g,
+                device=self.device,
+                cache_policy=config.moe_cache_policy,
+                prefill_overlap=overlap_g,
+                prefill_hit_d2d=config.moe_prefill_hit_d2d,
+                quant_format=banks.quant_format,
+                gguf_types=(
+                    tuple(banks.gguf_types[l] for l in members)
+                    if banks.gguf_types is not None else None
+                ),
+                decode_target=decode_target,
+                hybrid_max_fetch=config.moe_hybrid_max_fetch,
+                layout=layout,
+                max_slots=max_slots,
+            )
+            # cpu_layer_ids / residency / alphas are GLOBAL bank-layer indexed: re-map
+            # them onto each group's local index space
+            cache.cpu_layer_ids = {members.index(g) for g in cpu_layer_ids if g in members}
+            cache.set_bank_sources(
+                sub_sources,
+                layer_residency=(
+                    [banks.layer_residency[l] for l in members]
+                    if banks.layer_residency is not None else None
+                ),
+            )
+            gu_a, dn_a = self._slice_alphas(banks, members, config.model_config.num_experts)
+            cache.set_alphas(gu_a, dn_a)
+            if decode_target == "hybrid":
+                self._resolve_hybrid_fetch(config, cache)
+            # Must be set before CUDA graph capture so the (device-side) accumulation ops are
+            # captured and re-run on every decode replay.
+            cache.collect_stats = config.moe_collect_stats
+            caches.append(cache)
+            for local, g in enumerate(members):
+                routing[g] = (cache, local)
+        if len(caches) > 1 and decode_target in ("cpu", "hybrid"):
+            raise ValueError(
+                "multi-signature expert banks serve the gpu decode target only; "
+                "cpu/hybrid executors are per-format and cannot span partitions"
+            )
+        # Attach per group: each OffloadMoELayer points at ITS signature's cache and
+        # carries that cache's LOCAL layer id (the cache machinery - slot tables,
+        # prefill double buffers, stats - is uniformly local-indexed). Groups keep
+        # global order, so the per-group prefill-overlap choreography (prefetch
+        # layer_id and layer_id+1) is exact inside a group; at a group boundary the
+        # +1 prefetch no-ops (prefetch_prefill_layer guards layer_id >= num_layers)
+        # and the next group's first layer self-prefetches in wait_prefill_layer - a
+        # deliberate sync at boundaries, correctness over overlap.
+        layers = list(iter_offload_moe_layers(self.model))
         assert len(layers) == config.model_config.num_moe_layers
-        if cache.decode_target in ("cpu", "hybrid"):
-            self._init_cpu_moe_executor(config, cache, layers)
-        self.ctx.moe_offload_cache = cache
-        self.moe_offload_cache = cache
-        return cache
+        self._route_offload_layers(layers, routing)
+        if caches[0].decode_target in ("cpu", "hybrid"):
+            self._init_cpu_moe_executor(config, caches[0], layers)
+        # The dominant partition backs the legacy single-cache readers (status views,
+        # scheduler readouts); everything list-shaped iterates moe_offload_caches.
+        from freetoken.engine.cache_budget import expert_bytes_per_slot
+
+        dominant = max(caches, key=lambda c: c.cache_size * expert_bytes_per_slot(c.bank_sources))
+        self.ctx.moe_offload_cache = dominant
+        self.moe_offload_cache = dominant
+        self.moe_offload_caches = caches
+        return dominant
 
     def _resolve_hybrid_fetch(self, config: EngineConfig, cache) -> None:
         """Resolve --moe-hybrid-max-fetch -1 (auto) into a bandwidth-matched fetch fraction.
@@ -780,15 +996,21 @@ class Engine:
     def _target_moe_and_expert_bytes(self, moe_cache_size: int | None) -> tuple[int, int]:
         from freetoken.engine.cache_budget import expert_bytes_per_slot
 
+        caches = self.moe_offload_caches or (
+            [self.moe_offload_cache] if self.moe_offload_cache else []
+        )
         target_moe = (
             moe_cache_size
             if moe_cache_size is not None
-            else (self.moe_offload_cache.cache_size if self.moe_offload_cache else 0)
+            else sum(c.cache_size for c in caches)
         )
-        per_expert_bytes = (
-            expert_bytes_per_slot(self.moe_offload_cache.bank_sources)
-            if self.moe_offload_cache is not None else 0
+        total_slots = sum(c.cache_size for c in caches)
+        # byte-weighted average over the partitions: a single cache reproduces its
+        # exact per-slot figure, partitions collapse to the footprint-weighted mean
+        total_bytes = sum(
+            c.cache_size * expert_bytes_per_slot(c.bank_sources) for c in caches
         )
+        per_expert_bytes = total_bytes // total_slots if total_slots else 0
         return target_moe, per_expert_bytes
 
     def _resize_kv_pool(self, config, num_pages: int, num_swa_pages: int | None) -> None:
@@ -843,12 +1065,15 @@ class Engine:
         #     recoverably with the old cache intact -- NOT after teardown, which would
         #     leave the server unable to serve. These checks are model-agnostic.
         if moe_cache_size is not None:
-            if self.moe_offload_cache is None:
+            if not self.moe_offload_caches:
                 raise CacheRebuildRejected(
                     "moe_cache_size requested but this model has no MoE offload cache"
                 )
             try:
-                self.moe_offload_cache.validate_rebuild(moe_cache_size)
+                for cache, size_g in zip(
+                    self.moe_offload_caches, self._moe_rebuild_sizes(moe_cache_size)
+                ):
+                    cache.validate_rebuild(size_g)
             except ValueError as e:
                 raise CacheRebuildRejected(str(e)) from e
         if num_pages is not None and num_pages <= 0:
@@ -928,8 +1153,11 @@ class Engine:
         if num_swa_pages is not None:
             object.__setattr__(config, "swa_num_pages_override", num_swa_pages)
         if moe_cache_size is not None:
-            assert self.moe_offload_cache is not None, "no MoE offload cache to resize"
-            self.moe_offload_cache.rebuild(moe_cache_size)
+            assert self.moe_offload_caches, "no MoE offload cache to resize"
+            for cache, size_g in zip(
+                self.moe_offload_caches, self._moe_rebuild_sizes(moe_cache_size)
+            ):
+                cache.rebuild(size_g)
         if num_pages is not None:
             # sets self.num_pages (rebuilds KV + window)
             self._resize_kv_pool(config, num_pages, num_swa_pages)
@@ -961,7 +1189,7 @@ class Engine:
             max_seq_len=aligned_max_seq_len,
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
-            moe_offload_cache=self.moe_offload_cache,
+            moe_offload_cache=self.moe_offload_caches or self.moe_offload_cache,
         )
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
@@ -1032,8 +1260,8 @@ class Engine:
                     self.model.forward()
         finally:
             dummy_row.fill_(dummy_slot)
-            if self.moe_offload_cache is not None:
-                self.moe_offload_cache.reset()
+            for cache in self.moe_offload_caches:
+                cache.reset()
         ended.record(self.stream)
         torch.cuda.synchronize(self.device)
         logger.info_rank0(
@@ -1540,10 +1768,26 @@ def _adjust_config(config: EngineConfig):
             else f"--moe-strategy {config.moe_strategy!r}"
         )
         raise ValueError(
-            f"{asked}: gguf moe_weight_format supports offload only until the "
-            "expert-bank integration lands; drop the flag and let every layer decode "
-            "on the GPU offload path instead."
+            f"{asked}: gguf moe_weight_format supports offload only; drop the flag "
+            "and let every layer decode on the GPU offload path instead."
         )
+
+    if is_moe and getattr(model_config, "moe_weight_format", None) == "gguf":
+        # Issue #186: the ggml moe_vec grid is tokens*top_k <= 65535; the default
+        # 8192 chunk at top_k 8 is exactly 65536 and would die on the FIRST prefill.
+        # Clamp at config time (the runtime assert in layers/moe.py stays as the
+        # backstop); other formats are untouched.
+        from freetoken.layers.moe import _MOE_VEC_MAX_GRID
+
+        top_k = getattr(model_config, "num_experts_per_tok", 0) or 0
+        if top_k > 0 and config.max_extend_tokens > _MOE_VEC_MAX_GRID // top_k:
+            cap = _MOE_VEC_MAX_GRID // top_k
+            logger.info_rank0(
+                f"--max-prefill-length {config.max_extend_tokens} -> {cap}: the ggml "
+                f"moe_vec grid is tokens*top_k <= {_MOE_VEC_MAX_GRID} (issue #186, "
+                f"top_k {top_k}); clamped for the gguf expert path"
+            )
+            object.__setattr__(config, "max_extend_tokens", cap)
 
     if is_moe and config.moe_strategy == "auto":
         # A MoE model always defaults to the offload family: experts stream from pinned host
@@ -1566,7 +1810,9 @@ def _adjust_config(config: EngineConfig):
         from freetoken.moe.bench_profile import load_backend_recommendation
 
         gpu_name, gpu_uuid = _profile_gpu()
-        if load_backend_recommendation(bench_fmt, gpu_name=gpu_name, gpu_uuid=gpu_uuid) == "hybrid":
+        if bench_fmt != "gguf" and load_backend_recommendation(
+            bench_fmt, gpu_name=gpu_name, gpu_uuid=gpu_uuid
+        ) == "hybrid":
             from freetoken.moe.cpu_executor import compiled_extension_supports
 
             _act = getattr(model_config, "hidden_act", "silu")
