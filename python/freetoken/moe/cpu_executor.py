@@ -68,8 +68,55 @@ _ACT_IDS = {
     "swiglu_clamp": 4,
 }
 
-# Weight-format ids must match WFmt in csrc/cpu_moe/cpu_moe_ext.cpp.
-_WFMT_IDS = {"bf16": 0, "nvfp4": 1, "mxfp4_triton": 2, "ds_fp4": 3, "q4_0": 4}
+# Weight-format ids must match WFmt in csrc/cpu_moe/cpu_moe_ext.cpp. "gguf" is the
+# executor-level alias for the GGUF K-quant family (IQ3_XXS/IQ4_XS/Q6_K): its id is
+# a dispatch sentinel only -- _split_gguf_formats resolves it into the per-projection
+# ids below (gate/up/down may differ within one layer) before anything crosses the
+# C++ boundary.
+_WFMT_IDS = {
+    "bf16": 0,
+    "nvfp4": 1,
+    "mxfp4_triton": 2,
+    "ds_fp4": 3,
+    "q4_0": 4,
+    "iq3_xxs": 5,
+    "iq4_xs": 6,
+    "q6_k": 7,
+    "gguf": -1,
+}
+
+# gguf tensor type id -> _WFMT_IDS key (GGML_TYPE_Q6_K / IQ3_XXS / IQ4_XS; the types
+# the glm5next file packs its expert banks with).
+_GGUF_TYPE_FMTS = {14: "q6_k", 18: "iq3_xxs", 23: "iq4_xs"}
+# inverse map: _WFMT_IDS key -> gguf tensor type id (bank geometry lookups).
+_WFMT_GGUF_TYPES = {name: tid for tid, name in _GGUF_TYPE_FMTS.items()}
+
+
+def _split_gguf_formats(fmt: str, cache) -> tuple[str, str, str] | None:
+    """Resolve the executor-level "gguf" alias into per-projection _WFMT_IDS names.
+
+    The gguf banks carry ONE (gate, up, down) type triple per signature partition
+    (``cache.gguf_types``, role-ordered, uniform across the partition's layers) and
+    the three projections may differ -- glm5next packs (18, 18, 23) / (18, 18, 14) /
+    (23, 23, 14). Returns None for non-gguf formats."""
+    if fmt != "gguf":
+        return None
+    types = getattr(cache, "gguf_types", None)
+    if not types:
+        raise NotImplementedError(
+            "gguf expert banks need cache.gguf_types to resolve the per-projection types"
+        )
+    try:
+        return (
+            _GGUF_TYPE_FMTS[int(types[0][0])],
+            _GGUF_TYPE_FMTS[int(types[0][1])],
+            _GGUF_TYPE_FMTS[int(types[0][2])],
+        )
+    except KeyError as e:
+        raise NotImplementedError(
+            f"gguf expert bank type {e.args[0]} has no CPU GEMV (supported: "
+            f"{sorted(_GGUF_TYPE_FMTS)}); use --moe-strategy offload instead"
+        ) from e
 
 
 def compiled_extension_supports(activation: str) -> bool:
@@ -163,7 +210,14 @@ class CpuMoeExecutor:
         from freetoken.moe.legacy_format import canonical_role
 
         fmt = fmt or cache.quant_format
-        if fmt not in _WFMT_IDS:
+        # "gguf" is the executor-level alias for the K-quant family: resolve the
+        # per-projection types (cache.gguf_types, one role-ordered triple per
+        # signature partition) into per-role _WFMT_IDS names up front.
+        role_fmts = _split_gguf_formats(fmt, cache)
+        fmt_up_name, fmt_down_name = fmt, fmt
+        if role_fmts is not None:
+            fmt, fmt_up_name, fmt_down_name = role_fmts
+        if fmt not in _WFMT_IDS or fmt_up_name not in _WFMT_IDS or fmt_down_name not in _WFMT_IDS:
             raise NotImplementedError(
                 f"--moe-strategy cpu/hybrid computes experts on the CPU and supports "
                 f"{sorted(_WFMT_IDS)} formats, but this checkpoint's experts are "
@@ -189,6 +243,8 @@ class CpuMoeExecutor:
         self.num_experts = int(cache.num_experts)
         self.top_k = int(top_k)
         self.quant_format = fmt
+        self.fmt_up = fmt_up_name  # per-projection formats (gate/up/down may differ)
+        self.fmt_down = fmt_down_name
         self.device = device
         self.max_tokens = int(max_tokens)
         self.apply_router_weight_on_input = bool(apply_router_weight_on_input)
@@ -196,7 +252,10 @@ class CpuMoeExecutor:
         # (C++ holds raw addresses into both).
         self._banks: list[torch.Tensor] = []
         ptrs, (self.H, self.I) = self._resolve_banks(
-            {canonical_role(name): per_layer for name, per_layer in cache.bank_sources.items()}, fmt
+            {canonical_role(name): per_layer for name, per_layer in cache.bank_sources.items()},
+            fmt,
+            fmt_up_name,
+            fmt_down_name,
         )
 
         # Decide the flag handshake up front (env + device + a functional stream-memop
@@ -238,6 +297,8 @@ class CpuMoeExecutor:
             activation_id=_ACT_IDS[activation],
             apply_router_weight_on_input=1 if apply_router_weight_on_input else 0,
             weight_format=_WFMT_IDS[fmt],
+            up_fmt=_WFMT_IDS[fmt_up_name],
+            down_fmt=_WFMT_IDS[fmt_down_name],
             swiglu_alpha=float(swiglu_alpha),
             swiglu_limit=float(swiglu_limit) if swiglu_limit is not None else float("inf"),
             core_ids=core_ids,
@@ -315,9 +376,14 @@ class CpuMoeExecutor:
                 "(bit-identical grid; the CPU-side scalar round-trip is skipped)"
             )
 
+        fmt_log = (
+            fmt
+            if (fmt_up_name == fmt and fmt_down_name == fmt)
+            else f"{fmt} (up={fmt_up_name}, down={fmt_down_name})"
+        )
         logger.info_rank0(
             f"CPU MoE executor ready: threads={nthreads} (pinned to cores "
-            f"{core_ids[0]}..{core_ids[-1]}) isa={self.isa} fmt={fmt} "
+            f"{core_ids[0]}..{core_ids[-1]}) isa={self.isa} fmt={fmt_log} "
             f"H={self.H} I={self.I} experts={self.num_experts} layers={self.num_layers} "
             f"top_k={self.top_k} act={activation} max_tokens={self.max_tokens}"
         )
@@ -337,15 +403,27 @@ class CpuMoeExecutor:
         self._banks.extend(layers)
         return table
 
-    def _resolve_banks(self, banks: dict, fmt: str) -> tuple[dict, tuple[int, int]]:
+    def _resolve_banks(
+        self, banks: dict, fmt: str, fmt_up: str | None = None, fmt_down: str | None = None
+    ) -> tuple[dict, tuple[int, int]]:
         """Return (pointer kwargs for the C++ ctor, (H, I)) for the given format.
 
         ``banks[name]`` is a list of ``num_layers`` ``[num_experts, ...]`` tensors
         (the per-layer host bank contract); shapes are read from the first layer so
         per-partition (TP) sizes are exact. Unused pointers are 0. Every pointer kwarg
         is actually a per-layer table's address (see ``_make_table``), not a single
-        bank's -- the C++ ctor resolves ``tbl[layer_id]`` per task.
-        """
+        bank's -- the C++ ctor resolves ``tbl[layer_id]`` per task. ``fmt_up``/
+        ``fmt_down`` carry the per-projection formats (gate/up/down may differ within
+        one layer); they default to ``fmt`` for the single-format legacy resolvers."""
+        if fmt_up is None:
+            fmt_up = fmt
+        if fmt_down is None:
+            fmt_down = fmt
+        # The gguf partition is the only schema with three SEPARATE role banks
+        # (_BANK_SCHEMAS["gguf"] = ("gate", "up", "down")); its resolver is per-role.
+        if set(banks) == {"gate", "up", "down"}:
+            return self._resolve_gguf_banks(banks, fmt, fmt_up, fmt_down)
+
         if fmt == "bf16":
             gate_up = banks["gate_up"]
             down = banks["down"]
@@ -428,6 +506,50 @@ class CpuMoeExecutor:
             down_global_ptr=0,
             gate_up_bias_ptr=0,
             down_bias_ptr=0,
+        )
+        return ptrs, (H, I)
+
+    def _resolve_gguf_banks(
+        self, banks: dict, fmt: str, fmt_up: str, fmt_down: str
+    ) -> tuple[dict, tuple[int, int]]:
+        """GGUF K-quant family, PER-PROJECTION (IQ3_XXS / IQ4_XS / Q6_K): three
+        SEPARATE pinned uint8 banks per layer -- gate [E, I, (H//256)*98|136|210], up
+        likewise with its own type, down [E, H, (I//256)*rb(down)] -- row-major
+        256-wide blocks read in place. The C++ side gets one per-layer pointer table
+        per role (gate_ptr/up_ptr/down_ptr) plus the per-role WFmt ids; row strides
+        derive from (role fmt, K) in the ctor. Per-role geometry: gate/up rows = I
+        over K = H, down rows = H over K = I -- never one shared row count."""
+        gate, up, down = banks["gate"], banks["up"], banks["down"]
+        for name, bank in (("gate", gate), ("up", up), ("down", down)):
+            if bank[0].dtype != torch.uint8:
+                raise NotImplementedError(
+                    f"gguf CPU MoE requires uint8 {name} banks, got {bank[0].dtype}"
+                )
+        from freetoken.models.gguf.dequant import BLOCK_SHAPE
+
+        def row_bytes(fmt_name: str) -> int:
+            return BLOCK_SHAPE[_WFMT_GGUF_TYPES[fmt_name]][1]
+
+        I = int(gate[0].shape[1])
+        H = (int(gate[0].shape[2]) // row_bytes(fmt)) * 256
+        assert H % 256 == 0 and I % 256 == 0, (H, I)
+        assert up[0].shape[1] == I and int(up[0].shape[2]) == (H // 256) * row_bytes(fmt_up), (
+            up[0].shape, I, H, fmt_up,
+        )
+        assert down[0].shape[1] == H and int(down[0].shape[2]) == (I // 256) * row_bytes(fmt_down), (
+            down[0].shape, H, I, fmt_down,
+        )
+        ptrs = dict(
+            gate_up_ptr=0,
+            down_ptr=self._make_table(down).data_ptr(),
+            gate_up_scale_ptr=0,
+            gate_up_global_ptr=0,
+            down_scale_ptr=0,
+            down_global_ptr=0,
+            gate_up_bias_ptr=0,
+            down_bias_ptr=0,
+            gate_ptr=self._make_table(gate).data_ptr(),
+            up_ptr=self._make_table(up).data_ptr(),
         )
         return ptrs, (H, I)
 

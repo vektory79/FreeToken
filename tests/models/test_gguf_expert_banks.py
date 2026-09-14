@@ -124,10 +124,16 @@ def test_moe_vec_chunk_cap():
     assert _MOE_VEC_MAX_GRID == 65535
 
 
-def test_cpu_executor_does_not_claim_gguf():
-    from freetoken.moe.cpu_executor import _WFMT_IDS
+def test_cpu_executor_claims_gguf():
+    """Flipped for the W1 CPU-GEMV work: the CPU MoE executor now serves the gguf
+    K-quant family. The per-projection types (IQ3_XXS/IQ4_XS/Q6_K) resolve from
+    cache.gguf_types via _split_gguf_formats / _resolve_gguf_banks."""
+    from freetoken.moe.cpu_executor import _GGUF_TYPE_FMTS, _WFMT_IDS
 
-    assert "gguf" not in _WFMT_IDS
+    assert "gguf" in _WFMT_IDS
+    # every supported gguf type maps to a real C++ WFmt id (>= 0; "gguf" itself is
+    # the executor-level alias, resolved per role before the C++ boundary)
+    assert all(_WFMT_IDS[name] >= 0 for name in _GGUF_TYPE_FMTS.values())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")

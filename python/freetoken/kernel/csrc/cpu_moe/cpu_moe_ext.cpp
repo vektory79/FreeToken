@@ -1220,7 +1220,192 @@ q4dot_fn select_q4dot() {
   return q4_0_dot_i8_scalar;
 }
 
-enum WFmt { WF_BF16 = 0, WF_NVFP4 = 1, WF_MXFP4 = 2, WF_DSFP4 = 3, WF_Q4_0 = 4 };
+enum WFmt {
+  WF_BF16 = 0,
+  WF_NVFP4 = 1,
+  WF_MXFP4 = 2,
+  WF_DSFP4 = 3,
+  WF_Q4_0 = 4,
+  WF_IQ3_XXS = 5,  // gguf type 18
+  WF_IQ4_XS = 6,   // gguf type 23
+  WF_Q6_K = 7,     // gguf type 14
+};
+
+// ---------------- GGUF K-quant family (IQ3_XXS / IQ4_XS / Q6_K) --------------
+// Native gguf expert banks (glm5next): 256-wide blocks, row-major over K, read in
+// place from the pinned banks the offload path streams. Unlike q4_0/nvfp4 these
+// codes are grid/LUT indices, not nibble magnitudes, so there is no W4A8 form: the
+// GEMV is W4A16, dequantizing each row's blocks on the fly into the fp32 dot over
+// bf16 activations -- no activation prequant, no prepare phase, no dequant scratch
+// (a bf16 dequant-then-reuse-dot scratch would transiently cost top_k*rows*H*2 B
+// per layer, ~268 MB at the glm5next geometry, to save one LUT gather per weight).
+// Value formulas match the vendored CUDA kernels (kernel/csrc/gguf/dequantize.cuh
+// dequantize_block_{q6_K,iq3_xxs,iq4_xs}, the block-layout source of truth); the
+// CPU chain stays in fp32 (the half d widens exactly), inside the dfloat parity
+// contract (tests/kernels/test_gguf_quant.py).
+//
+// Verbatim host copies of the vendored device LUTs (ggml-common.h: iq3xxs_grid
+// :563, ksigns_iq2xs :888, kmask_iq2xs + kvalues_iq4nl :927). Values are owned by
+// the vendored files -- do not edit here or there.
+static const uint32_t iq3xxs_grid[256] = {
+    0x04040404, 0x04040414, 0x04040424, 0x04040c0c, 0x04040c1c, 0x04040c3e, 0x04041404, 0x04041414, 0x04041c0c,
+    0x04042414, 0x04043e1c, 0x04043e2c, 0x040c040c, 0x040c041c, 0x040c0c04, 0x040c0c14, 0x040c140c, 0x040c142c,
+    0x040c1c04, 0x040c1c14, 0x040c240c, 0x040c2c24, 0x040c3e04, 0x04140404, 0x04140414, 0x04140424, 0x04140c0c,
+    0x04141404, 0x04141414, 0x04141c0c, 0x04141c1c, 0x04141c3e, 0x04142c0c, 0x04142c3e, 0x04143e2c, 0x041c040c,
+    0x041c043e, 0x041c0c04, 0x041c0c14, 0x041c142c, 0x041c3e04, 0x04240c1c, 0x04241c3e, 0x04242424, 0x04242c3e,
+    0x04243e1c, 0x04243e2c, 0x042c040c, 0x042c043e, 0x042c1c14, 0x042c2c14, 0x04341c2c, 0x04343424, 0x043e0c04,
+    0x043e0c24, 0x043e0c34, 0x043e241c, 0x043e340c, 0x0c04040c, 0x0c04041c, 0x0c040c04, 0x0c040c14, 0x0c04140c,
+    0x0c04141c, 0x0c041c04, 0x0c041c14, 0x0c041c24, 0x0c04243e, 0x0c042c04, 0x0c0c0404, 0x0c0c0414, 0x0c0c0c0c,
+    0x0c0c1404, 0x0c0c1414, 0x0c14040c, 0x0c14041c, 0x0c140c04, 0x0c140c14, 0x0c14140c, 0x0c141c04, 0x0c143e14,
+    0x0c1c0404, 0x0c1c0414, 0x0c1c1404, 0x0c1c1c0c, 0x0c1c2434, 0x0c1c3434, 0x0c24040c, 0x0c24042c, 0x0c242c04,
+    0x0c2c1404, 0x0c2c1424, 0x0c2c2434, 0x0c2c3e0c, 0x0c34042c, 0x0c3e1414, 0x0c3e2404, 0x14040404, 0x14040414,
+    0x14040c0c, 0x14040c1c, 0x14041404, 0x14041414, 0x14041434, 0x14041c0c, 0x14042414, 0x140c040c, 0x140c041c,
+    0x140c042c, 0x140c0c04, 0x140c0c14, 0x140c140c, 0x140c1c04, 0x140c341c, 0x140c343e, 0x140c3e04, 0x14140404,
+    0x14140414, 0x14140c0c, 0x14140c3e, 0x14141404, 0x14141414, 0x14141c3e, 0x14142404, 0x14142c2c, 0x141c040c,
+    0x141c0c04, 0x141c0c24, 0x141c3e04, 0x141c3e24, 0x14241c2c, 0x14242c1c, 0x142c041c, 0x142c143e, 0x142c240c,
+    0x142c3e24, 0x143e040c, 0x143e041c, 0x143e0c34, 0x143e242c, 0x1c04040c, 0x1c040c04, 0x1c040c14, 0x1c04140c,
+    0x1c04141c, 0x1c042c04, 0x1c04342c, 0x1c043e14, 0x1c0c0404, 0x1c0c0414, 0x1c0c1404, 0x1c0c1c0c, 0x1c0c2424,
+    0x1c0c2434, 0x1c14040c, 0x1c14041c, 0x1c140c04, 0x1c14142c, 0x1c142c14, 0x1c143e14, 0x1c1c0c0c, 0x1c1c1c1c,
+    0x1c241c04, 0x1c24243e, 0x1c243e14, 0x1c2c0404, 0x1c2c0434, 0x1c2c1414, 0x1c2c2c2c, 0x1c340c24, 0x1c341c34,
+    0x1c34341c, 0x1c3e1c1c, 0x1c3e3404, 0x24040424, 0x24040c3e, 0x24041c2c, 0x24041c3e, 0x24042c1c, 0x24042c3e,
+    0x240c3e24, 0x24141404, 0x24141c3e, 0x24142404, 0x24143404, 0x24143434, 0x241c043e, 0x241c242c, 0x24240424,
+    0x24242c0c, 0x24243424, 0x242c142c, 0x242c241c, 0x242c3e04, 0x243e042c, 0x243e0c04, 0x243e0c14, 0x243e1c04,
+    0x2c040c14, 0x2c04240c, 0x2c043e04, 0x2c0c0404, 0x2c0c0434, 0x2c0c1434, 0x2c0c2c2c, 0x2c140c24, 0x2c141c14,
+    0x2c143e14, 0x2c1c0414, 0x2c1c2c1c, 0x2c240c04, 0x2c24141c, 0x2c24143e, 0x2c243e14, 0x2c2c0414, 0x2c2c1c0c,
+    0x2c342c04, 0x2c3e1424, 0x2c3e2414, 0x34041424, 0x34042424, 0x34042434, 0x34043424, 0x340c140c, 0x340c340c,
+    0x34140c3e, 0x34143424, 0x341c1c04, 0x341c1c34, 0x34242424, 0x342c042c, 0x342c2c14, 0x34341c1c, 0x343e041c,
+    0x343e140c, 0x3e04041c, 0x3e04042c, 0x3e04043e, 0x3e040c04, 0x3e041c14, 0x3e042c14, 0x3e0c1434, 0x3e0c2404,
+    0x3e140c14, 0x3e14242c, 0x3e142c14, 0x3e1c0404, 0x3e1c0c2c, 0x3e1c1c1c, 0x3e1c3404, 0x3e24140c, 0x3e24240c,
+    0x3e2c0404, 0x3e2c0414, 0x3e2c1424, 0x3e341c04,
+};
+
+static const uint8_t ksigns_iq2xs[128] = {
+    0,   129, 130, 3,   132, 5,   6,   135, 136, 9,   10,  139, 12,  141, 142, 15,  144, 17,  18,  147, 20,  149,
+    150, 23,  24,  153, 154, 27,  156, 29,  30,  159, 160, 33,  34,  163, 36,  165, 166, 39,  40,  169, 170, 43,
+    172, 45,  46,  175, 48,  177, 178, 51,  180, 53,  54,  183, 184, 57,  58,  187, 60,  189, 190, 63,  192, 65,
+    66,  195, 68,  197, 198, 71,  72,  201, 202, 75,  204, 77,  78,  207, 80,  209, 210, 83,  212, 85,  86,  215,
+    216, 89,  90,  219, 92,  221, 222, 95,  96,  225, 226, 99,  228, 101, 102, 231, 232, 105, 106, 235, 108, 237,
+    238, 111, 240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
+};
+
+static const uint8_t kmask_iq2xs[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+static const int8_t kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+inline uint16_t load_u16le(const uint8_t* p) {
+  uint16_t v;
+  std::memcpy(&v, p, sizeof(v));
+  return v;
+}
+
+// One packed row (K/256 blocks) dotted against bf16 activations, fp32 accumulate.
+// Q6_K (210 B/block, d LAST at 208:210): ql lower 4 bits + qh upper 2 bits give a
+// 6-bit code in [-32, 31]; per-32 sub-scales are int8; y = d * sc * (q - 32).
+float q6_k_dot_scalar(const uint8_t* row, const bf16_t* x, int K) {
+  float acc = 0.0f;
+  for (int b = 0; b < K / 256; ++b) {
+    const uint8_t* blk = row + (size_t)b * 210;
+    const float d = fp16_to_f32(load_u16le(blk + 208));
+    const uint8_t* ql = blk;                                    // 128
+    const uint8_t* qhbuf = blk + 128;                           // 64
+    const int8_t* sc = reinterpret_cast<const int8_t*>(blk + 192);  // 16
+    for (int ip = 0; ip < 2; ++ip) {
+      for (int il = 0; il < 32; ++il) {
+        const int is = 8 * ip + il / 16;
+        const uint8_t ql0 = ql[64 * ip + il];
+        const uint8_t ql32 = ql[64 * ip + il + 32];
+        const uint8_t qhb = qhbuf[32 * ip + il];
+        const bf16_t* xb = x + (size_t)b * 256 + 128 * ip + il;
+        acc += d * (float)sc[is + 0] *
+               (float)((int)((ql0 & 0xF) | (((qhb >> 0) & 3) << 4)) - 32) * bf16_to_f32(xb[0]);
+        acc += d * (float)sc[is + 2] *
+               (float)((int)((ql32 & 0xF) | (((qhb >> 2) & 3) << 4)) - 32) * bf16_to_f32(xb[32]);
+        acc += d * (float)sc[is + 4] *
+               (float)((int)((ql0 >> 4) | (((qhb >> 4) & 3) << 4)) - 32) * bf16_to_f32(xb[64]);
+        acc += d * (float)sc[is + 6] *
+               (float)((int)((ql32 >> 4) | (((qhb >> 6) & 3) << 4)) - 32) * bf16_to_f32(xb[96]);
+      }
+    }
+  }
+  return acc;
+}
+
+// IQ4_XS (136 B/block, d FIRST): 4-bit codes into kvalues_iq4nl; the per-32 scale
+// is a 6-bit field spread over scales_l nibbles + 2 scales_h bits, minus 32.
+float iq4_xs_dot_scalar(const uint8_t* row, const bf16_t* x, int K) {
+  float acc = 0.0f;
+  for (int b = 0; b < K / 256; ++b) {
+    const uint8_t* blk = row + (size_t)b * 136;
+    const float d = fp16_to_f32(load_u16le(blk));
+    const uint16_t scales_h = load_u16le(blk + 2);
+    const uint8_t* scales_l = blk + 4;  // 4
+    const uint8_t* qs = blk + 8;        // 128
+    for (int ib = 0; ib < 8; ++ib) {
+      const int s = ((((scales_l[ib / 2] >> 4 * (ib % 2)) & 0xF) | (((scales_h >> 2 * ib) & 3) << 4)) - 32);
+      const float db = d * (float)s;
+      const uint8_t* q4 = qs + 16 * ib;
+      const bf16_t* xb = x + (size_t)b * 256 + 32 * ib;
+      for (int j = 0; j < 16; ++j) {
+        acc += db * (float)kvalues_iq4nl[q4[j] & 0xF] * bf16_to_f32(xb[j]);
+        acc += db * (float)kvalues_iq4nl[q4[j] >> 4] * bf16_to_f32(xb[j + 16]);
+      }
+    }
+  }
+  return acc;
+}
+
+// IQ3_XXS (98 B/block, d FIRST): 64 grid-index bytes then 8 uint32 scale words
+// (bits 28-31: sub-scale nibble, bits 0-27: four 7-bit sign indices); values come
+// from the iq3xxs_grid bytes, signed by ksigns_iq2xs.
+float iq3_xxs_dot_scalar(const uint8_t* row, const bf16_t* x, int K) {
+  float acc = 0.0f;
+  for (int b = 0; b < K / 256; ++b) {
+    const uint8_t* blk = row + (size_t)b * 98;
+    const float d0 = fp16_to_f32(load_u16le(blk));
+    const uint8_t* qs = blk + 2;  // 96
+    const uint16_t* gas = reinterpret_cast<const uint16_t*>(qs + 64);
+    for (int ib = 0; ib < 8; ++ib) {
+      const uint32_t aux32 = (uint32_t)gas[2 * ib] | ((uint32_t)gas[2 * ib + 1] << 16);
+      const float d = d0 * (0.5f + (float)(aux32 >> 28)) * 0.5f;
+      const uint8_t* q3 = qs + 8 * ib;
+      const bf16_t* xb = x + (size_t)b * 256 + 32 * ib;
+      for (int il = 0; il < 4; ++il) {
+        const uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * il) & 127];
+        const uint8_t* g1 = reinterpret_cast<const uint8_t*>(iq3xxs_grid + q3[2 * il + 0]);
+        const uint8_t* g2 = reinterpret_cast<const uint8_t*>(iq3xxs_grid + q3[2 * il + 1]);
+        for (int j = 0; j < 4; ++j) {
+          acc += d * (float)g1[j] * (signs & kmask_iq2xs[j] ? -1.0f : 1.0f) * bf16_to_f32(xb[8 * il + j]);
+          acc += d * (float)g2[j] * (signs & kmask_iq2xs[j + 4] ? -1.0f : 1.0f) * bf16_to_f32(xb[8 * il + 4 + j]);
+        }
+      }
+    }
+  }
+  return acc;
+}
+
+using ggufdot_fn = float (*)(const uint8_t* row, const bf16_t* x, int K);
+
+inline bool is_gguf_fmt(int f) { return f == WF_IQ3_XXS || f == WF_IQ4_XS || f == WF_Q6_K; }
+
+inline int gguf_block_bytes(int f) {
+  if (f == WF_IQ3_XXS) return 98;
+  if (f == WF_IQ4_XS) return 136;
+  return 210;  // WF_Q6_K
+}
+
+// Packed-row stride for K contiguous input dims (K % 256 == 0).
+inline int gguf_row_bytes(int f, int K) { return (K / 256) * gguf_block_bytes(f); }
+
+// Per-fmt dot selection. The scalar kernels are the correctness reference and the
+// only tier today; the grid/nibble gathers vectorize (AVX2/AVX-512 LUT tiers,
+// mirroring the nvfp4 decode) and slot in here as a follow-up without touching the
+// dispatch sites.
+ggufdot_fn select_ggufdot(int f) {
+  if (f == WF_IQ3_XXS) return iq3_xxs_dot_scalar;
+  if (f == WF_IQ4_XS) return iq4_xs_dot_scalar;
+  if (f == WF_Q6_K) return q6_k_dot_scalar;
+  return nullptr;
+}
 
 // Each ctor pointer arg is the address of a CPU int64 array of length
 // num_layers (one base address per layer, built by cpu_executor.py's
@@ -1260,6 +1445,15 @@ struct CpuMoeExecutor {
   dsdot_fn dsdot;
   mxgemv_fn mxgemv;
   q4dot_fn q4dot;
+  // GGUF K-quant family: SEPARATE per-role tables + per-role fmt (gate/up/down may
+  // differ within one layer; the legacy formats share gate_up_tbl with the up row at
+  // I+i, and keep gate_tbl/up_tbl null). Row strides derive from (role fmt, K).
+  const uint64_t* gate_tbl = nullptr;  // gguf split: [E, I, row_bytes] per layer
+  const uint64_t* up_tbl = nullptr;    // gguf split: [E, I, row_bytes] per layer
+  int fmt_up = 0, fmt_down = 0;        // WFmt per role (== fmt for legacy formats)
+  bool is_gguf = false;
+  ggufdot_fn gdot = nullptr, udot = nullptr, ddot = nullptr;
+  int g_row_bytes = 0, u_row_bytes = 0, d_row_bytes = 0;
   // ds_fp4: the caller already FP8-round-tripped the input activations on the GPU
   // (same reference grid), so submit() must not repeat it on the host-callback
   // thread. That scalar per-element pass is single-threaded ON THE DECODE CRITICAL
@@ -1356,7 +1550,8 @@ struct CpuMoeExecutor {
                  uintptr_t gate_up_global_ptr, uintptr_t down_scale_ptr,
                  uintptr_t down_global_ptr, uintptr_t gate_up_bias_ptr,
                  uintptr_t down_bias_ptr, double swiglu_alpha_, double swiglu_limit_,
-                 std::vector<int> core_ids_)
+                 std::vector<int> core_ids_, int up_fmt_ = -1, int down_fmt_ = -1,
+                 uintptr_t gate_ptr_ = 0, uintptr_t up_ptr_ = 0)
       : num_threads(num_threads_ > 0 ? num_threads_ : 1),
         num_layers(num_layers_),
         num_experts(num_experts_),
@@ -1377,6 +1572,25 @@ struct CpuMoeExecutor {
         swiglu_alpha(static_cast<float>(swiglu_alpha_)),
         swiglu_limit(static_cast<float>(swiglu_limit_)),
         core_ids(std::move(core_ids_)) {
+    switch (weight_format) {
+      case WF_BF16:
+      case WF_NVFP4:
+      case WF_MXFP4:
+      case WF_DSFP4:
+      case WF_Q4_0:
+      case WF_IQ3_XXS:
+      case WF_IQ4_XS:
+      case WF_Q6_K:
+        break;
+      default:
+        throw std::runtime_error("unknown weight_format for the CPU MoE executor");
+    }
+    // Per-role formats: -1 inherits the primary (gate) fmt; the gguf resolver passes
+    // all three explicitly (gate/up/down may differ within one layer).
+    fmt_up = up_fmt_ < 0 ? fmt : up_fmt_;
+    fmt_down = down_fmt_ < 0 ? fmt : down_fmt_;
+    gate_tbl = reinterpret_cast<const uint64_t*>(gate_ptr_);
+    up_tbl = reinterpret_cast<const uint64_t*>(up_ptr_);
     DotChoice c = select_dot();
     dot = c.fn;
     nvdot = select_nvdot();
@@ -1396,10 +1610,29 @@ struct CpuMoeExecutor {
     nvi8dot = select_nvi8dot();
     use_vnni = (weight_format == WF_NVFP4) && (nvi8dot != nullptr);
     use_q4a8 = (weight_format == WF_Q4_0);
+    // gguf K-quant family: all three roles must be gguf formats with per-role tables
+    // (the gguf file has no packed gate_up bank); K-quant blocks are 256 wide.
+    is_gguf = is_gguf_fmt(fmt) || is_gguf_fmt(fmt_up) || is_gguf_fmt(fmt_down);
+    if (is_gguf) {
+      if (!(is_gguf_fmt(fmt) && is_gguf_fmt(fmt_up) && is_gguf_fmt(fmt_down)) ||
+          gate_tbl == nullptr || up_tbl == nullptr || down_tbl == nullptr)
+        throw std::runtime_error(
+            "gguf IQ/QK CPU MoE requires per-role gate/up/down formats and tables");
+      if (H % 256 != 0 || I % 256 != 0)
+        throw std::runtime_error("gguf IQ/QK CPU MoE requires H and I to be multiples of 256");
+      // Per-role geometry: gate/up rows = I over K = H, down rows = H over K = I.
+      g_row_bytes = gguf_row_bytes(fmt, H);
+      u_row_bytes = gguf_row_bytes(fmt_up, H);
+      d_row_bytes = gguf_row_bytes(fmt_down, I);
+      gdot = select_ggufdot(fmt);
+      udot = select_ggufdot(fmt_up);
+      ddot = select_ggufdot(fmt_down);
+    }
     const char* q4tag = use_q4a8 ? (cpu_has_avxvnni() ? "+vnni(q4_0-w4a8)" : "+q4_0-w4a8") : "";
     const char* vnni_tag =
         cpu_has_avx512vnni() ? "+avx512vnni(nvfp4-w4a8)" : "+vnni(nvfp4-w4a8)";
-    isa_str = std::string(c.name) + (use_vnni ? vnni_tag : "") + q4tag;
+    isa_str = std::string(c.name) + (use_vnni ? vnni_tag : "") + q4tag +
+              (is_gguf ? "+gguf(iq/qk)" : "");
     isa = isa_str.c_str();
     for (int i = 0; i < 16; ++i) e2m1_lut[i] = kE2M1[i];
     for (int i = 0; i < 256; ++i) e4m3_lut[i] = e4m3_decode((uint8_t)i);
@@ -1516,6 +1749,10 @@ struct CpuMoeExecutor {
       const uint8_t* w = dn_packed_l + ((size_t)e * H + row) * (size_t)q4_dn_row_bytes;
       return q4dot(w, gi8, gas, I);  // W4A8: int8 activations (Q8_0), scale in gas
     }
+    if (is_gguf) {
+      const uint8_t* w = dn_packed_l + ((size_t)e * H + row) * (size_t)d_row_bytes;
+      return ddot(w, g, I);  // fused dequant over the raw bf16 intermediate
+    }
     const size_t r = (size_t)e * H + row;
     if (use_vnni)
       return nvi8dot(dn_packed_l + r * (size_t)(I / 2), dn_scale_l + r * (size_t)(I / 16),
@@ -1588,6 +1825,10 @@ struct CpuMoeExecutor {
       do_pass1_dsfp4(t, p);
       return;
     }
+    if (is_gguf) {
+      do_pass1_gguf(t, p);
+      return;
+    }
     const int64_t ib = p % n_iblk;
     const int64_t tk = p / n_iblk;
     const int k = static_cast<int>(tk % top_k);
@@ -1612,27 +1853,52 @@ struct CpuMoeExecutor {
     bf16_t* g_row = g_scratch.data() + ((size_t)tok * top_k + k) * I;
     const int i0 = static_cast<int>(ib) * IBLK;
     const int i1 = std::min(I, i0 + IBLK);
-    const bool clamped = act == ACT_SWIGLUOAI || act == ACT_SWIGLU_CLAMP;
-    const float up_bias = act == ACT_SWIGLUOAI ? 1.0f : 0.0f;
-    const float lim = swiglu_limit, alpha = swiglu_alpha;
     for (int i = i0; i < i1; ++i) {
       // gate = row i, up = row I+i
       float gate =
           gemm1_dot(gate_up_l, gu_packed_l, gu_scale_l, gu_global_l, e, i, x_row, xe, xo, xi8, xas) * w_in;
       float up = gemm1_dot(gate_up_l, gu_packed_l, gu_scale_l, gu_global_l, e, I + i, x_row,
                            xe, xo, xi8, xas) * w_in;
-      if (clamped) {
-        // clamp(gate, max=lim) * sigmoid(alpha * gate) * (clamp(up, +-lim) + up_bias)
-        // -- swigluoai carries the +1 up bias (gpt-oss/MiniMax); swiglu_clamp
-        // (GLM-5.3) does not. lim == +inf: no clamp.
-        if (gate > lim) gate = lim;
-        if (up > lim) up = lim;
-        else if (up < -lim) up = -lim;
-        const float glu = gate / (1.0f + std::exp(-gate * alpha));
-        g_row[i] = f32_to_bf16(glu * (up + up_bias));
-      } else {
-        g_row[i] = f32_to_bf16(act_apply(act, gate) * up);
-      }
+      g_row[i] = act_epilogue(gate, up);
+    }
+  }
+
+  // Shared pass-1 epilogue: silu/gelu families, or the clamped swiglu forms --
+  // swigluoai carries the (up + 1) up bias (gpt-oss/MiniMax); swiglu_clamp (GLM-5.3)
+  // does not. lim == +inf: no clamp.
+  inline bf16_t act_epilogue(float gate, float up) {
+    if (act == ACT_SWIGLUOAI || act == ACT_SWIGLU_CLAMP) {
+      if (gate > swiglu_limit) gate = swiglu_limit;
+      if (up > swiglu_limit) up = swiglu_limit;
+      else if (up < -swiglu_limit) up = -swiglu_limit;
+      const float glu = gate / (1.0f + std::exp(-gate * swiglu_alpha));
+      return f32_to_bf16(glu * (up + (act == ACT_SWIGLUOAI ? 1.0f : 0.0f)));
+    }
+    return f32_to_bf16(act_apply(act, gate) * up);
+  }
+
+  // GGUF K-quant pass 1: gate/up are SEPARATE per-role tables ([E, I, row_bytes]
+  // each, rows = I over K = H) with per-role fmt -- the gguf file has no packed
+  // gate_up bank. Activations stay bf16 (no prequant, no deinterleave), so the
+  // down pass reads the raw bf16 intermediate.
+  void do_pass1_gguf(const MoeTask* t, int64_t p) {
+    const int64_t ib = p % n_iblk;
+    const int64_t tk = p / n_iblk;
+    const int k = static_cast<int>(tk % top_k);
+    const int tok = static_cast<int>(tk / top_k);
+    const int e = t->ids[static_cast<size_t>(tok) * top_k + k];
+    if (e < 0 || e >= num_experts) return;
+    const float w_in = apply_on_input ? t->w[static_cast<size_t>(tok) * top_k + k] : 1.0f;
+    const uint8_t* gate_l = static_cast<const uint8_t*>(tbl_at(gate_tbl, t->layer_id));
+    const uint8_t* up_l = static_cast<const uint8_t*>(tbl_at(up_tbl, t->layer_id));
+    const bf16_t* x_row = t->x + (size_t)tok * H;
+    bf16_t* g_row = g_scratch.data() + ((size_t)tok * top_k + k) * I;
+    const int i0 = static_cast<int>(ib) * IBLK;
+    const int i1 = std::min(I, i0 + IBLK);
+    for (int i = i0; i < i1; ++i) {
+      const float gate = gdot(gate_l + ((size_t)e * I + i) * (size_t)g_row_bytes, x_row, H) * w_in;
+      const float up = udot(up_l + ((size_t)e * I + i) * (size_t)u_row_bytes, x_row, H) * w_in;
+      g_row[i] = act_epilogue(gate, up);
     }
   }
 
@@ -2116,7 +2382,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<CpuMoeExecutor>(m, "CpuMoeExecutor")
       .def(py::init<int, int, int, int, int, int, int, int, int, int, uintptr_t, uintptr_t,
                     uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                    double, double, std::vector<int>>(),
+                    double, double, std::vector<int>, int, int, uintptr_t, uintptr_t>(),
            py::arg("num_threads"), py::arg("num_layers"), py::arg("num_experts"),
            py::arg("top_k"), py::arg("hidden_size"), py::arg("inter_size"),
            py::arg("max_tokens"), py::arg("activation_id"),
@@ -2125,7 +2391,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("gate_up_global_ptr"), py::arg("down_scale_ptr"),
            py::arg("down_global_ptr"), py::arg("gate_up_bias_ptr"),
            py::arg("down_bias_ptr"), py::arg("swiglu_alpha"), py::arg("swiglu_limit"),
-           py::arg("core_ids"))
+           py::arg("core_ids"), py::arg("up_fmt") = -1, py::arg("down_fmt") = -1,
+           py::arg("gate_ptr") = 0, py::arg("up_ptr") = 0)
       .def("create_task", &CpuMoeExecutor::create_task, py::arg("layer_id"),
            py::arg("num_tokens"), py::arg("x_ptr"), py::arg("ids_ptr"), py::arg("w_ptr"),
            py::arg("y_ptr"))
