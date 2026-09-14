@@ -1,9 +1,9 @@
 ---
 name: "ft-serve-prefill-overlap-512k-infeasible"
-description: "ft serve prefill overlap at KV=524288: 2E slot floor boot assert at 0.89, OOM at 0.95; chunk size is the only 512k lever"
+description: "prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions"
 type: project
-lastUpdated: 2026-09-12T23:59
-lastRecall: 2026-09-13T02:13
+lastUpdated: 2026-09-14T11:48
+lastRecall: 2026-09-14T11:45
 ---
 
 # ft serve --moe-prefill-overlap: slot-floor incompatibility with big KV (GLM-5.3, RTX 5090)
@@ -15,3 +15,8 @@ Question (2026-09-12): can dropping `--disable-moe-prefill-overlap` at KV=524288
 - Budget math: overlap min plan ~10.2 GB at 512k; every bootable ratio leaves < ~1.5 GiB free, so first-prefill OOM is structural, not a tuning issue. Overlap would only become feasible around KV <= ~250-300k tokens on this card (estimate, unmeasured).
 - Practical consequence: prefill levers at 512k are exactly the chunk size - `--memory-ratio 0.85 --max-prefill-length 8192` = +36% (see glm53-post-iommu-baseline). --disable-moe-prefill-overlap stays load-bearing at any big KV reserve.
 - Both failures were caught and self-reported by the /tmp/ft_run_config.sh watchdog harness (FAILPAT grep: AssertionError|OutOfMemoryError|Backend worker is gone).
+
+## Cross-context instance (2026-09-13/14): the same 2E invariant bites multi-partition offload caches (gguf glm5next)
+- The gguf per-signature OffloadMoeCache partitions (GLM-5.3 GGUF, 3 width signatures) set per-partition floors of 1x num_experts; prefill_overlap=True needs 2xE per partition (offload_cache.py:176 __post_init__) -> the real-file boot died at 131s: 1326 auto slots < 3x576 = 1728 minimum.
+- RESOLVED in Phase 5 (see ft-gguf-glm5next-phase5-acceptance): per-partition overlap DEGRADE via Engine._partition_prefill_overlap - overlap only when the group's slots >= 2*num_experts; minority signatures run synchronous materialized prefill. Deliberately NOT a per-partition 2E budget floor: flooring wide minority signatures would cost ~16 GiB. The Phase 6 tuned plan runs overlap OFF on all partitions (464/288/288 < 576).
+- Lesson: ANY budget split that turns one MoE cache into partitions must resolve the 2E overlap invariant PER PARTITION (here: per-group degrade; a blanket 2E floor in the split would over-reserve, and the greedy auto plan only knows the pre-split total and asserts downstream).

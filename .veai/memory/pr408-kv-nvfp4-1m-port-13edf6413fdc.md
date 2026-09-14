@@ -3,7 +3,7 @@ name: "pr408-kv-nvfp4-1m-port"
 description: "PR #408 nvfp4 KV port to vektory79 + 1M-token KV on RTX 5090: merge clean, reserve+fill measured, decode flat"
 type: project
 lastUpdated: 2026-09-12T11:35
-lastRecall: 2026-09-13T02:13
+lastRecall: 2026-09-14T11:45
 ---
 
 # PR #408 port: nvfp4 KV cache -> 1M tokens on RTX 5090

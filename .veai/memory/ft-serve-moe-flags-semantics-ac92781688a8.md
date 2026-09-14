@@ -3,7 +3,7 @@ name: "ft-serve-moe-flags-semantics"
 description: "ft serve MoE flags: cpu-threads dead for offload; benchbw v4 profile post-iommu 25% fetch; threads 16==20 flat"
 type: project
 lastUpdated: 2026-09-12T23:27
-lastRecall: 2026-09-13T02:13
+lastRecall: 2026-09-14T11:46
 ---
 
 # ft serve MoE flag semantics (code audit, 2026-09-12, file:line verified)

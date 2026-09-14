@@ -1,9 +1,9 @@
 ---
 name: "glm53-post-iommu-baseline"
-description: "GLM-5.3 post-iommu re-baseline A1/B1/B2/A4: working set 336, 8192 chunk +36% @512k, 6144 +20% @1M, 1M min ratio 0.89"
+description: "GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s"
 type: project
-lastUpdated: 2026-09-12T23:49
-lastRecall: 2026-09-13T02:13
+lastUpdated: 2026-09-14T11:07
+lastRecall: 2026-09-14T11:45
 ---
 
 # GLM-5.3-Flash-NVFP4 hybrid on RTX 5090: post-iommu=pt re-baseline (2026-09-12)
@@ -54,3 +54,5 @@ Applied the full #339 diff to the working tree (applies clean on vektory79) and 
 - 524288 reserve: `--memory-ratio 0.85 --max-prefill-length 8192` -> prefill ~693 (+36%), decode unchanged 15.5 @64k (426 slots); if max slots wanted instead, ratio 0.89 + explicit --num-tokens cap keeps ~470+ slots but that combo was NOT measured.
 - Decode levers exhausted: threads 16==20 (noise), fresh benchbw profile (25% fetch) already banked the iommu=pt +5-6%; remaining decode gap is per-layer sync overhead, not flag-tunable.
 - Verify the new flags actually resolved in the log: "Allocating ... tokens for KV cache" (must equal the reserve, not grow), "Free memory after initialization" (needs >= ~3.5 GiB for 8192, ~2.9 GiB for 6144).
+
+- 2026-09-14 VRAM update: the canonical 1M nvfp4 command (ratio 0.89) now FAIL-FASTS (min plan 8.19 GiB > budget 6.63; booted 09-12). Same-session baseline: + --kv-reserve-tokens 524288 -> 322 slots (< 336 WS), decode ~14.1 @64k (vs 15.13 historical). Current NVFP4 A/B baseline until the budget shift is explained.

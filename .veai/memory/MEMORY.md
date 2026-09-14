@@ -2,11 +2,14 @@
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; IOMMU tax = old 4 GB/s
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-ac92781688a8.md) — ft serve MoE flags: cpu-threads dead for offload; benchbw v4 profile post-iommu 25% fetch; threads 16==20 flat
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-b9def4525192.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
-- [glm53-post-iommu-baseline](glm53-post-iommu-baseline-95f74e785908.md) — GLM-5.3 post-iommu re-baseline A1/B1/B2/A4: working set 336, 8192 chunk +36% @512k, 6144 +20% @1M, 1M min ratio 0.89
-- [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-6a5d5c0d1fd0.md) — ft serve prefill overlap at KV=524288: 2E slot floor boot assert at 0.89, OOM at 0.95; chunk size is the only 512k lever
-- [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-33ae77e9943f.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; MSI PRO Z790-P; article .veai/docs
-- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-9ea1520673f8.md) — GLM-5.3-Flash-NVFP4 RTX 5090: cache_budget min-plan math, boot/FTW load ladder, bf16 512k OOM; decode superseded
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-124193259365.md) — gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3 OK; gcc trips ATen List_inl.h
 - [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
-- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-23b45ac011ac.md) — GGUF glm5next: Phases 1-2 committed, 3-4 in one commit c443d95; private-use, #34 gate waived; Phase 5 banks next
+- [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-efa42fbec77a.md) — Crafting synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets, bounded fp16 scales, Q6_K d-last
+- [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-30a075828b64.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts
+- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-8ce65b535fed.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
+- [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-2039b53cb2e9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
+- [glm53-post-iommu-baseline](glm53-post-iommu-baseline-fb58a59761d2.md) — GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s
+- [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-2fbd9f4276bf.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
+- [ft-gguf-glm5next-phase5-acceptance](ft-gguf-glm5next-phase5-acceptance-76ec539bb748.md) — GGUF glm5next: off-topic defect RESOLVED - non-contiguous activation bug in fused_mul_mat_gguf; battery 5/5 on-topic
+- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-579af61234a1.md) — GGUF glm5next tracker: off-topic defect RESOLVED (non-contiguous activation bug, fixed, battery 5/5); fix uncommitted

@@ -1,14 +1,14 @@
 ---
 name: "glm53-flash-nvfp4-cache-budget"
-description: "GLM-5.3-Flash-NVFP4 RTX 5090: cache_budget min-plan math, boot/FTW load ladder, bf16 512k OOM; decode superseded"
+description: "GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu"
 type: project
-lastUpdated: 2026-09-13T02:18
-lastRecall: 2026-09-13T02:13
+lastUpdated: 2026-09-13T23:44
+lastRecall: 2026-09-14T11:45
 ---
 
 # GLM-5.3-Flash-NVFP4 on RTX 5090: --moe-cache-auto budget floor
 
-From the 2026-09-11 OOM investigation + HARDWARE-VERIFIED boot (assertion in `engine/cache_budget.py::plan_cache_budget`). Decode tok/s numbers here were measured PRE-iommu=pt and are superseded by glm53-post-iommu-baseline.
+From the 2026-09-11 OOM investigation + HARDWARE-VERIFIED boot (assertion in `engine/cache_budget.py::plan_cache_budget`). All decode tok/s numbers here were measured PRE-iommu=pt and are superseded by glm53-post-iommu-baseline (2026-09-12: 15.13-15.5 tok/s, threads 16 == 20 flat, "20 threads best" advice RETRACTED - see glm53-post-iommu-baseline and ft-serve-moe-flags-semantics; lessons below still stand).
 
 ## The arithmetic
 - Budget = memory_ratio * baseline_free - weights - fixed_cache. RTX 5090 32GB, baseline_free ~29.6 GiB, dense bf16 weights ~17 GiB (checkpoint: 16.97 GiB dense, 166.22 GiB NVFP4 experts, 1.05 GiB visual not loaded), GDN/DSA fixed pool ~1.2 GiB.
@@ -41,10 +41,9 @@ Resolved: moe_cache_size=326, num_pages=4113 (263,232 KV tokens, 2.93 GiB), free
 ## How to apply
 Any boot of this model class on a 32GB card: compute the min plan first; prefer --disable-moe-prefill-overlap + memory_ratio ~0.85 + --max-prefill-length 4096 over raising memory_ratio; expect the first prefill to autotune triton kernels (one-time 256 MiB bench cache).
 
-## Decode tuning A/B (2026-09-11, PRE-iommu=pt: tok/s superseded by glm53-post-iommu-baseline; lessons stand)
-- Numbers then (pre-iommu, 19.7% fetch): 8t 12.84/59% GPU; 20t 13.66; 20t + ratio 0.89 (417 slots) 14.24 then-best; --moe-hybrid-max-fetch 3 -> 10.15 at 99% GPU (-29%). Post-iommu re-baseline: 15.13-15.5 tok/s and threads 16 == 20 FLAT -> the old "20 threads best" advice is RETRACTED (see glm53-post-iommu-baseline, ft-serve-moe-flags-semantics).
+## Hybrid decode lessons (principles; A/B numbers superseded by glm53-post-iommu-baseline)
 - Standing lessons: hybrid decode = LRU ensure + capped PCIe fetch OVERLAPPED with CPU GEMV on misses, one global LRU slot pool (layers/moe.py _decode_hybrid); auto fetch fraction from ~/.cache/freetoken/benchbw/<uuid>.json; past the balanced fetch point GPU util rises and throughput FALLS - do NOT chase 99% GPU util; slots above the 336-pair working set add only ~+2.5-6%; remaining ~2x gap to the ~27 tok/s channel bound is per-layer sync overhead, not flag-tunable; benchbw re-profile at 8 threads = no-op (thread-insensitive profile).
-- Branch A/Bs 2026-09-11: ple-disk / fp8-scaled-mm / multi-gpu-select / split-residency / decode-token-checkpoint - no decode gain for GLM on this card; v5 (warmup branch + topk-noop, PR #319 merged e05cff8) decode-neutral.
+- Branch A/Bs 2026-09-11 (pre-iommu): ple-disk / fp8-scaled-mm / multi-gpu-select / split-residency / decode-token-checkpoint - no decode gain for GLM on this card; v5 (warmup branch + topk-noop, PR #319 merged e05cff8) decode-neutral.
 
 ## Boot load time (2026-09-11 A/B)
 - Baseline (--expert-load serial) ready in 245s: ~14s dense+config, ~220s "expert banks: slow path (serial build)" (mmap, single-stream, 185 GiB experts at ~0.86 GB/s), ~11s CUDA graphs. Disk is NVMe (nvme0n1, xfs) - not the bottleneck.
@@ -55,13 +54,12 @@ Any boot of this model class on a 32GB card: compute the min plan first; prefer 
 ## FTW conversion (2026-09-11, measured)
 - One-time: `ft checkpoint --model <hf_dir> --out <ftw_dir> --moe-backend offload --quant-backend moe.nvfp4=triton --shard-gib 8` -> 177 GiB in 439s (GPU repack, ~300-630 MB/s disk). quant_format nvfp4, 252 per-layer experts_bank entries.
 - FTW boot (threads 20, ratio 0.89): ready in 72s (vs 245s serial / 131s parallel-HF); "Loading expert banks (FTW)" 160G with bursts to 15 GB/s and pin waves 2-3 GB/s; host RAM avail dips to ~15 GiB. FTW path ignores --expert-load (expert_banks.py checks is_ftw_checkpoint first).
-- FTW decode sanity (pre-iommu): 14.50 tok/s / GPU 77% (no regression vs 14.24); resolved moe_cache_size=427, num_pages=4113 (262k KV kept), free after init 2.84 GiB (tighter than ratio 0.85's 4.14).
 - Load-time ladder for this checkpoint on RTX 5090: serial 245s -> parallel 131s -> FTW 72s.
 
 ## 512k KV experiment (2026-09-12, BF16 KV, FTW checkpoint)
 - Model config max_position_embeddings=1048576, so 512k is VRAM-bound only. KV: 0.733 MB/page -> +100k tokens ~= +0.73 GiB ~= -52 expert slots or +0.025 memory-ratio.
 - ratio 0.93 + kv-reserve-tokens 524288 FAILS fail-fast assert (min plan 288 slots + 8192 pages = 10.36 GiB > budget 10.24 GiB, short by 115 MB). ratio 0.93 + kv-reserve 512000 (8000 pages) PASSES: resolved moe=294 slots, num_pages=8006 (512384 tokens, 5.71 GiB), free after init 1.81 GiB, boot 68s.
-- Decode at 512k reserve: 14.19 tok/s / GPU 82% vs 262k reserve 14.50/77% - <=2% loss (slots 294 vs 427; within noise).
+- Decode at 512k reserve: <=2% loss vs 262k reserve (slots 294 vs 427; within noise).
 - Filling ~500k tokens in ONE prefill OOMs: kernel/fla/kda_chunk_delta_h.py:364 h=k.new_empty(B,NT,H,V,K) - GDN state history scales with the WHOLE prefill length (NT), independent of --max-prefill-length; needed 128 MiB with 169 MiB free because the idle wrapper on :18080 holds ~1.27 GiB VRAM. Workarounds: free the wrapper's VRAM, or fill context incrementally (HybridRadixCache reuses GDN-state prefixes across requests, so each pass is short). KV ladder = PR #300, see verdict above.
 
 ## OOM cause depends on KV mode

@@ -1,9 +1,9 @@
 ---
 name: "rtx5090-pcie-gen5-bw-cap"
-description: "RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; MSI PRO Z790-P; article .veai/docs"
+description: "RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts"
 type: project
-lastUpdated: 2026-09-13T02:18
-lastRecall: 2026-09-13T02:13
+lastUpdated: 2026-09-13T23:42
+lastRecall: 2026-09-14T11:46
 ---
 
 # RTX 5090 PCIe Gen5 bandwidth cap on work.vektory79.me - ROOT CAUSE: IOMMU Translated mode (fixed 2026-09-12)
@@ -26,11 +26,8 @@ Linux kernel IOMMU default domain = Translated (DMAR present, GPU has NO ATS -> 
 - Non-factors (explained, details in article): VF BAR "can't assign; no space" = SR-IOV window issue (GPU has 1 VF, irrelevant to DMA); ASPM off via FADT + root port LnkCap lacks ASPM (power feature only).
 
 ## Durable lesson
-On consumer Intel + IOMMU Translated default, any ATS-less DMA device can be capped at Gen4-like levels while the link trains Gen5 perfectly; pointer-chase latency may NOT change when fixed (RTT-dominated). Applies to NVMe too (same-rig case: see nvme-990evo-plus-iommu-fio-gotchas). Test: nvbandwidth -t host_to_device_memcpy_ce (expect ~46, not ~25) + dmesg "Default domain type". Fix: iommu=pt (keeps IOMMU isolation + VFIO); intel_iommu=off gives same perf but loses isolation.
+On consumer Intel + IOMMU Translated default, any ATS-less DMA device can be capped at Gen4-like levels while the link trains Gen5 perfectly; pointer-chase latency may NOT change when fixed (RTT-dominated). Applies to NVMe too - same-rig case fully covered in nvme-990evo-plus-iommu-fio-gotchas (990 EVO Plus sustained 6.4 GB/s; old ~4 GB/s most plausibly the same Translated tax).
 
 ## Artifacts
 - Full article (fix steps, verification checklist, false hypotheses, measurements): /media/ai/src/FreeToken/.veai/docs/rtx5090-pcie-gen5-iommu-bandwidth.md
 - Probe scripts: /media/ai/src/FreeToken/.tasks/pcie-bw-probe/ (pcie_bw_probe.py, size_scaling.py, dram_dir_bw.py, pcie_bw.cu)
-
-## NVMe follow-up (2026-09-12, same evening) - RESOLVED
-Samsung 990 EVO Plus + 980 investigation: no thermal throttling; the user's old ~4 GB/s is most plausibly the same Translated-IOMMU ~50% tax (hypothesis, not retrospectively verified). Full verdict, sustained numbers, rounds and fio/dd methodology live in nvme-990evo-plus-iommu-fio-gotchas.
