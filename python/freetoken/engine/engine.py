@@ -1490,11 +1490,17 @@ _CPU_MOE_ACTS = (
 )
 
 
-def _cpu_moe_executor_viable(model_config) -> bool:
+def _cpu_moe_executor_viable(model_config, model_path=None) -> bool:
     """Whether an automatic CPU-decode decision may target the CPU MoE executor.
 
-    A default boot must degrade to GPU offload instead of crashing in CpuMoeExecutor after the whole load; explicit cpu/hybrid/--moe-cpu-layers picks still fail loudly."""
-    from freetoken.moe.cpu_executor import _WFMT_IDS, compiled_extension_supports
+    A default boot must degrade to GPU offload instead of crashing in CpuMoeExecutor after the whole load; explicit cpu/hybrid/--moe-cpu-layers picks still fail loudly. The "gguf" alias says nothing about which quant types the file packs, so gguf is viable only when every layer's (gate, up, down) header type is executor-capable (the same ``partition_executor_rejection`` surface the hybrid gate consults); an unscannable file is not viable, keeping --moe-cpu-layers auto away from a post-load failure."""
+    from types import SimpleNamespace
+
+    from freetoken.moe.cpu_executor import (
+        _WFMT_IDS,
+        compiled_extension_supports,
+        partition_executor_rejection,
+    )
 
     try:
         from freetoken.kernel import _cpu_moe  # noqa: F401
@@ -1508,7 +1514,41 @@ def _cpu_moe_executor_viable(model_config) -> bool:
         return False
     expert_quant = getattr(model_config, "expert_quant", "none")
     fmt = expert_quant if expert_quant != "none" else (moe_wfmt or "bf16")
+    if fmt == "gguf":
+        from freetoken.moe.expert_banks import gguf_expert_bank_types
+
+        types_by_layer = gguf_expert_bank_types(model_path, model_config)
+        if types_by_layer is None:
+            return False
+        probe = SimpleNamespace(quant_format="gguf", gguf_types=tuple(types_by_layer.values()))
+        return partition_executor_rejection(probe) is None
     return fmt == "mxfp4" or fmt in _WFMT_IDS
+
+
+def _gguf_hybrid_rejection(config, model_config) -> str | None:
+    """Why ``--moe-strategy hybrid`` cannot serve a gguf model's experts (None when it can).
+
+    Capability is the CPU executor's own set, queried through ``partition_executor_rejection``
+    -- never restated here. The per-layer (gate, up, down) type ids come from a header-only
+    scan of the .gguf file: banks are not loaded at config time, and an unscannable file
+    cannot prove capability, so it rejects -- offload remains the always-safe fallback
+    instead of a post-load executor failure."""
+    from types import SimpleNamespace
+
+    from freetoken.moe.cpu_executor import partition_executor_rejection
+    from freetoken.moe.expert_banks import gguf_expert_bank_types
+
+    types_by_layer = gguf_expert_bank_types(getattr(config, "model_path", None), model_config)
+    if types_by_layer is None:
+        return (
+            "the gguf expert bank types cannot be verified from the file header; "
+            "use --moe-strategy offload instead"
+        )
+    probe = SimpleNamespace(quant_format="gguf", gguf_types=tuple(types_by_layer.values()))
+    rejection = partition_executor_rejection(probe)
+    if rejection is None:
+        return None
+    return f"{rejection}; drop the flag and let every layer decode on the GPU offload path instead"
 
 
 def _pin_budget_bytes(reserved: int = 0) -> int | None:
@@ -1564,7 +1604,7 @@ def _auto_cpu_layers(config: EngineConfig, num_moe_layers: int, *, reserved: int
     budget = _pin_budget_bytes(reserved)
     if budget is None or bank_bytes <= budget:
         return frozenset()
-    if not _cpu_moe_executor_viable(config.model_config):
+    if not _cpu_moe_executor_viable(config.model_config, config.model_path):
         raise ValueError(
             f"--moe-cpu-layers auto: banks {bank_bytes / 2**30:.2f} GiB exceed the "
             f"pin budget {budget / 2**30:.2f} GiB, but the CPU MoE executor cannot "
@@ -1823,19 +1863,24 @@ def _adjust_config(config: EngineConfig):
     if (
         is_moe
         and getattr(model_config, "moe_weight_format", None) == "gguf"
-        and (
-            config.moe_strategy in ("cpu", "hybrid", "fused") or config.moe_cpu_layers
-        )
+        and config.moe_strategy in ("cpu", "fused")
     ):
-        asked = (
-            f"--moe-cpu-layers={config.moe_cpu_layers!r}"
-            if config.moe_strategy not in ("cpu", "hybrid")
-            else f"--moe-strategy {config.moe_strategy!r}"
-        )
         raise ValueError(
-            f"{asked}: gguf moe_weight_format supports offload only; drop the flag "
-            "and let every layer decode on the GPU offload path instead."
+            f"--moe-strategy {config.moe_strategy!r}: gguf moe_weight_format supports "
+            "offload only; drop the flag and let every layer decode on the GPU offload "
+            "path instead."
         )
+    if (
+        is_moe
+        and getattr(model_config, "moe_weight_format", None) == "gguf"
+        and config.moe_strategy == "hybrid"
+    ):
+        # hybrid decodes experts on the CPU executor: every per-layer bank type in the
+        # file must be executor-capable (capability queried from the executor's own set,
+        # never restated here); banks are not loaded yet, hence the header scan.
+        rejection = _gguf_hybrid_rejection(config, model_config)
+        if rejection:
+            raise ValueError(f"--moe-strategy 'hybrid': {rejection}")
 
     if is_moe and getattr(model_config, "moe_weight_format", None) == "gguf":
         # Issue #186: the ggml moe_vec grid is tokens*top_k <= 65535; the default
@@ -1875,6 +1920,7 @@ def _adjust_config(config: EngineConfig):
         from freetoken.moe.bench_profile import load_backend_recommendation
 
         gpu_name, gpu_uuid = _profile_gpu()
+        # gguf: no bench CPU leg exists, so hybrid is entered only via the explicit --moe-strategy hybrid flag.
         if bench_fmt != "gguf" and load_backend_recommendation(
             bench_fmt, gpu_name=gpu_name, gpu_uuid=gpu_uuid
         ) == "hybrid":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -506,9 +507,9 @@ def test_uncapped_platform_stays_uncapped(monkeypatch):
 
 
 def test_adjust_config_rejects_gguf_experts_on_cpu_paths():
-    # gguf moe_weight_format has no CPU/resident expert path until the Phase 5 bank
-    # integration: cpu/hybrid/fused picks must fail at config time, offload (the only
-    # wired path) passes the gate.
+    # gguf moe_weight_format still has no CPU-resident or fused expert path: cpu/fused
+    # picks must fail at config time. offload passes the gate, and hybrid is accepted for
+    # a capable per-layer type set (see the hybrid gate tests below).
     from freetoken.engine.engine import _adjust_config
 
     model_config = SimpleNamespace(
@@ -606,3 +607,139 @@ def test_adjust_config_auto_keeps_gguf_on_offload_despite_hybrid_profile(monkeyp
     cfg2.model_config.moe_weight_format = None
     _adjust_config(cfg2)
     assert cfg2.moe_strategy == "hybrid"
+
+
+# ---- gguf + hybrid gate: per-layer header types vs the executor capability set ----
+
+
+def _write_expert_types_gguf(path, layer_types) -> str:
+    """Minimal .gguf carrying ONLY the ffn_{gate,up,down}_exps stacks, typed per layer.
+
+    The hybrid gate scans the tensor table alone (GGUFReader mmaps; no bank data is
+    touched), so one-quant-block payloads are enough: the byte shape (block, type_size)
+    decodes to the ggml shape (block, block) iter_gguf_tensors expects."""
+    import gguf
+
+    w = gguf.GGUFWriter(str(path), "glm5next")
+    for blk, types in sorted(layer_types.items()):
+        for role, tid in zip(("gate", "up", "down"), types):
+            qt = gguf.GGMLQuantizationType(tid)
+            block, type_size = gguf.GGML_QUANT_SIZES[qt]
+            w.add_tensor(
+                f"blk.{blk}.ffn_{role}_exps.weight",
+                np.zeros((block, type_size), np.uint8),
+                raw_dtype=qt,
+            )
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
+
+
+def _gguf_gate_model_config(**extra):
+    return SimpleNamespace(
+        single_stream_only=False,
+        is_moe=True,
+        expert_quant="none",
+        moe_weight_format="gguf",
+        hidden_act="swiglu_clamp",
+        has_swa_attention=False,
+        has_linear_attention=False,
+        num_moe_layers=2,
+        **extra,
+    )
+
+
+def _gguf_gate_cfg(model_config, strategy, model_path=None):
+    # mirror the duck-typed Cfg of test_adjust_config_rejects_gguf_experts_on_cpu_paths,
+    # plus model_path (the header scan is the only consumer)
+    return SimpleNamespace(
+        moe_cache_auto=False,
+        moe_cache_size=0,
+        moe_cache_rate=None,
+        moe_strategy=strategy,
+        moe_cpu_layers=None,
+        model_path=model_path,
+        max_running_req=4,
+        cuda_graph_max_bs=2,
+        cuda_graph_bs=[1, 2],
+        max_seq_len=1024,
+        page_size=1,
+        attention_backend="fi",
+        num_page_override=None,
+        num_token_override=None,
+        model_config=model_config,
+    )
+
+
+def test_adjust_config_accepts_gguf_hybrid_for_capable_types(tmp_path):
+    # glm5next packs (18, 18, 23) / (18, 18, 14) / (23, 23, 14) bank types, all inside
+    # the CPU executor's capability set (Task 02): the explicit hybrid pick must pass
+    # the gate instead of the old blanket offload-only rejection.
+    from freetoken.engine.engine import _adjust_config
+
+    path = _write_expert_types_gguf(tmp_path / "capable.gguf", {0: (18, 18, 23), 1: (18, 18, 14)})
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=path)
+    _adjust_config(cfg)  # must not raise
+    assert cfg.moe_strategy == "hybrid"
+
+
+def test_adjust_config_rejects_gguf_hybrid_for_incapable_types(tmp_path):
+    # Q8_0 (type id 8) banks have no CPU GEMV: the gate refuses the hybrid pick at
+    # config time and names the offending type id instead of crashing in the executor
+    # after the whole weight load.
+    from freetoken.engine.engine import _adjust_config
+
+    path = _write_expert_types_gguf(tmp_path / "incapable.gguf", {0: (18, 18, 23), 1: (8, 8, 14)})
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=path)
+    with pytest.raises(ValueError, match=r"types \[8\] have no CPU GEMV"):
+        _adjust_config(cfg)
+
+
+def test_adjust_config_rejects_gguf_hybrid_when_types_unverifiable():
+    # Fail-safe direction: without a scannable .gguf file the gate cannot prove that
+    # every bank type is CPU-executable, so hybrid stays rejected (offload keeps working).
+    from freetoken.engine.engine import _adjust_config
+
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=None)
+    with pytest.raises(ValueError, match="cannot be verified from the file header"):
+        _adjust_config(cfg)
+
+
+try:
+    from freetoken.kernel import _cpu_moe as _cpu_moe_ext  # noqa: F401
+
+    _HAVE_CPU_MOE_EXT = True
+except ImportError:
+    _HAVE_CPU_MOE_EXT = False
+
+
+@pytest.mark.skipif(not _HAVE_CPU_MOE_EXT, reason="compiled _cpu_moe extension missing")
+def test_cpu_moe_executor_viable_reads_gguf_types(tmp_path):
+    # --moe-cpu-layers auto consults this: the "gguf" alias alone must not count as
+    # viable - the file's per-layer types decide, so an incapable set fails at config
+    # time instead of post-load in the executor.
+    from freetoken.engine.engine import _cpu_moe_executor_viable
+
+    def model_config(num_layers):
+        # silu: no dependency on the compiled extension's act table, only its presence
+        return SimpleNamespace(
+            single_stream_only=False,
+            is_moe=True,
+            expert_quant="none",
+            moe_weight_format="gguf",
+            hidden_act="silu",
+            has_swa_attention=False,
+            has_linear_attention=False,
+            num_moe_layers=num_layers,
+        )
+
+    capable = _write_expert_types_gguf(tmp_path / "capable.gguf", {0: (18, 18, 23), 1: (23, 23, 14)})
+    assert _cpu_moe_executor_viable(model_config(2), capable) is True
+    incapable = _write_expert_types_gguf(tmp_path / "incapable.gguf", {0: (8, 8, 8)})
+    assert _cpu_moe_executor_viable(model_config(1), incapable) is False
+    assert _cpu_moe_executor_viable(model_config(1), None) is False  # unscannable -> not viable
+    # flat formats keep their alias behavior
+    flat = SimpleNamespace(hidden_act="silu", expert_quant="nvfp4")
+    assert _cpu_moe_executor_viable(flat) is True

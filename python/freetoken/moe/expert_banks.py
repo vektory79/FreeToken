@@ -12,6 +12,7 @@ import glob
 import math
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -311,24 +312,23 @@ _GGUF_BANK_ROLE_SUFFIXES = {
 }
 
 
-def _gguf_bank_bytes(model_path, model_config) -> int | None:
-    """Exact routed-expert bank bytes of a bare .gguf file, from its tensor table alone.
+def _gguf_bank_role_stacks(model_path, model_config, of_tensor) -> dict[int, dict[str, Any]] | None:
+    """Header-only scan of a bare .gguf file: {bank_layer: {role: of_tensor(t)}} for every
+    ffn_{gate,up,down}_exps stack.
 
-    Header-only scan: GGUFReader mmaps the file and parses the KV + tensor infos
-    without touching tensor data, so the 147 GB checkpoint parses in milliseconds
-    and never enters RAM. Every ffn_{gate,up,down}_exps stack is sized from its own
-    recorded ggml type and geometry, summing the real per-layer quant mix instead
-    of the conservative per-expert table. ``None`` - keep that table's estimate -
-    when the path is not a local .gguf file, the scan fails, or the trunk's bank
-    set is incomplete: a wrong exact number must never undercount the pin-budget
-    checks, so the scan only answers when it can prove a complete bank set.
+    GGUFReader mmaps the file and parses the KV + tensor infos without touching tensor
+    data, so the 147 GB checkpoint parses in milliseconds and never enters RAM.
+    ``None`` when the path is not a local .gguf file, the scan fails, or the trunk's
+    bank set is incomplete: callers only answer on a proven-complete bank set (a wrong
+    exact number must never undercount the pin-budget checks, and unknown types cannot
+    prove CPU executability).
     """
     from freetoken.models.gguf.reader import is_gguf_path, iter_gguf_tensors
     from freetoken.moe.expert_pieces import bank_layer_of
 
     if not model_path or not is_gguf_path(model_path):
         return None
-    per_layer: dict[int, dict[str, int]] = {}
+    per_layer: dict[int, dict[str, Any]] = {}
     try:
         for t in iter_gguf_tensors(model_path):
             for suffix, role in _GGUF_BANK_ROLE_SUFFIXES.items():
@@ -342,7 +342,7 @@ def _gguf_bank_bytes(model_path, model_config) -> int | None:
             bank_layer = bank_layer_of(model_config, int(layer_id))
             if bank_layer is None:
                 continue  # leading dense layers and MTP slots never load a bank
-            per_layer.setdefault(bank_layer, {})[role] = t.rows * t.row_bytes
+            per_layer.setdefault(bank_layer, {})[role] = of_tensor(t)
     except Exception:
         return None
     roles = set(_GGUF_BANK_ROLE_SUFFIXES.values())
@@ -350,7 +350,39 @@ def _gguf_bank_bytes(model_path, model_config) -> int | None:
         return None
     if len(per_layer) != int(getattr(model_config, "num_moe_layers", 0) or 0):
         return None
+    return per_layer
+
+
+def _gguf_bank_bytes(model_path, model_config) -> int | None:
+    """Exact routed-expert bank bytes of a bare .gguf file, from its tensor table alone.
+
+    Header-only scan (see _gguf_bank_role_stacks): every ffn_{gate,up,down}_exps stack
+    is sized from its own recorded ggml type and geometry, summing the real per-layer
+    quant mix instead of the conservative per-expert table. ``None`` - keep that
+    table's estimate - whenever the scan cannot prove a complete bank set.
+    """
+    per_layer = _gguf_bank_role_stacks(model_path, model_config, lambda t: t.rows * t.row_bytes)
+    if per_layer is None:
+        return None
     return sum(sum(stacks.values()) for stacks in per_layer.values())
+
+
+def gguf_expert_bank_types(model_path, model_config) -> dict[int, tuple[int, int, int]] | None:
+    """Role-ordered (gate, up, down) gguf type id of every routed-expert bank layer of a
+    bare .gguf file, from its tensor table alone (the _gguf_bank_bytes header-only scan;
+    role order comes from the suffix map, never the file's tensor order).
+
+    The engine's hybrid gate consults this at config time, before any bank is loaded.
+    ``None`` when the scan cannot prove a complete bank set - unverifiable types must
+    never pass a capability gate; offload stays the always-safe fallback.
+    """
+    per_layer = _gguf_bank_role_stacks(model_path, model_config, lambda t: int(t.ggml_type))
+    if per_layer is None:
+        return None
+    return {
+        layer: (stacks["gate"], stacks["up"], stacks["down"])
+        for layer, stacks in per_layer.items()
+    }
 
 
 def bank_bytes_estimate(model_config, method=None, model_path=None) -> int | None:
