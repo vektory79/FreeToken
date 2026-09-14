@@ -53,24 +53,37 @@ def _module():
 
     extra_cuda_cflags = ["-O3", "--expt-relaxed-constexpr"]
     host_cxx = _host_compiler()
+    host_env: dict[str, str] = {}
     if host_cxx is not None:
         # Point both nvcc's host pass (-ccbin) and torch's C++ compile (CXX) at a
         # libtorch/nvcc-compatible compiler. Force (not setdefault): the system
         # default (CXX unset -> g++) can be a gcc too new for the torch headers.
         cxx_path = shutil.which(host_cxx) or host_cxx
         extra_cuda_cflags += ["-ccbin", cxx_path]
-        os.environ["CXX"] = cxx_path
-        os.environ["CC"] = _c_compiler_for(cxx_path)
+        host_env["CXX"] = cxx_path
+        host_env["CC"] = _c_compiler_for(cxx_path)
 
     # gguf_kernel.cu carries its own PYBIND11_MODULE (appended at the end), so a
     # plain `load` of the single source compiles + binds the ggml_* ops.
-    return load(
-        name="freetoken_gguf_kernels",
-        sources=[str(_CSRC / "gguf_kernel.cu")],
-        extra_include_paths=[str(_CSRC)],
-        extra_cuda_cflags=extra_cuda_cflags,
-        verbose=True,
-    )
+    saved = {k: os.environ.get(k) for k in host_env}
+    try:
+        os.environ.update(host_env)
+        return load(
+            name="freetoken_gguf_kernels",
+            sources=[str(_CSRC / "gguf_kernel.cu")],
+            extra_include_paths=[str(_CSRC)],
+            extra_cuda_cflags=extra_cuda_cflags,
+            verbose=True,
+        )
+    finally:
+        # The override is only for the nvcc/ninja subprocesses of this load:
+        # leaving CC/CXX set leaks a clang host into later JIT builds in this
+        # process (e.g. flashinfer fails to compile under CUDA 13.3).
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 # ---- thin typed wrappers (signatures mirror sgl_kernel.quantization.gguf) ----

@@ -13,6 +13,8 @@ dequantizes identically on both paths.
 from __future__ import annotations
 
 import functools
+import os
+from types import SimpleNamespace
 
 import gguf
 import numpy as np
@@ -281,3 +283,68 @@ def test_dense_gguf_noncontig_activations(batch):
 
     got_c = fused_mul_mat_gguf(x.contiguous(), qw, GGML_Q8_0).float()
     torch.testing.assert_close(got, got_c, rtol=2e-2, atol=2e-2 * want.abs().max().item())
+
+
+# ---- the JIT module load must not leak CC/CXX into the process env ----
+
+# A nonexistent absolute path: resolution must fall through to the raw override.
+_FAKE_HOST_CXX = "/opt/fake-toolchain/bin/clang++"
+
+
+def _capture_load(monkeypatch):
+    """Swap torch's cpp_extension.load for a recorder: no JIT build, no CUDA.
+
+    Captures the CC/CXX the build subprocesses would have seen plus the cuda
+    flags, so the env-scoping around the load call is testable on any machine.
+    """
+    seen = {}
+
+    def fake_load(**kwargs):
+        seen["env"] = {k: os.environ.get(k) for k in ("CC", "CXX")}
+        seen["flags"] = list(kwargs["extra_cuda_cflags"])
+        return object()
+
+    monkeypatch.setattr("torch.utils.cpp_extension.load", fake_load)
+    return seen
+
+
+def test_module_load_scopes_cc_cxx_to_the_build(monkeypatch):
+    """The clang host override applies to the build's subprocesses only.
+
+    Regression: _module() used to write CC/CXX into os.environ and never
+    restore them, so a later flashinfer JIT build in the same pytest process
+    regenerated build.ninja with the clang host and failed to compile
+    (alignas(64) below CUtensorMap's default under CUDA 13.3).
+    """
+    from freetoken.kernel import gguf as gguf_kernel
+
+    seen = _capture_load(monkeypatch)
+    monkeypatch.setenv("FREETOKEN_GGUF_HOST_CXX", _FAKE_HOST_CXX)
+    # which() -> None keeps host-compiler resolution deterministic on any PATH
+    monkeypatch.setattr(gguf_kernel, "shutil", SimpleNamespace(which=lambda _name: None))
+
+    before = {k: os.environ.get(k) for k in ("CC", "CXX")}
+    gguf_kernel._module.__wrapped__()  # bypass functools.cache
+
+    # the build ran with the override as the host compiler, on both passes
+    assert seen["env"]["CXX"] == _FAKE_HOST_CXX
+    assert seen["env"]["CC"] == "clang"
+    assert seen["flags"][-2:] == ["-ccbin", _FAKE_HOST_CXX]
+    # ... and the process env is exactly as it was before the call
+    assert {k: os.environ.get(k) for k in ("CC", "CXX")} == before
+
+
+def test_module_load_without_a_host_compiler_sets_no_cc_cxx(monkeypatch):
+    """No FREETOKEN_GGUF_HOST_CXX and no compiler on PATH: nothing is injected."""
+    from freetoken.kernel import gguf as gguf_kernel
+
+    seen = _capture_load(monkeypatch)
+    monkeypatch.delenv("FREETOKEN_GGUF_HOST_CXX", raising=False)
+    monkeypatch.setattr(gguf_kernel, "shutil", SimpleNamespace(which=lambda _name: None))
+
+    before = {k: os.environ.get(k) for k in ("CC", "CXX")}
+    gguf_kernel._module.__wrapped__()
+
+    assert seen["env"] == before
+    assert "-ccbin" not in seen["flags"]
+    assert {k: os.environ.get(k) for k in ("CC", "CXX")} == before

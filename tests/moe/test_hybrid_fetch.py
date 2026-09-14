@@ -348,20 +348,7 @@ def test_hybrid_cpu_miss_rows_match_gpu_path():
     sys.path.insert(0, str(pathlib.Path(__file__).parent))  # noqa: F401 - body imports below
     import test_cpu_moe_gguf_iq  # noqa: F401 - sibling fixture module
 
-    # kernel/gguf.py force-sets process-global CC/CXX (clang host for its nvcc
-    # pass) and never restores them; a later flashinfer JIT build in this same
-    # pytest process then regenerates its build.ninja with the clang host and
-    # fails to compile (alignas(64) below CUtensorMap's default under CUDA 13.3).
-    # Restore after our ggml calls so downstream JIT users keep the clean env.
-    saved_env = {k: os.environ.get(k) for k in ("CC", "CXX")}
-    try:
-        _hybrid_cpu_miss_rows_match_gpu_path_body()
-    finally:
-        for key, value in saved_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    _hybrid_cpu_miss_rows_match_gpu_path_body()
 
 
 def _hybrid_cpu_miss_rows_match_gpu_path_body():
