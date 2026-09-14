@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 import torch
 
-from freetoken.models.gguf.dequant import GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K
+from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -447,6 +447,74 @@ def test_cpu_moe_gguf_unsupported_type_fails_loudly():
     cache = SimpleNamespace(gguf_types=[(11, 11, 11)])
     with pytest.raises(NotImplementedError, match="no CPU GEMV"):
         _split_gguf_formats("gguf", cache)
+
+
+def test_cpu_moe_gguf_gate_row_bytes_not_block_multiple_fails_loudly():
+    """A gate bank whose row bytes are not an exact multiple of the gate format's
+    block bytes must assert BEFORE H is floor-derived from row_bytes // rb: a
+    silent floor would under-derive H and mis-address every row."""
+    from freetoken.moe.cpu_executor import CpuMoeExecutor
+
+    bs, L, E, H, I = 2, 1, 8, 1024, 256
+    dev = torch.device("cuda")
+    qtype = GGML_IQ3_XXS
+    cache = _make_gguf_cache((qtype, qtype, qtype), L, E, H, I, seed=31)
+    rb = BLOCK_SHAPE[qtype][1]  # the same table the resolver reads
+    bad = 3 * rb + 2  # 3 full blocks plus 2 stray bytes
+    cache.bank_sources["gate"] = [b[..., :bad] for b in cache.bank_sources["gate"]]
+    with pytest.raises(AssertionError, match=rf"{bad}, {rb}, '{_TYPE_NAMES[qtype]}'"):
+        CpuMoeExecutor(
+            cache,
+            top_k=2,
+            activation="silu",
+            apply_router_weight_on_input=False,
+            num_threads=2,
+            max_tokens=bs,
+            device=dev,
+        )
+
+
+def test_cpu_moe_gguf_short_expert_bank_fails_loudly():
+    """A bank with fewer expert rows than the cache's num_experts must raise:
+    the C++ skip guard bounds e by the CONFIGURED count, so a short bank would
+    read out of bounds. Only the down bank is short -- gate/up pass the same
+    per-role check first."""
+    from freetoken.moe.cpu_executor import CpuMoeExecutor
+
+    bs, L, E, H, I = 2, 1, 8, 512, 256
+    dev = torch.device("cuda")
+    qtype = GGML_Q6_K
+    cache = _make_gguf_cache((qtype, qtype, qtype), L, E, H, I, seed=37)
+    short = E - 2
+    cache.bank_sources["down"] = [b[:short] for b in cache.bank_sources["down"]]
+    with pytest.raises(
+        NotImplementedError,
+        match=rf"down bank has {short} expert rows but the cache declares num_experts={E}",
+    ):
+        CpuMoeExecutor(
+            cache,
+            top_k=2,
+            activation="silu",
+            apply_router_weight_on_input=False,
+            num_threads=2,
+            max_tokens=bs,
+            device=dev,
+        )
+
+
+def test_cpu_moe_gguf_diverging_layer_types_fail_loudly():
+    """One layer whose (gate, up, down) triple diverges from layer 0 must fail
+    loudly: the executor reads types[0] for the whole signature partition."""
+    from freetoken.moe.cpu_executor import _split_gguf_formats
+
+    base = (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ4_XS)
+    diverging = (GGML_IQ4_XS, GGML_IQ4_XS, GGML_Q6_K)  # (23, 23, 14) at layer 2
+    cache = SimpleNamespace(gguf_types=[base, base, diverging])
+    with pytest.raises(
+        NotImplementedError, match="must be uniform within a partition"
+    ) as excinfo:
+        _split_gguf_formats("gguf", cache)
+    assert f"[(2, {tuple(diverging)})]" in str(excinfo.value)
 
 
 if __name__ == "__main__":
