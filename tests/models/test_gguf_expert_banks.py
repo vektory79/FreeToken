@@ -663,6 +663,58 @@ def test_partition_prefill_overlap_degrade_rule():
     assert Engine._partition_prefill_overlap(False, 4096, E) is False
 
 
+def _hybrid_capability_stub(sig, num_layers, E):
+    """Minimal decode_target=hybrid gguf cache for the capability screen (no banks:
+    the screen reads quant_format + gguf_types only)."""
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    return OffloadMoeCache(
+        num_layers=num_layers, num_experts=E, cache_size=2 * E,
+        device=torch.device("cpu"), quant_format="gguf",
+        gguf_types=tuple([tuple(sig)] * num_layers), decode_target="hybrid",
+    )
+
+
+def test_engine_multi_partition_valueerror_lifted_for_capable_signatures():
+    # Task 02: the real file's mixed signatures (18,18,14)/(23,23,14) alongside the
+    # dominant (18,18,23) - the blanket multi-partition ValueError rejected this
+    # exact shape before per-cache executors existed; now every partition's types
+    # are executor-capable, so the lift applies (no rejection).
+    from freetoken.engine.engine import Engine
+
+    caches = [
+        _hybrid_capability_stub(sig, n, 4)
+        for sig, n in (((18, 18, 14), 2), ((23, 23, 14), 1), ((18, 18, 23), 1))
+    ]
+    assert Engine._partition_executor_rejections([[0, 1], [2], [3]], caches) == []
+
+
+def test_engine_multi_partition_rejection_names_the_incapable_type():
+    # a partition carrying a type without a CPU GEMV (Q3_K = 11) still fails
+    # loudly, naming the incapable type id; the capable partition passes
+    from freetoken.engine.engine import Engine
+
+    bad = _hybrid_capability_stub((11, 11, 11), 1, 4)
+    good = _hybrid_capability_stub((18, 18, 23), 1, 4)
+    rejections = Engine._partition_executor_rejections([[0], [1]], [bad, good])
+    assert len(rejections) == 1
+    members, reason = rejections[0]
+    assert members == [0]
+    assert "11" in reason and "no CPU GEMV" in reason
+
+
+def test_engine_multi_partition_lift_is_capability_gated():
+    # source pin: the raise site consults the per-partition capability screen and
+    # the blanket "cannot span partitions" rejection is gone
+    import inspect
+
+    from freetoken.engine.engine import Engine
+
+    src = inspect.getsource(Engine._init_offload_moe_cache)
+    assert "_partition_executor_rejections" in src
+    assert "cannot span partitions" not in src
+
+
 def test_prefill_choreography_group_boundary_no_hop_contract():
     # Pins the B3 boundary decision (the comment at Engine._init_offload_moe_cache):
     # a group's last-layer +1 prefetch no-ops on the LOCAL id guard and hands

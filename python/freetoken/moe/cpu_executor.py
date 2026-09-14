@@ -127,6 +127,34 @@ def _split_gguf_formats(fmt: str, cache) -> tuple[str, str, str] | None:
         ) from e
 
 
+def partition_executor_rejection(cache) -> str | None:
+    """Why a per-cache ``CpuMoeExecutor`` cannot serve ``cache`` (None when it can).
+
+    The engine's multi-partition cpu/hybrid lift consults this per signature
+    partition: per-cache executors make multi-signature files servable exactly when
+    EVERY partition passes. Capability = the bank format is executor-servable, i.e.
+    the "gguf" K-quant alias with every layer's (gate, up, down) type ids in
+    ``_GGUF_TYPE_FMTS``, or one of the flat formats in ``_WFMT_IDS``. (The
+    activation / compiled-extension capability is uniform across partitions and
+    still fails loudly at executor construction.)
+    """
+    fmt = getattr(cache, "quant_format", None)
+    if fmt == "gguf":
+        types = getattr(cache, "gguf_types", None)
+        if not types:
+            return "gguf expert banks carry no per-layer gguf_types"
+        incapable = sorted({int(t) for layer in types for t in layer} - set(_GGUF_TYPE_FMTS))
+        if incapable:
+            return (
+                f"gguf expert bank types {incapable} have no CPU GEMV "
+                f"(supported type ids: {sorted(_GGUF_TYPE_FMTS)})"
+            )
+        return None
+    if fmt in _WFMT_IDS:
+        return None
+    return f"expert format {fmt!r} has no CPU executor path"
+
+
 def compiled_extension_supports(activation: str) -> bool:
     """Whether the compiled ``_cpu_moe`` extension can serve ``activation``
     through its generic epilogue. A stale prebuilt .so accepts newer act ids
@@ -171,7 +199,9 @@ def physical_core_cpus() -> list[int]:
     return reps or allowed or [0]
 
 
-def resolve_threads_and_affinity(requested: int) -> tuple[int, list[int]]:
+def resolve_threads_and_affinity(
+    requested: int, allow_cores: list[int] | None = None
+) -> tuple[int, list[int]]:
     """Return (num_threads, core_ids) for the worker pool.
 
     ``requested == 0`` -> one thread per physical core, pinned to it (best for the
@@ -179,21 +209,66 @@ def resolve_threads_and_affinity(requested: int) -> tuple[int, list[int]]:
     spin-barrier degrades badly when oversubscribed). An explicit count is honored,
     spreading first across physical cores, then across the remaining logical CPUs
     (so distinct hardware threads are used before any core is doubled up).
+    ``allow_cores`` restricts the pool to a subset (the per-cache split from
+    :func:`resolve_pool_affinities`); an explicit count may then double up within
+    the subset only when it exceeds the subset size.
     """
     reps = physical_core_cpus()
+    if allow_cores is not None:
+        keep = set(allow_cores)
+        reps = [c for c in reps if c in keep]
     if requested and requested > 0:
         n = int(requested)
         try:
             allowed = sorted(os.sched_getaffinity(0))
         except AttributeError:
             allowed = list(range(os.cpu_count() or 1))
+        if allow_cores is not None:
+            allowed = [c for c in allowed if c in set(allow_cores)] or list(allow_cores)
         # physical-core reps first, then the rest of the logical CPUs.
         order = reps + [c for c in allowed if c not in set(reps)]
         if not order:
             order = [0]
         core_ids = [order[i % len(order)] for i in range(n)]
         return n, core_ids
-    return len(reps), list(reps)
+    return len(reps), list(reps) or list(allow_cores or []) or [0]
+
+
+def resolve_pool_affinities(num_pools: int, requested: int) -> list[list[int]]:
+    """Split the CPU budget across per-cache executor pools (partition-aware hybrid).
+
+    Every pool pins its workers, so N pools need DISJOINT cores or they oversubscribe
+    one core set N-wide (and each auto-sized pool reserves a coordinator core of its
+    own -- disjoint pools keep those disjoint too). Returns one core list per pool:
+    an explicit ``--moe-cpu-threads`` count is split as evenly as possible (the
+    remainder to the earlier pools, each share floored at one worker -- a starved
+    pool is worse than overspending the flag by pools-1 threads) and assigned cores
+    physical-first; ``requested == 0`` (auto) splits the physical cores evenly and
+    keeps one worker per core. Degenerate cases (more pools than cores) share cores
+    rather than starve a pool.
+    """
+    reps = physical_core_cpus()
+    if requested and requested > 0:
+        try:
+            allowed = sorted(os.sched_getaffinity(0))
+        except AttributeError:
+            allowed = list(range(os.cpu_count() or 1))
+        order = reps + [c for c in allowed if c not in set(reps)] or [0]
+        base, extra = divmod(int(requested), num_pools)
+        pools, start = [], 0
+        for i in range(num_pools):
+            n = max(1, base + (1 if i < extra else 0))
+            pools.append([order[(start + j) % len(order)] for j in range(n)])
+            start += n
+        return pools
+    size, extra = divmod(len(reps), num_pools)
+    pools, start = [], 0
+    for i in range(num_pools):
+        n = size + (1 if i < extra else 0)
+        # more pools than cores: share a core instead of handing out an empty set
+        pools.append(reps[start:start + n] if n else [reps[i % len(reps)]])
+        start += n
+    return pools
 
 
 class CpuMoeExecutor:
@@ -214,6 +289,7 @@ class CpuMoeExecutor:
         swiglu_alpha: float = 1.702,
         swiglu_limit: float | None = None,
         fmt: str | None = None,
+        allow_cores: list[int] | None = None,
     ) -> None:
         from freetoken.kernel import _cpu_moe
         from freetoken.moe.legacy_format import canonical_role
@@ -288,7 +364,7 @@ class CpuMoeExecutor:
                 )
                 self._flag_sync = False
 
-        nthreads, core_ids = resolve_threads_and_affinity(num_threads)
+        nthreads, core_ids = resolve_threads_and_affinity(num_threads, allow_cores)
         coord_core = -1
         if self._flag_sync and num_threads == 0 and nthreads > 2:
             # Auto sizing: give the coordinator the last physical core instead of

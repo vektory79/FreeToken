@@ -395,6 +395,7 @@ class Engine:
         self.moe_offload_cache = None
         self.moe_offload_caches: list[OffloadMoeCache] = []
         self.cpu_moe_executor = None
+        self.cpu_moe_executors: list = []
         # Host-side auxiliary stores (qwen4_exp's pinned PLE table): after the weights so a
         # load failure is not masked, before the MoE offload cache so the bank residency
         # planning sees the pin quota the table already spent.
@@ -545,6 +546,20 @@ class Engine:
         group at 2E - the wide minority signatures would double their slot cost.
         Mirrors rebuild()'s degrade at offload_cache (same 2E invariant)."""
         return bool(wants_overlap and size_g >= 2 * num_experts)
+
+    @staticmethod
+    def _partition_executor_rejections(groups, caches) -> list[tuple[list[int], str]]:
+        """Per-partition CPU-executor capability screen for the multi-partition
+        cpu/hybrid lift: (group members, reason) for every partition whose bank
+        formats a per-cache CpuMoeExecutor cannot serve; empty when the lift
+        applies (every partition's types are executor-capable)."""
+        from freetoken.moe.cpu_executor import partition_executor_rejection
+
+        return [
+            (members, reason)
+            for members, cache in zip(groups, caches)
+            if (reason := partition_executor_rejection(cache)) is not None
+        ]
 
     @staticmethod
     def _route_offload_layers(layers, routing: dict[int, tuple["OffloadMoeCache", int]]) -> None:
@@ -880,10 +895,21 @@ class Engine:
             for local, g in enumerate(members):
                 routing[g] = (cache, local)
         if len(caches) > 1 and decode_target in ("cpu", "hybrid"):
-            raise ValueError(
-                "multi-signature expert banks serve the gpu decode target only; "
-                "cpu/hybrid executors are per-format and cannot span partitions"
-            )
+            # Partition-aware hybrid (per-cache executors): multiple partitions are
+            # servable exactly when EVERY partition's bank types are CPU-executor
+            # capable; otherwise fail loudly naming the incapable type (the old
+            # blanket rejection blocked the mixed-signature glm5next file from
+            # cpu/hybrid entirely).
+            rejections = self._partition_executor_rejections(groups, caches)
+            if rejections:
+                detail = "; ".join(
+                    f"partition (layers {members}): {reason}" for members, reason in rejections
+                )
+                raise ValueError(
+                    "multi-signature expert banks cannot serve cpu/hybrid: not every "
+                    f"partition's bank types are CPU-executor capable ({detail}); "
+                    "use --moe-strategy offload instead"
+                )
         # Attach per group: each OffloadMoELayer points at ITS signature's cache and
         # carries that cache's LOCAL layer id (the cache machinery - slot tables,
         # prefill double buffers, stats - is uniformly local-indexed). Groups keep
@@ -896,15 +922,23 @@ class Engine:
         assert len(layers) == config.model_config.num_moe_layers
         self._route_offload_layers(layers, routing)
         if caches[0].decode_target in ("cpu", "hybrid"):
-            self._init_cpu_moe_executor(config, caches[0], layers)
+            self._init_cpu_moe_executors(config, caches, layers)
         # The dominant partition backs the legacy single-cache readers (status views,
         # scheduler readouts); everything list-shaped iterates moe_offload_caches.
         from freetoken.engine.cache_budget import expert_bytes_per_slot
 
-        dominant = max(caches, key=lambda c: c.cache_size * expert_bytes_per_slot(c.bank_sources))
+        dominant_idx = max(
+            range(len(caches)),
+            key=lambda i: caches[i].cache_size * expert_bytes_per_slot(caches[i].bank_sources),
+        )
+        dominant = caches[dominant_idx]
         self.ctx.moe_offload_cache = dominant
         self.moe_offload_cache = dominant
         self.moe_offload_caches = caches
+        if self.cpu_moe_executors:
+            # the legacy single-pointer readers follow the dominant partition's
+            # executor; the per-forward health check walks the whole list
+            self.cpu_moe_executor = self.cpu_moe_executors[dominant_idx]
         return dominant
 
     def _resolve_hybrid_fetch(self, config: EngineConfig, cache) -> None:
@@ -938,15 +972,26 @@ class Engine:
             "expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU"
         )
 
-    def _init_cpu_moe_executor(self, config: EngineConfig, cache, layers) -> None:
-        """Build the persistent CPU MoE executor (decode-time expert compute).
+    def _init_cpu_moe_executors(self, config: EngineConfig, caches, layers) -> None:
+        """Build ONE CPU MoE executor per OffloadMoeCache partition (decode-time
+        expert compute).
 
-        Must run before CUDA graph capture: the worker pool has to be live for the
-        eager warmup forward, and the pinned IO buffers / host-func task pointers
-        must be stable for the captured nodes. Buffers/tasks themselves are
-        allocated lazily on the first (eager) forward at each batch size.
+        Must run before CUDA graph capture (the single-cache constraint, unchanged):
+        the worker pools have to be live for the eager warmup forward, and the
+        pinned IO buffers / host-func task pointers must be stable for the captured
+        nodes. Buffers/tasks themselves are allocated lazily on the first (eager)
+        forward at each batch size.
+
+        Each partition's executor resolves ITS cache's per-layer per-role bank
+        formats (the per-signature gguf type table, mirroring the GPU path's
+        ``cache.gguf_types[layer]`` dispatch) and pins a DISJOINT slice of the CPU
+        budget: ``--moe-cpu-threads`` splits across pools (auto ``0`` splits the
+        physical cores evenly, one coordinator core carved out per pool). A single
+        partition keeps the exact pre-partition construction (whole-machine pool).
+        The dominant partition's executor rides ``self.cpu_moe_executor`` for the
+        legacy single-pointer readers; the full list is ``self.cpu_moe_executors``.
         """
-        from freetoken.moe.cpu_executor import CpuMoeExecutor
+        from freetoken.moe.cpu_executor import CpuMoeExecutor, resolve_pool_affinities
 
         sample = layers[0]
         required = ("top_k", "activation", "apply_router_weight_on_input")
@@ -958,21 +1003,35 @@ class Engine:
         # Decode batches never exceed max_running_req, but CUDA-graph padding can
         # round a batch up to the largest captured size; cover both.
         max_tokens = max(config.max_running_req, config.cuda_graph_max_bs or 0, 1)
-        executor = CpuMoeExecutor(
-            cache,
-            top_k=sample.top_k,
-            activation=sample.activation,
-            apply_router_weight_on_input=sample.apply_router_weight_on_input,
-            num_threads=config.moe_cpu_threads,
-            max_tokens=max_tokens,
-            device=self.device,
-            swiglu_alpha=float(sample.alpha),
-            swiglu_limit=sample.limit,
-            # FIXME: the None branch serves GGUF q4_0 banks, which have no quant method yet; drop it once GGUF joins the quant path
-            fmt=sample.quant_method.cpu_format if sample.quant_method is not None else None,
-        )
-        cache.set_cpu_executor(executor)
-        self.cpu_moe_executor = executor
+        if len(caches) == 1:
+            pool_cores = [None]
+            pool_threads = [config.moe_cpu_threads]
+        else:
+            pool_cores = resolve_pool_affinities(len(caches), config.moe_cpu_threads)
+            # auto (0) keeps the executor's own auto sizing inside its core subset;
+            # an explicit budget arrives pre-split (one share per pool, no doubling)
+            pool_threads = [
+                len(cores) if config.moe_cpu_threads > 0 else 0 for cores in pool_cores
+            ]
+        self.cpu_moe_executors = []
+        for cache, num_threads, allow_cores in zip(caches, pool_threads, pool_cores):
+            executor = CpuMoeExecutor(
+                cache,
+                top_k=sample.top_k,
+                activation=sample.activation,
+                apply_router_weight_on_input=sample.apply_router_weight_on_input,
+                num_threads=num_threads,
+                max_tokens=max_tokens,
+                device=self.device,
+                swiglu_alpha=float(sample.alpha),
+                swiglu_limit=sample.limit,
+                # FIXME: the None branch serves GGUF q4_0 banks, which have no quant method yet; drop it once GGUF joins the quant path
+                fmt=sample.quant_method.cpu_format if sample.quant_method is not None else None,
+                allow_cores=allow_cores,
+            )
+            cache.set_cpu_executor(executor)
+            self.cpu_moe_executors.append(executor)
+        self.cpu_moe_executor = self.cpu_moe_executors[0]
 
     def _sync_get_memory(self) -> Tuple[int, int]:
         """Get the min and max free memory across TP ranks."""
@@ -1199,10 +1258,12 @@ class Engine:
         use_graph = self.graph_runner.can_use_cuda_graph(batch)
         with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
             logits = self.graph_runner.replay(batch) if use_graph else self.model.forward()
-        if self.cpu_moe_executor is not None:
-            # One pinned read: surfaces a fired flag-handshake watchdog (dead coordinator
-            # -> stale expert outputs) as a loud error instead of silent corruption.
-            self.cpu_moe_executor.raise_if_unhealthy()
+        for executor in self.cpu_moe_executors:
+            # One pinned read per executor: surfaces a fired flag-handshake watchdog
+            # (dead coordinator -> stale expert outputs) as a loud error instead of
+            # silent corruption. Per-cache executors (partition-aware hybrid) each
+            # run their own coordinator + watchdog.
+            executor.raise_if_unhealthy()
 
         for req in batch.reqs:
             req.complete_one()
