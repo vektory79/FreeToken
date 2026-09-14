@@ -3,7 +3,7 @@ name: "ft-gguf-test-fixture-crafting"
 description: "Crafting synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets, bounded fp16 scales, Q6_K d-last"
 type: project
 lastUpdated: 2026-09-13T23:19
-lastRecall: 2026-09-14T01:32
+lastRecall: 2026-09-14T19:30
 ---
 
 # Crafting synthetic gguf quant tensors in FreeToken tests

@@ -11,5 +11,5 @@
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-2039b53cb2e9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-fb58a59761d2.md) — GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-2fbd9f4276bf.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
-- [ft-gguf-glm5next-phase5-acceptance](ft-gguf-glm5next-phase5-acceptance-76ec539bb748.md) — GGUF glm5next: off-topic defect RESOLVED - non-contiguous activation bug in fused_mul_mat_gguf; battery 5/5 on-topic
-- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-579af61234a1.md) — GGUF glm5next tracker: off-topic defect RESOLVED (non-contiguous activation bug, fixed, battery 5/5); fix uncommitted
+- [ft-gguf-glm5next-phase5-acceptance](ft-gguf-glm5next-phase5-acceptance-975a360a0e4a.md) — GGUF glm5next: Phases 1-6 committed through 028f2d9; digit-split fixed (battery 6/6); sizing+prefetch waves in flight
+- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-590e12c7424d.md) — GGUF glm5next: CAMPAIGN COMPLETE - 6 commits, all quality defects closed, production-usable
