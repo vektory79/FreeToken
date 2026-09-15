@@ -281,19 +281,20 @@ def resolve_pool_affinities(
     ~2.96 GB/s effective CPU leg vs 11.3 benched). Allocation: floor(total * w_i / W)
     with the leftover units to the largest fractional remainders (ties -> earlier
     pools), every share floored at one worker -- a starved pool is worse than
-    overspending the flag by pools-1 threads, so an explicit ``--moe-cpu-threads``
-    split may overspend the same way the even split always could. The AUTO path
-    additionally trims any floor-at-one overflow back out of the largest pool: auto
-    splits the physical cores themselves, and the pools must stay a disjoint cover
-    of them. Cores are assigned physical-first, CLAMPED to the usable core set so
-    the pools stay disjoint (an over-budget flag is dropped with a warning instead
-    of wrapping onto cores that an earlier pool already pins); ``requested == 0``
-    (auto) keeps one worker per core. Degenerate cases (more pools than cores)
-    share cores rather than starve a pool.
+    overspending the flag by pools-1 threads. Floor-at-one overflow past the
+    usable core set is then trimmed back out of the largest (dominant) pool
+    (auto: the physical cores themselves; explicit: the flag clamped to that
+    set) -- a skewed weighted split on a tight box would otherwise push a later
+    pool's slice past the usable set and wrap it onto cores an earlier pool
+    already pins. Cores are assigned physical-first, CLAMPED to the usable core
+    set so the pools stay disjoint (an over-budget flag is dropped with a warning
+    instead of wrapping onto cores that an earlier pool already pins);
+    ``requested == 0`` (auto) keeps one worker per core. Degenerate cases (more
+    pools than cores) share cores rather than starve a pool.
     """
     reps = physical_core_cpus()
 
-    def _weighted_counts(total: int, trim_to_total: bool) -> list[int]:
+    def _weighted_counts(total: int, trim_to: int) -> list[int]:
         if not weights or len(weights) != num_pools or sum(weights) <= 0:
             size, extra = divmod(total, num_pools)
             return [size + (1 if i < extra else 0) for i in range(num_pools)]
@@ -304,15 +305,17 @@ def resolve_pool_affinities(
         by_frac = sorted(range(num_pools), key=lambda i: (-(raw[i] - counts[i]), i))
         for i in by_frac[:leftover]:
             counts[i] += 1
-        counts = [max(1, c) for c in counts]  # floor at one (may overspend total)
-        if trim_to_total:
-            # the auto path hands out the physical cores themselves: take the
-            # floor-at-one overflow back from the largest (dominant) pool
-            while sum(counts) > total:
-                j = max(range(num_pools), key=lambda i: counts[i])
-                if counts[j] <= 1:
-                    break
-                counts[j] -= 1
+        counts = [max(1, c) for c in counts]  # floor at one (may overspend the flag)
+        # re-clamp to the usable core set: take floor-at-one overflow past it back
+        # out of the largest (dominant) pool, so the slice assignment below never
+        # wraps onto cores an earlier pool already pins (auto hands out the
+        # physical cores themselves; explicit hands out the flag clamped to that
+        # same set; below it the flag overspend stands)
+        while sum(counts) > trim_to:
+            j = max(range(num_pools), key=lambda i: counts[i])
+            if counts[j] <= 1:
+                break
+            counts[j] -= 1
         return counts
 
     if requested and requested > 0:
@@ -333,7 +336,7 @@ def resolve_pool_affinities(
             total = len(order)
         total = max(total, num_pools)  # every pool keeps at least one worker
         pools, start = [], 0
-        for n in _weighted_counts(total, trim_to_total=False):
+        for n in _weighted_counts(total, len(order)):
             if start + n <= len(order):
                 pools.append(list(order[start:start + n]))
             else:
@@ -342,7 +345,7 @@ def resolve_pool_affinities(
             start += n
         return pools
     pools, start = [], 0
-    for i, n in enumerate(_weighted_counts(len(reps), trim_to_total=True)):
+    for i, n in enumerate(_weighted_counts(len(reps), len(reps))):
         # more pools than cores: share a core instead of handing out an empty set
         pools.append(
             list(reps[start:start + n])

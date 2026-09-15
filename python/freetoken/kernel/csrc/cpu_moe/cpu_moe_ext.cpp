@@ -1561,7 +1561,7 @@ static inline __m128i get_scale_shuffle(int i) {
     return _mm_loadu_si128((const __m128i*)k_shuffle + i);
 }
 
-// ggml simd-mappings.h (verbatim definition).
+// ggml-cpu/arch/x86/quants.c:26 (verbatim definition).
 #define MM256_SET_M128I(a, b) _mm256_insertf128_si256(_mm256_castsi128_si256(b), (a), 1)
 
 // ggml arch/x86/quants.c:2624 keven_signs_q2xs: 128 groups of 8 +-1 sign bytes (the
@@ -1811,7 +1811,7 @@ float iq4_xs_dot_i8(const uint8_t* row, const void* q8, int K) {
 // kernels (W4A8-K: q8_K activations). Default auto picks AVX2 when the CPU has
 // AVX2+FMA - the same detection pattern as pick_isa - scalar otherwise.
 // FREETOKEN_GGUF_DOT_TIER={scalar,avx2} overrides (A/B the tiers); an explicit
-// tier is never forced above CPU support (pick_isa's cap-down semantics).
+// tier is capped down at CPU support, never forced above it (pick_isa semantics).
 enum GgufDotTier { GGUF_DOT_SCALAR = 0, GGUF_DOT_AVX2 = 1 };
 
 inline GgufDotTier pick_gguf_dot_tier() {
@@ -1819,8 +1819,10 @@ inline GgufDotTier pick_gguf_dot_tier() {
       (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) ? GGUF_DOT_AVX2
                                                                         : GGUF_DOT_SCALAR;
   if (const char* f = getenv("FREETOKEN_GGUF_DOT_TIER")) {
-    if (!std::strcmp(f, "scalar")) return GGUF_DOT_SCALAR;
-    if (!std::strcmp(f, "avx2")) return GGUF_DOT_AVX2;
+    GgufDotTier want = best;
+    if (!std::strcmp(f, "scalar")) want = GGUF_DOT_SCALAR;
+    else if (!std::strcmp(f, "avx2")) want = GGUF_DOT_AVX2;
+    return want < best ? want : best;  // cap downward; never force above hw support
   }
   return best;
 }

@@ -185,6 +185,24 @@ def _gguf_i8_active(ex) -> bool:
     return "avx2-w4a8k" in getattr(ex, "isa", "")
 
 
+def _host_has_avx2_fma() -> bool:
+    """Host-side mirror of the C++ gate (__builtin_cpu_supports("avx2") &&
+    ("fma")): the W4A8-K tier engages only when BOTH are present, whatever the
+    FREETOKEN_GGUF_DOT_TIER override asks for (pick_gguf_dot_tier caps down)."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.split(":")[0].strip() == "flags":
+                    flags = set(line.split(":")[1].split())
+                    return "avx2" in flags and "fma" in flags
+    except OSError:
+        pass
+    return False
+
+
+_HOST_AVX2 = _host_has_avx2_fma()
+
+
 def _make_gguf_cache(types, L: int, E: int, H: int, I: int, seed: int = 0, uniform: bool = False):
     """Pinned per-role gguf banks + the cache stub the executor reads.
 
@@ -373,6 +391,11 @@ def test_cpu_moe_gguf_uniform_analytic(qtype):
     assert rel < 5e-3, f"{_TYPE_NAMES[qtype]} analytic rel err {rel.item()} (w={value})"
 
 
+@pytest.mark.skipif(
+    not _HOST_AVX2,
+    reason="the avx2 W4A8-K tier engages only on AVX2+FMA hosts (the tier override "
+    "caps down to scalar elsewhere, so the A/B would compare scalar vs scalar)",
+)
 @pytest.mark.parametrize(
     "qtype", (GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K), ids=["iq3_xxs", "iq4_xs", "q6_k"]
 )
@@ -392,7 +415,11 @@ def test_cpu_moe_gguf_i8_tier_ab(qtype, monkeypatch):
     the C-vs-torch expf/silu ulp drift flips a bf16 rounding and q6_K's single
     down block re-derives its amax (measured 1.3e-3 worst case, q6_K). The ISA
     discriminator value is unchanged: any sign/LUT/scale bug in the ported
-    kernels sits at O(1) relative, two orders above the bar."""
+    kernels sits at O(1) relative, two orders above the bar.
+
+    Skipped on hosts without AVX2+FMA: there the tier override caps down to
+    scalar (pick_isa's cap-down semantics) and the A/B would compare scalar
+    against scalar."""
     bs, top_k, L, E, H, I = 3, 3, 2, 8, 512, 256
     dev = torch.device("cuda")
     types = (qtype, qtype, qtype)
@@ -403,6 +430,18 @@ def test_cpu_moe_gguf_i8_tier_ab(qtype, monkeypatch):
         cache, top_k, bs, H, dev, seed=500 + qtype, layer=1
     )
     assert "avx2-w4a8k" in ex_avx.isa, ex_avx.isa
+
+    # Cap-down invariant: the selected tier never exceeds CPU support. Auto must
+    # pick the W4A8-K tag exactly when the host has AVX2+FMA (asserted via the
+    # isa tag), so the forced-avx2 run above engages through the cap on this
+    # host -- and on a non-AVX2 host the override would cap to scalar instead
+    # of SIGILLing on the ggml kernels.
+    monkeypatch.delenv("FREETOKEN_GGUF_DOT_TIER", raising=False)
+    ex_auto, _, _, _, _ = _run_executor(
+        _make_gguf_cache(types, L, E, H, I, seed=200 + qtype),
+        top_k, bs, H, dev, seed=500 + qtype, layer=1,
+    )
+    assert ("avx2-w4a8k" in ex_auto.isa) == _HOST_AVX2, ex_auto.isa
 
     monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "scalar")
     ex_sc, out_sc, _, _, _ = _run_executor(

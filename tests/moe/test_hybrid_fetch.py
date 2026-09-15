@@ -369,8 +369,11 @@ def test_resolve_pool_affinities_weights_by_layer_count(monkeypatch):
     from freetoken.moe.cpu_executor import resolve_pool_affinities
 
     weights = [39, 2, 1]  # the real glm5next file: dominant + two minority partitions
-    # explicit --moe-cpu-threads: weighted largest-remainder, floor-at-one preserved
-    # (the split may overspend the flag by pools-1 workers, as the even split could)
+    # explicit --moe-cpu-threads: weighted largest-remainder, floor-at-one preserved;
+    # below the usable core set the split may still overspend the flag by pools-1
+    # workers (as the even split could) -- this rig has 20 cores + SMT siblings, so
+    # both splits fit; the tight-box trim is pinned by
+    # test_resolve_pool_affinities_weighted_tight_box_never_wraps
     assert [len(p) for p in resolve_pool_affinities(3, 16, weights=weights)] == [15, 1, 1]
     assert [len(p) for p in resolve_pool_affinities(3, 20, weights=weights)] == [19, 1, 1]
 
@@ -395,6 +398,36 @@ def test_resolve_pool_affinities_weights_by_layer_count(monkeypatch):
 
     # even split preserved when weights are absent (backward compatibility)
     assert [len(p) for p in resolve_pool_affinities(3, 4)] == [2, 1, 1]
+
+
+def test_resolve_pool_affinities_weighted_tight_box_never_wraps():
+    """Corner: skewed weights + requested >= usable cores. Floor-at-one alone
+    overspends the clamped budget (sum(counts) up to total + pools-1), which
+    used to push the last pools' slices past the usable set and WRAP them onto
+    cores an earlier pool already pins (the eb7de4c never-wraps invariant).
+    The overflow is trimmed back out of the largest (dominant) pool:
+    floor-at-one, disjointness and the dominant share all hold."""
+    import os
+
+    from freetoken.moe.cpu_executor import physical_core_cpus, resolve_pool_affinities
+
+    reps = physical_core_cpus()
+    allowed = sorted(os.sched_getaffinity(0))
+    usable = len(reps) + len([c for c in allowed if c not in set(reps)])
+    if usable < 8:
+        pytest.skip("needs at least two cores per pool for the 4-pool corner")
+    weights = [100, 1, 1, 1]  # every minority share floors below one at this budget
+    for requested in (usable, usable + 7):  # exact fit and the clamped over-budget flag
+        pools = resolve_pool_affinities(4, requested, weights=weights)
+        flat = [c for p in pools for c in p]
+        assert len(flat) == len(set(flat)), f"pools wrap/share cores ({requested}): {pools}"
+        assert set(flat) <= set(allowed), f"cores outside the usable set ({requested})"
+        assert all(len(p) >= 1 for p in pools), f"floor-at-one broken ({requested}): {pools}"
+        sizes = [len(p) for p in pools]
+        assert sum(sizes) == usable, f"split not re-clamped to the usable set: {sizes}"
+        assert sizes[0] == max(sizes) and sizes[0] >= sum(sizes[1:]), (
+            f"overflow not trimmed from the dominant pool ({requested}): {sizes}"
+        )
 
 
 def test_resolve_threads_and_affinity_physical_core_free_subset_is_coherent():
@@ -688,3 +721,164 @@ def test_hybrid_overlap_disabled_multi_partition_serial_path(monkeypatch):
         assert rel < 3e-2, f"[{sig}] CPU-miss rows diverge from the GPU path: rel {rel.item()}"
         rel = (out.float() - gpu_full).abs().max() / (gpu_full.abs().max() + 1e-6)
         assert rel < 2e-2, f"[{sig}] serial merge diverges from the GPU path: rel {rel.item()}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_hybrid_avx2_tier_weighted_pools_production_combo(monkeypatch):
+    """The production combo end to end: the avx2 W4A8-K dot tier (what this box
+    boots with) + WEIGHTED per-partition pools resolved by
+    Engine._init_cpu_moe_executors + one hybrid merge step on the dominant
+    partition.
+
+    Tier-aware variant of the scalar-pin rationale (see
+    test_hybrid_cpu_miss_rows_match_gpu_path): the merge machinery is already
+    GPU-anchored at the scalar tier, so here the avx2 merge is anchored to the
+    SAME merge at the scalar tier within the tier A/B activation-quant envelope
+    (test_cpu_moe_gguf_iq's bound_q8 + bound_bf16 + act_gap contract) instead of
+    to the GPU path directly -- the W4A8-K quantization must not be counted
+    against the GPU's own activation quant a second time."""
+    import pathlib
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))  # noqa: F401 - body imports below
+    import test_cpu_moe_gguf_iq as iq  # noqa: F401 - sibling fixture module
+
+    if not iq._HOST_AVX2:
+        pytest.skip("the avx2 W4A8-K tier engages only on AVX2+FMA hosts")
+
+    from types import SimpleNamespace
+
+    from freetoken.engine.engine import Engine
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "avx2")
+
+    sigs = ((18, 18, 23), (23, 23, 14), (18, 18, 14))  # dominant + two minorities
+    layer_counts = (2, 1, 1)  # the weighted split source (real file's shape, scaled)
+    E, H, I, bs, top_k = 8, 512, 256, 3, 4
+    dev = torch.device("cuda")
+
+    # uniform analytic banks: the merge comparison stays about the tier + pools,
+    # not the fixture (see the serial-path test's rationale). One bank set per
+    # partition slot, built ONCE and shared by both tier runs (identical data,
+    # no per-run re-pack); each partition's layers get their own banks.
+    def build_banks(sig, num_layers, seed):
+        stub = iq._make_gguf_cache(sig, num_layers, E, H, I, seed=seed, uniform=True)
+        return {role: list(per_layer) for role, per_layer in stub.bank_sources.items()}
+
+    bank_sets = [
+        build_banks(sig, num_layers, 101 + 13 * idx)
+        for idx, (sig, num_layers) in enumerate(zip(sigs, layer_counts))
+    ]
+
+    def make_caches():
+        caches = []
+        for (sig, num_layers), banks in zip(zip(sigs, layer_counts), bank_sets):
+            cache = OffloadMoeCache(
+                num_layers=num_layers, num_experts=E, cache_size=2 * E, device=dev,
+                quant_format="gguf", gguf_types=tuple([tuple(sig)] * num_layers),
+                decode_target="hybrid", hybrid_max_fetch=1,
+            )
+            cache.set_bank_sources(banks)
+            caches.append(cache)
+        return caches
+
+    config = SimpleNamespace(moe_cpu_threads=8, max_running_req=4, cuda_graph_max_bs=2)
+    layers = [
+        SimpleNamespace(
+            top_k=top_k, activation="silu", apply_router_weight_on_input=False,
+            quant_method=None, alpha=1.0, limit=10.0,
+        )
+    ]
+    caches = make_caches()
+    fake = SimpleNamespace(device=dev, cpu_moe_executors=[])
+    Engine._init_cpu_moe_executors(fake, config, caches, layers)
+    executors = fake.cpu_moe_executors
+    assert len(executors) == 3
+
+    # weighted pools: layer counts 2/1/1 at --moe-cpu-threads 8 give the dominant
+    # partition 4 workers (not the even 3/3/2) as disjoint slices, every executor
+    # on the avx2 W4A8-K tier
+    pools = [ex.core_ids for ex in executors]
+    flat = [c for pool in pools for c in pool]
+    assert [ex.num_threads for ex in executors] == [4, 2, 2]
+    assert len(flat) == len(set(flat)), f"weighted pools share cores: {pools}"
+    for ex in executors:
+        assert "avx2-w4a8k" in ex.isa, ex.isa
+
+    def layer_for(c):
+        layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+        layer.quant_method = None
+        layer.activation = "silu"
+        layer.alpha = 1.0
+        layer.limit = None
+        layer.offload_cache = c
+        layer.layer_id = 0
+        return layer
+
+    # shared routing: lane 0 pre-resident (the GPU hit), the rest CPU-owned
+    gen = torch.Generator().manual_seed(5)
+    hidden = (torch.randn(bs, H, generator=gen) * 0.5).to(torch.bfloat16).to(dev)
+    raw = torch.stack(
+        [torch.randperm(E, generator=gen)[:top_k] for _ in range(bs)]
+    ).to(torch.int32).to(dev)
+    raw[:, 0] = 0
+    w = torch.rand(bs, top_k, generator=gen).to(dev)
+
+    def run_merge(cache):
+        hits = raw[:, :1].clone()
+        cache.ensure_experts(0, hits)
+        cache.copy_missing()
+        ids = raw.clone()
+        out = layer_for(cache)._decode_hybrid(cache, hidden, w, ids)
+        torch.cuda.synchronize()
+        cpu_lanes = ids < 0  # rewritten in place: slot (hit/fetched) or -1 (CPU-owned)
+        assert cpu_lanes.any() and (~cpu_lanes).any(), "fixture must mix CPU misses and GPU hits"
+        return ids, out.float()
+
+    ids_avx, out_avx = run_merge(caches[0])
+    assert torch.isfinite(out_avx).all()
+
+    # the identical merge at the scalar tier (fresh caches, same banks + routing):
+    # the GPU hit part is the same computation, so the merged outputs differ by
+    # exactly the W4A8-K activation quantization on the CPU lanes
+    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "scalar")
+    caches_sc = make_caches()
+    fake_sc = SimpleNamespace(device=dev, cpu_moe_executors=[])
+    Engine._init_cpu_moe_executors(fake_sc, config, caches_sc, layers)
+    assert "avx2-w4a8k" not in fake_sc.cpu_moe_executors[0].isa
+    ids_sc, out_sc = run_merge(caches_sc[0])
+    assert torch.equal(ids_avx, ids_sc), "routing rewrite must be tier-independent"
+
+    # tier A/B envelope over the CPU lanes' contribution: both tiers sit within
+    # their dfloat bound of their own mirrored reference, and the references
+    # differ by exactly the q8_K activation quantization (the A/B triangle).
+    # The reference helpers are CPU-side math (fixture banks are host tensors).
+    w_miss = torch.where(ids_avx < 0, w, w.new_zeros(())).contiguous()
+    cpu_ids = torch.where(ids_avx < 0, raw, raw.new_full((), -1)).contiguous()
+    hidden_c = hidden.cpu()
+    w_miss_c = w_miss.cpu()
+    cpu_ids_c = cpu_ids.cpu()
+    ref_q8, extras_q8 = iq._reference_decode(
+        bank_sets[0], sigs[0], 0, hidden_c, w_miss_c, cpu_ids_c, top_k, q8k_acts=True
+    )
+    ref_bf16, extras_bf16 = iq._reference_decode(
+        bank_sets[0], sigs[0], 0, hidden_c, w_miss_c, cpu_ids_c, top_k
+    )
+    bound_q8 = iq._dfloat_bound(
+        ref_q8, extras_q8, w_miss_c, cpu_ids_c, hidden_c,
+        iq._DEQUANT_FACTOR[iq.GGML_IQ3_XXS], iq._DEQUANT_FACTOR[iq.GGML_IQ4_XS],
+    )
+    bound_bf16 = iq._dfloat_bound(
+        ref_bf16, extras_bf16, w_miss_c, cpu_ids_c, hidden_c,
+        iq._DEQUANT_FACTOR[iq.GGML_IQ3_XXS], iq._DEQUANT_FACTOR[iq.GGML_IQ4_XS],
+    )
+    act_gap = (ref_q8 - ref_bf16).abs()
+    out_avx_c, out_sc_c = out_avx.cpu(), out_sc.cpu()
+    envelope = bound_q8 + bound_bf16 + act_gap + 1e-3 + 2.0**-8 * out_avx_c.abs()
+    d = (out_avx_c - out_sc_c).abs()
+    assert (d <= envelope).all(), (
+        f"avx2-tier merge diverges from the scalar merge beyond the W4A8-K envelope: "
+        f"max {d.max():.6g} vs {envelope.max():.6g}"
+    )
