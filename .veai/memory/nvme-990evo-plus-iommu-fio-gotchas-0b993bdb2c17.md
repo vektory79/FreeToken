@@ -3,7 +3,7 @@ name: "nvme-990evo-plus-iommu-fio-gotchas"
 description: "Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; IOMMU tax = old 4 GB/s"
 type: project
 lastUpdated: 2026-09-12T22:11
-lastRecall: 2026-09-15T01:49
+lastRecall: 2026-09-15T19:57
 ---
 
 # NVMe on work.vektory79.me rig: 990 EVO Plus final verdict + benchmark methodology gotchas

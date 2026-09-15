@@ -3,7 +3,7 @@ name: "ft-serve-gguf-glm5next-unsupported"
 description: "GGUF glm5next hybrid: Task 06 landed (11f1a80+979e3fc); profile bakes f=29.5%, CPU leg 65.6 GB/s; re-acceptance pending"
 type: project
 lastUpdated: 2026-09-15T15:54
-lastRecall: 2026-09-15T17:27
+lastRecall: 2026-09-15T19:57
 ---
 
 # GGUF glm5next (Path A): campaign complete - see PLAN.md for the full record

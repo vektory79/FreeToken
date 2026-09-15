@@ -1,9 +1,9 @@
 ---
 name: "process-hygiene-protocol"
 description: "User rule for test waves: process census pre/postflight, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs"
-type: project
-lastUpdated: 2026-09-15T14:55
-lastRecall: 2026-09-15T17:10
+type: feedback
+lastUpdated: 2026-09-15T20:06
+lastRecall: 2026-09-15T19:57
 ---
 
 # Process-hygiene protocol for agent test waves

@@ -3,6 +3,7 @@ name: "gguf-hybrid-reacceptance-final"
 description: "GGUF glm5next hybrid FINAL: re-acceptance 16.67 tok/s vs offload 12.97 - hybrid RECOMMENDED; 9 commits through 63b9bff"
 type: project
 lastUpdated: 2026-09-15T18:18
+lastRecall: 2026-09-15T19:57
 ---
 
 # GGUF glm5next hybrid: FINAL re-acceptance - hybrid RECOMMENDED

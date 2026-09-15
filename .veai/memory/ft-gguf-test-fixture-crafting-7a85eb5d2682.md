@@ -3,7 +3,7 @@ name: "ft-gguf-test-fixture-crafting"
 description: "Synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets; analytic uniform fixtures catch what parity cannot"
 type: project
 lastUpdated: 2026-09-14T22:05
-lastRecall: 2026-09-15T14:42
+lastRecall: 2026-09-15T19:57
 ---
 
 # Crafting synthetic gguf quant tensors in FreeToken tests
