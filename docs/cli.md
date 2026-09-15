@@ -81,11 +81,15 @@ of 16), so a card that held N tokens holds close to 2N. Each `(token, kv head)` 
 keeps its own fp32 scale, which costs ~3% back at `head_dim=128`. Requirements and
 trade-offs:
 
-- Needs the **triton** attention backend; `--attn auto` selects it (and refuses an
-  explicit `fi`/`fa`/`trtllm`, which cannot be shown to apply these scales).
-- Works on the plain paged, hybrid-SWA and QSA sparse (Qwen3.8-Flash-Next) KV pools.
-  On QSA the block-selection index keys stay 16-bit; only the selected K/V rows are
-  read back as codes. MLA/DSA latent KV, DeepSeek-V4's tiered pool and the block-sparse
+- Needs an attention backend that applies the scales: **triton** for the plain paged
+  and hybrid-SWA pools, `qsa_sparse` for QSA, `dsa` for MLA/DSA. `--attn auto` selects
+  one (and refuses an explicit `fi`/`fa`/`trtllm`, which cannot be shown to apply these
+  scales).
+- Works on the plain paged, hybrid-SWA, QSA sparse (Qwen3.8-Flash-Next) and MLA/DSA
+  latent KV pools (GLM-5.2, GLM-5.3-Flash). On QSA the block-selection index keys stay
+  16-bit; only the selected K/V rows are read back as codes. On MLA/DSA the DSA kernel
+  dequantizes the selected latent rows with their per-token scale while the index-key
+  and tail tiers stay 16-bit. DeepSeek-V4's tiered pool and the block-sparse
   MiniMax-M3 pool stay 16-bit; asking for fp8 there fails at startup rather than
   silently ignoring the flag.
 - The same bytes on every GPU FreeToken targets: the codes sit in a plain byte buffer
@@ -123,6 +127,28 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--reasoning-parser` | auto | Splits chain-of-thought into `reasoning_content`; auto-inferred; `off` disables |
 | `--enable-cache-report` | off | Report prefix-cache hits in each response's usage block |
 
+### Image input
+
+Experimental. Needs a checkpoint whose family registers a vision encoder ([models.md](models.md#image-input) lists them and how each one
+maps the flags below); a request carrying images is rejected otherwise. Images are accepted on all three protocols (OpenAI `image_url`,
+Anthropic `image` blocks, Responses `input_image`) as an http(s) URL or base64. Images inside a tool
+result (an Anthropic `tool_result` block from Claude Code's Read, a Responses `function_call_output`
+from Codex's view_image) are moved to the user turn that follows the tool message, as vLLM does,
+because chat templates render tool messages as plain text.
+`GET /v1/stats` reports what the server accepts as `model.input_modalities` (`["text"]` or `["text", "image"]`),
+so a client can gate its attachment controls without reading the checkpoint config.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--text-model-only` | off | Serve a multimodal checkpoint text-only: no encoder tower is built (its VRAM goes to the KV/expert pools) and every multimodal input is rejected. Same as `--mm-disable` with every encoder kind |
+| `--mm-disable` | none | Encoder towers to leave unbuilt (`vision`, `audio`); every input they would serve is rejected |
+| `--mm-encoder-weights` | host | Where the encoder tower's block weights live. `host` streams them from pinned host banks two blocks at a time behind the compute, so the GPU holds two blocks instead of the whole tower; small images pay the copy time, large ones hide it behind the compute. `gpu` keeps them resident. An encoder without a block stack stays resident either way |
+| `--image-min-tokens`, `--image-max-tokens` | processor defaults | Per-image token budget: the image processor resizes every image to take between these many tokens, converted to the family's own units by its processor. A family with fixed budgets honors the maximum only and refuses one below its smallest budget at start-up |
+| `--mm-processor-kwargs` | none | JSON object of extra keyword arguments for the checkpoint's image processor call, for knobs the token budget does not cover; applied after the budget, so an explicit key wins |
+| `--mm-embed-cache-device` | cpu | Where encoded image embeddings live between prefill chunks. `cpu` keeps them out of the VRAM budget; `cuda` skips the copy back |
+| `--allowed-media-domains` | any | Comma-separated hostname allowlist for image URLs; requests for other domains are rejected with a 400. Empty allows any domain |
+| `--allowed-local-media-path` | off | Directory `file://` image refs may be read from; unset rejects local files |
+
 ## ft shell
 
 ```bash
@@ -142,7 +168,7 @@ ft ctl [--base-url http://127.0.0.1:1919] [--timeout 10] [--json] <subcommand>
 | Subcommand | Endpoint | Purpose |
 |---|---|---|
 | `health` | `GET /health` | Server status, model, load progress |
-| `stats` | `GET /v1/stats` | Throughput, latency, VRAM, pool occupancy |
+| `stats` | `GET /v1/stats` | Throughput, latency, VRAM, pool occupancy, accepted input modalities |
 | `generate [prompt] [--max-tokens N] [--ignore-eos]` | `POST /generate` | Raw completion smoke test (no chat template) |
 | `cache` | `GET /v1/cache/status` | Cache pool table |
 | `cache --moe N \| --kv N \| --mamba N \| --swa N [--wait 300]` | `POST /v1/cache/rebuild` | Live pool resizing without a restart (`k`/`m` suffixes; `--kv`/`--swa` in tokens) |
@@ -160,6 +186,10 @@ Discovers the served model via `/v1/models`, writes the agent's provider
 config, installs the agent CLI if missing, then launches it. Cloud API keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are cleared from the child
 environment so the agent cannot silently fall back to a paid endpoint.
+When `/v1/stats` reports `image` among `model.input_modalities`, the written
+config declares the model image-capable, which Codex, OpenCode, OpenClaw and
+dsh require before their image tools and attachments send anything; Claude
+Code and Hermes need no declaration.
 
 | Flag | Meaning |
 |---|---|
