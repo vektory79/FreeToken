@@ -373,7 +373,7 @@ def test_resolve_threads_and_affinity_physical_core_free_subset_is_coherent():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_hybrid_cpu_miss_rows_match_gpu_path():
+def test_hybrid_cpu_miss_rows_match_gpu_path(monkeypatch):
     """S2, multi-partition hybrid dispatch: a layer whose cache splits CPU-miss +
     GPU-hit -- the CPU partial computed for the overflow-missed experts must match
     what the GPU path computes for the SAME rows (same banks, same routing, the
@@ -381,6 +381,11 @@ def test_hybrid_cpu_miss_rows_match_gpu_path():
     the pure-GPU answer for the full routing."""
     import pathlib
     import sys
+
+    # This test pins the hybrid MERGE machinery, not the dot tier: the W4A8-K tier's
+    # activation quantization is a real (bounded) CPU-vs-GPU numeric gap, covered by
+    # the tier A/B in test_cpu_moe_gguf_iq.py. Keep the comparison scalar.
+    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "scalar")
 
     sys.path.insert(0, str(pathlib.Path(__file__).parent))  # noqa: F401 - body imports below
     import test_cpu_moe_gguf_iq  # noqa: F401 - sibling fixture module
@@ -563,6 +568,9 @@ def test_hybrid_overlap_disabled_multi_partition_serial_path(monkeypatch):
     from freetoken.moe.offload_cache import OffloadMoeCache
 
     monkeypatch.setattr(moe_module, "_HYBRID_OVERLAP", False)
+    # Merge-machinery test (see test_hybrid_cpu_miss_rows_match_gpu_path): pin the
+    # scalar dot tier so the CPU-vs-GPU rel bounds stay about the routing.
+    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "scalar")
 
     E, H, I, bs, top_k = 8, 512, 256, 3, 4
     dev = torch.device("cuda")

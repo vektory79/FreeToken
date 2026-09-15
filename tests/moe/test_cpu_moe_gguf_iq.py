@@ -1,14 +1,20 @@
 """CPU MoE executor -- GGUF K-quant expert banks (IQ3_XXS / IQ4_XS / Q6_K).
 
 The CPU GEMV (the gguf section of csrc/cpu_moe/cpu_moe_ext.cpp) dequantizes the
-packed 256-wide blocks on the fly into an fp32 dot over bf16 activations, reading
-the same pinned per-role banks the GPU offload path streams. Parity reference is
-the venv gguf-py ``dequantize`` (fp32; proven vs the CUDA kernels in
-tests/kernels/test_gguf_quant.py). The accepted dequant contract is the per-element
-dfloat bound ``8 * 2^-11 * factor * |d| + 1e-3`` (factor = _DEQUANT_FACTOR per
-format); the parity tests propagate it through the GEMV and additionally carry a
-tight rel check, which is the real decode-bug discriminator (the CPU chain is fp32,
-far inside the bound).
+packed 256-wide blocks on the fly, reading the same pinned per-role banks the GPU
+offload path streams. Two dot tiers: the scalar fp32-LUT kernels over bf16
+activations (correctness reference + fallback) and, by default (AVX2+FMA CPUs,
+FREETOKEN_GGUF_DOT_TIER=scalar|avx2 overrides), the verbatim ggml AVX2 integer
+kernels (W4A8-K: activations q8_K-quantized once per row and reused across the
+expert dots -- the same one-shot prepare the nvfp4/q4_0 W4A8 paths use). Parity
+reference is the venv gguf-py ``dequantize`` (fp32; proven vs the CUDA kernels in
+tests/kernels/test_gguf_quant.py), with the tier's activation prep mirrored via
+_q8_k_roundtrip so reference and kernel consume the same integer activations.
+The accepted dequant contract is the per-element dfloat bound
+``8 * 2^-11 * factor * |d| + 1e-3`` (factor = _DEQUANT_FACTOR per format); the
+parity tests propagate it through the GEMV and additionally carry a tight rel
+check, which is the real decode-bug discriminator (the CPU chain is fp32, far
+inside the bound).
 
 Covers the per-projection requirement: the three projections of one layer may have
 DIFFERENT types (the real glm5next file packs (18, 18, 23) / (18, 18, 14) /
@@ -157,6 +163,28 @@ def _dequant_role(packed: torch.Tensor, qtype: int, ne0: int) -> torch.Tensor:
     return torch.from_numpy(flat.copy()).reshape(packed.shape[0], packed.shape[1], ne0)
 
 
+def _q8_k_roundtrip(x: torch.Tensor) -> torch.Tensor:
+    """Mirror of the W4A8-K tier's activation prep: quantize every 256-element
+    block to q8_K and dequantize back (quantize_row_q8_K_ref semantics, ported
+    from ggml-quants.c:2768): SIGNED amax, iscale = -127/max (negative on
+    purpose; d = 1/iscale absorbs the sign), upper clamp at 127 only,
+    round-half-to-even (torch.round == ggml's nearest_int mantissa trick).
+    fp32 in / fp32 out; the integer kernels consume exactly these qs."""
+    xf = x.float().reshape(-1, 256)
+    amax = xf.abs().amax(dim=-1)
+    signed_max = xf[torch.arange(xf.shape[0]), xf.abs().argmax(dim=-1)]
+    iscale = torch.where(amax > 0, -127.0 / signed_max, torch.zeros_like(amax))
+    qs = torch.minimum(torch.full_like(xf, 127.0), torch.round(iscale.unsqueeze(-1) * xf))
+    deq = qs * (1.0 / iscale).unsqueeze(-1)
+    deq[amax == 0] = 0.0  # the C++ zero-block branch: d = 0, qs = 0
+    return deq.reshape(x.shape)
+
+
+def _gguf_i8_active(ex) -> bool:
+    """Whether the executor picked the W4A8-K (avx2) integer dot tier."""
+    return "avx2-w4a8k" in getattr(ex, "isa", "")
+
+
 def _make_gguf_cache(types, L: int, E: int, H: int, I: int, seed: int = 0, uniform: bool = False):
     """Pinned per-role gguf banks + the cache stub the executor reads.
 
@@ -189,15 +217,22 @@ def _make_gguf_cache(types, L: int, E: int, H: int, I: int, seed: int = 0, unifo
     )
 
 
-def _reference_decode(banks, types, layer, hidden, w, ids, top_k):
+def _reference_decode(banks, types, layer, hidden, w, ids, top_k, q8k_acts=False):
     """gguf-py-dequant fp32 reference mirroring the executor pipeline:
     silu(gate@x) * up -> bf16 intermediate -> down@ -> router weight -> bf16.
-    Returns (y [bs, H] f32, extras for the dfloat bound)."""
+    Returns (y [bs, H] f32, extras for the dfloat bound).
+
+    q8k_acts mirrors the W4A8-K (avx2) tier's activation prep: x and the bf16
+    intermediate are q8_K-quantized+dequantized (_q8_k_roundtrip) before each
+    dot, so reference and kernel consume the SAME integer activations and the
+    residual is weight-dequant + accumulation error only (harness-grade parity)."""
     gate_t, up_t, down_t = types
     gate_w = _dequant_role(banks["gate"][layer], gate_t, hidden.shape[-1])  # [E, I, H]
     up_w = _dequant_role(banks["up"][layer], up_t, hidden.shape[-1])  # [E, I, H]
     down_w = _dequant_role(banks["down"][layer], down_t, banks["gate"][layer].shape[1])  # [E, H, I]
     x = hidden.float()
+    if q8k_acts:
+        x = _q8_k_roundtrip(x)
     bs = x.shape[0]
     y = torch.empty(bs, x.shape[1], dtype=torch.float32)
     inter_all = torch.zeros(bs, top_k, down_w.shape[-1])
@@ -212,6 +247,8 @@ def _reference_decode(banks, types, layer, hidden, w, ids, top_k):
             up = up_w[e] @ x[t]
             silu_g = torch.nn.functional.silu(gate)
             inter = (silu_g * up).to(torch.bfloat16).float()
+            if q8k_acts:
+                inter = _q8_k_roundtrip(inter)  # the down leg's per-route q8_K row
             acc = acc + float(w[t, k]) * (down_w[e] @ inter)
             inter_all[t, k] = inter
             sig = torch.sigmoid(gate)
@@ -284,7 +321,12 @@ def test_cpu_moe_gguf_parity_vs_gguf_py(qtype):
     ex, cpu_out, hidden, w, ids = _run_executor(cache, top_k, bs, H, dev, seed=400 + qtype, layer=1)
     assert ex.quant_format == _TYPE_NAMES[qtype]
 
-    ref, extras = _reference_decode(cache.bank_sources, types, 1, hidden, w, ids, top_k)
+    # The W4A8-K (avx2) tier quantizes the activations, so the reference mirrors
+    # that prep; the scalar tier keeps the raw bf16 activations. Either way the
+    # reference and the kernel see the same inputs.
+    ref, extras = _reference_decode(
+        cache.bank_sources, types, 1, hidden, w, ids, top_k, q8k_acts=_gguf_i8_active(ex)
+    )
     rel = (cpu_out - ref).abs().max() / (ref.abs().max() + 1e-6)
     assert rel < 2e-2, f"{_TYPE_NAMES[qtype]} rel err {rel.item()}"
 
@@ -313,8 +355,14 @@ def test_cpu_moe_gguf_uniform_analytic(qtype):
     value = gate_w[0, 0, 0].item()
     assert (gate_w == value).all(), f"fixture not uniform for {_TYPE_NAMES[qtype]}"
 
-    _, cpu_out, hidden, w, ids = _run_executor(cache, top_k, bs, H, dev, seed=9, x_scale=0.01)
+    ex, cpu_out, hidden, w, ids = _run_executor(cache, top_k, bs, H, dev, seed=9, x_scale=0.01)
     x = hidden.float()[0]
+    if _gguf_i8_active(ex):
+        # W4A8-K tier: the input row is q8_K-quantized once per token; mirror it in
+        # the analytic gate. (The intermediate's own roundtrip is EXACT here: every
+        # element is the same bf16 scalar, so each block's signed amax IS that
+        # element and quantizes back bit-exactly.)
+        x = _q8_k_roundtrip(x)
     gate = value * x.sum()  # uniform weights: every gate row dots to the same scalar
     inter = (torch.nn.functional.silu(gate) * gate).to(torch.bfloat16).float()
     # down_h = value * sum_i(inter_i); every intermediate element is the SAME bf16
@@ -323,6 +371,81 @@ def test_cpu_moe_gguf_uniform_analytic(qtype):
 
     rel = (cpu_out[0] - want).abs().max() / (want.abs().max() + 1e-3)
     assert rel < 5e-3, f"{_TYPE_NAMES[qtype]} analytic rel err {rel.item()} (w={value})"
+
+
+@pytest.mark.parametrize(
+    "qtype", (GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K), ids=["iq3_xxs", "iq4_xs", "q6_k"]
+)
+def test_cpu_moe_gguf_i8_tier_ab(qtype, monkeypatch):
+    """Tier A/B on the SAME fixture (identical banks + inputs, only the tier env
+    differs): FREETOKEN_GGUF_DOT_TIER=avx2 (the verbatim ggml W4A8-K kernels) vs
+    scalar (the bf16 fp32-LUT reference tier).
+
+    Acceptance mirrors the ggml microbench harness: against the q8_K-MIRRORED fp32
+    reference (same integer activations on both sides) the avx2 tier must sit at
+    harness-grade parity inside the propagated dfloat bound; the scalar tier must
+    keep its pre-existing parity vs the raw-bf16 reference; and the two tiers may
+    differ only by the activation-quantization error the W4A8-K tier introduces
+    (triangle bound over the two references). The rel bar is 3e-3, not the
+    harness's 1e-3: the harness fed IDENTICAL fp32 activations to both kernels,
+    while this pipeline re-quantizes the bf16 intermediate for the down leg, where
+    the C-vs-torch expf/silu ulp drift flips a bf16 rounding and q6_K's single
+    down block re-derives its amax (measured 1.3e-3 worst case, q6_K). The ISA
+    discriminator value is unchanged: any sign/LUT/scale bug in the ported
+    kernels sits at O(1) relative, two orders above the bar."""
+    bs, top_k, L, E, H, I = 3, 3, 2, 8, 512, 256
+    dev = torch.device("cuda")
+    types = (qtype, qtype, qtype)
+
+    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "avx2")
+    cache = _make_gguf_cache(types, L, E, H, I, seed=200 + qtype)
+    ex_avx, out_avx, hidden, w, ids = _run_executor(
+        cache, top_k, bs, H, dev, seed=500 + qtype, layer=1
+    )
+    assert "avx2-w4a8k" in ex_avx.isa, ex_avx.isa
+
+    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "scalar")
+    ex_sc, out_sc, _, _, _ = _run_executor(
+        _make_gguf_cache(types, L, E, H, I, seed=200 + qtype),
+        top_k, bs, H, dev, seed=500 + qtype, layer=1,
+    )
+    assert "avx2-w4a8k" not in ex_sc.isa, ex_sc.isa
+
+    ref_q8, extras_q8 = _reference_decode(
+        cache.bank_sources, types, 1, hidden, w, ids, top_k, q8k_acts=True
+    )
+    ref_bf16, extras_bf16 = _reference_decode(cache.bank_sources, types, 1, hidden, w, ids, top_k)
+
+    rel_q8 = (out_avx - ref_q8).abs().max() / (ref_q8.abs().max() + 1e-6)
+    assert rel_q8 < 3e-3, (
+        f"{_TYPE_NAMES[qtype]} avx2 tier rel err vs the q8_K-mirrored reference "
+        f"{rel_q8.item()} (harness discriminator)"
+    )
+    bound_q8 = _dfloat_bound(
+        ref_q8, extras_q8, w, ids, hidden, _DEQUANT_FACTOR[qtype], _DEQUANT_FACTOR[qtype]
+    )
+    dev_q8 = (out_avx - ref_q8).abs()
+    assert (dev_q8 <= bound_q8).all(), (
+        f"{_TYPE_NAMES[qtype]} avx2 tier: max abs dev {dev_q8.max():.6g} exceeds the "
+        f"propagated dfloat bound {bound_q8.max():.6g}"
+    )
+
+    rel_sc = (out_sc - ref_bf16).abs().max() / (ref_bf16.abs().max() + 1e-6)
+    assert rel_sc < 2e-2, f"{_TYPE_NAMES[qtype]} scalar tier rel err {rel_sc.item()}"
+
+    # Tier-to-tier difference == the q8_K activation quantization the W4A8-K tier
+    # introduces (plus each tier's own tolerated error): triangle over the two
+    # references. A tier bug shows up far outside this envelope.
+    act_gap = (ref_q8 - ref_bf16).abs()
+    bound_sc = _dfloat_bound(
+        ref_bf16, extras_bf16, w, ids, hidden, _DEQUANT_FACTOR[qtype], _DEQUANT_FACTOR[qtype]
+    )
+    d_tiers = (out_avx - out_sc).abs()
+    envelope = bound_q8 + bound_sc + act_gap + 1e-3
+    assert (d_tiers <= envelope).all(), (
+        f"{_TYPE_NAMES[qtype]} tier A/B: max |avx2 - scalar| {d_tiers.max():.6g} exceeds "
+        f"the quantization envelope {envelope.max():.6g}"
+    )
 
 
 # The three real glm5next per-projection signatures (gate, up, down): the three
@@ -373,7 +496,9 @@ def test_cpu_moe_gguf_per_projection_formats(types):
     torch.cuda.synchronize()
     cpu_out = cpu_out.cpu()
 
-    ref, extras = _reference_decode(cache.bank_sources, types, 0, hidden, w, ids, top_k)
+    ref, extras = _reference_decode(
+        cache.bank_sources, types, 0, hidden, w, ids, top_k, q8k_acts=_gguf_i8_active(ex)
+    )
     rel = (cpu_out - ref).abs().max() / (ref.abs().max() + 1e-6)
     assert rel < 2e-2, f"per-projection rel err {rel.item()}"
 
@@ -421,11 +546,13 @@ def test_cpu_moe_gguf_out_of_range_expert_is_skipped():
         torch.int32
     )
     ids[0, 0] = E  # out of range: must be skipped, never dereferenced
-    _, cpu_out, hidden, w, _ = _run_executor(cache, top_k, bs, H, dev, seed=23, ids=ids)
+    ex, cpu_out, hidden, w, _ = _run_executor(cache, top_k, bs, H, dev, seed=23, ids=ids)
 
     ref_ids = ids.clone()
     ref_ids[0, 0] = -1  # the reference skips on e < 0; skipped lanes contribute 0
-    ref, extras = _reference_decode(cache.bank_sources, types, 0, hidden, w, ref_ids, top_k)
+    ref, extras = _reference_decode(
+        cache.bank_sources, types, 0, hidden, w, ref_ids, top_k, q8k_acts=_gguf_i8_active(ex)
+    )
     rel = (cpu_out - ref).abs().max() / (ref.abs().max() + 1e-6)
     assert rel < 2e-2, f"out-of-range expert id rel err {rel.item()}"
 

@@ -16,7 +16,9 @@
 // (AVX-512-BF16 dpbf16 -> AVX-512F widening -> AVX2+FMA -> scalar).
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
 #include <cmath>
 #include <cstdint>
@@ -1244,6 +1246,13 @@ enum WFmt {
 // CPU chain stays in fp32 (the half d widens exactly), inside the dfloat parity
 // contract (tests/kernels/test_gguf_quant.py).
 //
+// The scalar kernels are the FALLBACK tier. The hot path runs the verbatim ggml
+// AVX2 integer kernels in the W4A8-K section below: activations q8_K-quantized
+// once per row and reused across the expert dots. The no-prequant tradeoff above
+// was about a bf16 DEQUANT scratch (one row per expert); a q8_K row is 292 B per
+// 256 elems (~23 KB/token at the glm5next geometry), the same one-shot prepare
+// the nvfp4/q4_0 W4A8 paths already pay.
+//
 // Verbatim host copies of the vendored device LUTs (ggml-common.h: iq3xxs_grid
 // :563, ksigns_iq2xs :888, kmask_iq2xs + kvalues_iq4nl :927). Values are owned by
 // the vendored files -- do not edit here or there.
@@ -1397,16 +1406,432 @@ inline int gguf_block_bytes(int f) {
 // Packed-row stride for K contiguous input dims (K % 256 == 0).
 inline int gguf_row_bytes(int f, int K) { return (K / 256) * gguf_block_bytes(f); }
 
-// Per-fmt dot selection. The scalar kernels are the correctness reference and the
-// only tier today; the grid/nibble gathers vectorize (AVX2/AVX-512 LUT tiers,
-// mirroring the nvfp4 decode) and slot in here as a follow-up without touching the
-// dispatch sites.
+// Per-fmt dot selection for the SCALAR tier (bf16 activations, fp32 LUT dequant):
+// correctness reference and fallback. The AVX2 integer tier (select_ggufdot_i8 in
+// the W4A8-K section below) dispatches at executor construction when the CPU has
+// AVX2+FMA.
 ggufdot_fn select_ggufdot(int f) {
   if (f == WF_IQ3_XXS) return iq3_xxs_dot_scalar;
   if (f == WF_IQ4_XS) return iq4_xs_dot_scalar;
   if (f == WF_Q6_K) return q6_k_dot_scalar;
   return nullptr;
 }
+
+// ---------------- GGUF integer tier: W4A8-K (q8_K activations) ---------------
+// Verbatim AVX2 integer dot kernels for the three gguf formats, ported from
+// llama.cpp / ggml (MIT, "Copyright (c) 2023-2026 The ggml authors"). Sources
+// (llama.cpp checkout, haswell variant flags -mf16c -mfma -mavx -mavx2):
+//   ggml_vec_dot_q6_K_q8_K    ggml/src/ggml-cpu/arch/x86/quants.c:2426 (AVX2 body :2439)
+//   ggml_vec_dot_iq3_xxs_q8_K arch/x86/quants.c:3260  (AVX2 body :3274)
+//   ggml_vec_dot_iq4_xs_q8_K  arch/x86/quants.c:4004  (AVX2 body :4022)
+//   quantize_row_q8_K_ref     ggml/src/ggml-quants.c:2768
+//   helpers                   arch/x86/quants.c:46 hsum_float_8, :68 mul_add_epi8,
+//                             :540 get_scale_shuffle; MM256_SET_M128I (simd-mappings.h)
+// Adaptations (everything else is upstream text, upstream 4-space indent kept for
+// diff-fidelity against future re-syncs):
+//   - ggml's per-variant `#if defined __AVX2__` dispatch is dropped: these ARE the
+//     AVX2 branches, compiled via the target attribute like every other SIMD kernel
+//     in this file. The three kernels run mul_add_epi8 / maddubs / madd chains, not
+//     the VNNI-dispatched helper, so haswell == alderlake codegen for them.
+//   - GGML_CPU_FP16_TO_FP32(x.d) -> fp16_to_f32(x.d): the local exact fp16 decoder
+//     the scalar kernels above already use.
+//   - ggml's block structs -> the layout-identical Block* structs below; MIN ->
+//     std::min; the bsums/blocks math is untouched.
+// The decision-gate microbench ran these exact bodies (verbatim include, zero
+// transcription) at 53-66 GB/s sustained on the real glm5next decode shape vs
+// 11.3 GB/s for the scalar tier, AVX2-vs-ggml-scalar parity < 1e-3 rel
+// (.tasks/gguf-glm5next-hybrid/verification/ggml-microbench.md).
+
+constexpr int QK_K = 256;  // ggml K-quant super-block width (ggml-common.h)
+
+// ggml-common.h:371-376: block_q8_K = f32 d + int8 qs[QK_K] + int16 bsums[QK_K/16].
+struct BlockQ8K {
+  float d;
+  int8_t qs[QK_K];
+  int16_t bsums[QK_K / 16];
+};
+static_assert(sizeof(BlockQ8K) == 292, "block_q8_K layout drifted from ggml-common.h");
+// ggml-common.h:362-368: block_q6_K = ql, qh, int8 scales, f16 d LAST (208:210).
+struct BlockQ6K {
+  uint8_t ql[QK_K / 2];
+  uint8_t qh[QK_K / 4];
+  int8_t scales[QK_K / 16];
+  uint16_t d;
+};
+static_assert(sizeof(BlockQ6K) == 210, "block_q6_K layout drifted from ggml-common.h");
+// ggml-common.h:405-411: block_iq3_xxs = f16 d FIRST + qs[3*QK_K/8].
+struct BlockIq3Xxs {
+  uint16_t d;
+  uint8_t qs[3 * QK_K / 8];
+};
+static_assert(sizeof(BlockIq3Xxs) == 98, "block_iq3_xxs layout drifted from ggml-common.h");
+// ggml-common.h:455-460: block_iq4_xs = f16 d FIRST + u16 scales_h + scales_l + qs.
+struct BlockIq4Xs {
+  uint16_t d;
+  uint16_t scales_h;
+  uint8_t scales_l[QK_K / 64];
+  uint8_t qs[QK_K / 2];
+};
+static_assert(sizeof(BlockIq4Xs) == 136, "block_iq4_xs layout drifted from ggml-common.h");
+
+// ggml-quants.c:621 (verbatim): round-to-nearest-even via the fp32 mantissa trick.
+static inline int nearest_int(float fval) {
+    assert(fabsf(fval) <= 4194303.f);
+    float val = fval + 12582912.f;
+    int i; memcpy(&i, &val, sizeof(int));
+    return (i & 0x007fffff) - 0x00400000;
+}
+
+// ggml-quants.c:2768 quantize_row_q8_K_ref (verbatim). Per 256-block: SIGNED amax
+// (sign kept - see iscale), iscale = -127/max NEGATIVE on purpose (the sign cancels
+// in the dot; d = 1/iscale absorbs it; required by the IQ kernels' maddubs operand
+// order), upper-side clamp at 127 only, and per-16 bsums consumed by the q6_K
+// offset trick.
+void quantize_row_q8_K_ref(const float * x, BlockQ8K * y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int i = 0; i < nb; i++) {
+
+        float max = 0;
+        float amax = 0;
+        for (int j = 0; j < QK_K; ++j) {
+            float ax = fabsf(x[j]);
+            if (ax > amax) {
+                amax = ax; max = x[j];
+            }
+        }
+        if (!amax) {
+            y[i].d = 0;
+            memset(y[i].qs, 0, QK_K);
+            x += QK_K;
+            continue;
+        }
+        // We need this change for IQ2_XXS, else the AVX implementation becomes very awkward
+        const float iscale = -127.f/max;
+        for (int j = 0; j < QK_K; ++j) {
+            int v = nearest_int(iscale*x[j]);
+            y[i].qs[j] = std::min(127, v);
+        }
+        for (int j = 0; j < QK_K/16; ++j) {
+            int sum = 0;
+            for (int ii = 0; ii < 16; ++ii) {
+                sum += y[i].qs[j*16 + ii];
+            }
+            y[i].bsums[j] = sum;
+        }
+        y[i].d = 1/iscale;
+        x += QK_K;
+    }
+}
+
+#if CPU_MOE_X86
+// ggml arch/x86/quants.c:46-56 (verbatim): horizontally add 8 floats. (ggml
+// compiles the whole file with -mavx2; here the ISA rides the per-function
+// target attribute like every other SIMD helper in this file.)
+__attribute__((target("avx2")))
+static inline float hsum_float_8(const __m256 x) {
+    __m128 res = _mm256_extractf128_ps(x, 1);
+    res = _mm_add_ps(res, _mm256_castps256_ps128(x));
+    res = _mm_add_ps(res, _mm_movehl_ps(res, res));
+    res = _mm_add_ss(res, _mm_movehdup_ps(res));
+    return _mm_cvtss_f32(res);
+}
+
+// ggml arch/x86/quants.c:68-74 (verbatim).
+__attribute__((target("avx2")))
+static inline __m256i mul_add_epi8(const __m256i x, const __m256i y) {
+    const __m256i ax = _mm256_sign_epi8(x, x);
+    const __m256i sy = _mm256_sign_epi8(y, x);
+    return _mm256_maddubs_epi16(ax, sy);
+}
+
+// ggml arch/x86/quants.c:540-552 (verbatim).
+static inline __m128i get_scale_shuffle(int i) {
+    static const uint8_t k_shuffle[128] = {
+         0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+         2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
+         4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5,
+         6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7,
+         8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9,
+        10,10,10,10,10,10,10,10, 11,11,11,11,11,11,11,11,
+        12,12,12,12,12,12,12,12, 13,13,13,13,13,13,13,13,
+        14,14,14,14,14,14,14,14, 15,15,15,15,15,15,15,15
+    };
+    return _mm_loadu_si128((const __m128i*)k_shuffle + i);
+}
+
+// ggml simd-mappings.h (verbatim definition).
+#define MM256_SET_M128I(a, b) _mm256_insertf128_si256(_mm256_castsi128_si256(b), (a), 1)
+
+// ggml arch/x86/quants.c:2624 keven_signs_q2xs: 128 groups of 8 +-1 sign bytes (the
+// AVX2 iq3_xxs kernels gather one 64-bit lane group at a time). ggml holds 1024
+// literals; entry [8*i + k] is exactly (ksigns_iq2xs[i] & kmask_iq2xs[k]) ? -1 : 1
+// over the vendored LUTs above (spot-checked against ggml's table), so it is
+// derived here - single source of truth stays the vendored files.
+inline const int8_t* keven_signs_q2xs() {
+  static const std::array<int8_t, 1024> table = [] {
+    std::array<int8_t, 1024> t{};
+    for (int i = 0; i < 128; ++i)
+      for (int k = 0; k < 8; ++k)
+        t[8 * i + k] = (ksigns_iq2xs[i] & kmask_iq2xs[k]) ? int8_t{-1} : int8_t{1};
+    return t;
+  }();
+  return table.data();
+}
+
+// ggml's UNUSED (ggml-impl.h) for the verbatim bodies below; undefined after.
+#define UNUSED(x) (void)(x)
+
+// ggml_vec_dot_q6_K_q8_K AVX2 branch (arch/x86/quants.c:2426-2508, verbatim).
+__attribute__((target("avx2,fma")))
+void ggml_vec_dot_q6_K_q8_K(int n, float * __restrict s, size_t bs, const void * __restrict vx, size_t bx, const void * __restrict vy, size_t by, int nrc) {
+    assert(n % QK_K == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const BlockQ6K * __restrict x = (const BlockQ6K *)vx;
+    const BlockQ8K * __restrict y = (const BlockQ8K *)vy;
+
+    const int nb = n / QK_K;
+
+    const __m256i m3 = _mm256_set1_epi8(3);
+    const __m256i m15 = _mm256_set1_epi8(15);
+
+    __m256 acc = _mm256_setzero_ps();
+
+    for (int i = 0; i < nb; ++i) {
+
+        const float d = y[i].d * fp16_to_f32(x[i].d);
+
+        const uint8_t * __restrict q4 = x[i].ql;
+        const uint8_t * __restrict qh = x[i].qh;
+        const int8_t  * __restrict q8 = y[i].qs;
+
+        const __m256i q8sums = _mm256_loadu_si256((const __m256i*)y[i].bsums);
+        const __m128i scales = _mm_loadu_si128((const __m128i*)x[i].scales);
+        const __m256i scales_16 = _mm256_cvtepi8_epi16(scales);
+        const __m256i q8sclsub = _mm256_slli_epi32(_mm256_madd_epi16(q8sums, scales_16), 5);
+
+        __m256i sumi = _mm256_setzero_si256();
+
+        int is = 0;
+
+        for (int j = 0; j < QK_K/128; ++j) {
+            const __m256i q4bits1 = _mm256_loadu_si256((const __m256i*)q4); q4 += 32;
+            const __m256i q4bits2 = _mm256_loadu_si256((const __m256i*)q4); q4 += 32;
+            const __m256i q4bitsH = _mm256_loadu_si256((const __m256i*)qh); qh += 32;
+
+            const __m256i q4h_0 = _mm256_slli_epi16(_mm256_and_si256(q4bitsH, m3), 4);
+            const __m256i q4h_1 = _mm256_slli_epi16(_mm256_and_si256(q4bitsH, _mm256_set1_epi8(12)), 2);
+            const __m256i q4h_2 = _mm256_and_si256(q4bitsH, _mm256_set1_epi8(48));
+            const __m256i q4h_3 = _mm256_srli_epi16(_mm256_and_si256(q4bitsH, _mm256_set1_epi8(-64)), 2);
+
+            const __m256i q4_0 = _mm256_or_si256(_mm256_and_si256(q4bits1, m15), q4h_0);
+            const __m256i q4_1 = _mm256_or_si256(_mm256_and_si256(q4bits2, m15), q4h_1);
+            const __m256i q4_2 = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(q4bits1, 4), m15), q4h_2);
+            const __m256i q4_3 = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(q4bits2, 4), m15), q4h_3);
+
+            const __m256i q8_0 = _mm256_loadu_si256((const __m256i*)q8); q8 += 32;
+            const __m256i q8_1 = _mm256_loadu_si256((const __m256i*)q8); q8 += 32;
+            const __m256i q8_2 = _mm256_loadu_si256((const __m256i*)q8); q8 += 32;
+            const __m256i q8_3 = _mm256_loadu_si256((const __m256i*)q8); q8 += 32;
+
+            __m256i p16_0 = _mm256_maddubs_epi16(q4_0, q8_0);
+            __m256i p16_1 = _mm256_maddubs_epi16(q4_1, q8_1);
+            __m256i p16_2 = _mm256_maddubs_epi16(q4_2, q8_2);
+            __m256i p16_3 = _mm256_maddubs_epi16(q4_3, q8_3);
+
+            const __m128i scale_0 = _mm_shuffle_epi8(scales, get_scale_shuffle(is + 0));
+            const __m128i scale_1 = _mm_shuffle_epi8(scales, get_scale_shuffle(is + 1));
+            const __m128i scale_2 = _mm_shuffle_epi8(scales, get_scale_shuffle(is + 2));
+            const __m128i scale_3 = _mm_shuffle_epi8(scales, get_scale_shuffle(is + 3));
+            is += 4;
+
+            p16_0 = _mm256_madd_epi16(_mm256_cvtepi8_epi16(scale_0), p16_0);
+            p16_1 = _mm256_madd_epi16(_mm256_cvtepi8_epi16(scale_1), p16_1);
+            p16_2 = _mm256_madd_epi16(_mm256_cvtepi8_epi16(scale_2), p16_2);
+            p16_3 = _mm256_madd_epi16(_mm256_cvtepi8_epi16(scale_3), p16_3);
+
+            sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(p16_0, p16_1));
+            sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(p16_2, p16_3));
+
+        }
+
+        sumi = _mm256_sub_epi32(sumi, q8sclsub);
+        acc = _mm256_fmadd_ps(_mm256_broadcast_ss(&d), _mm256_cvtepi32_ps(sumi), acc);
+    }
+
+    *s = hsum_float_8(acc);
+}
+
+// ggml_vec_dot_iq3_xxs_q8_K AVX2 branch (arch/x86/quants.c:3260-3350, verbatim).
+__attribute__((target("avx2,fma")))
+void ggml_vec_dot_iq3_xxs_q8_K(int n, float * __restrict s, size_t bs, const void * __restrict vx, size_t bx, const void * __restrict vy, size_t by, int nrc) {
+    assert(n % QK_K == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const BlockIq3Xxs * __restrict x = (const BlockIq3Xxs *)vx;
+    const BlockQ8K    * __restrict y = (const BlockQ8K *)vy;
+
+    const int nb = n / QK_K;
+
+    const uint64_t * signs64 = (const uint64_t *)keven_signs_q2xs();
+
+    uint32_t aux32[2];
+
+    __m256 accumf = _mm256_setzero_ps();
+    for (int i = 0; i < nb; ++i) {
+        const float d = fp16_to_f32(x[i].d) * y[i].d;
+        const uint8_t * __restrict q3 = x[i].qs;
+        const uint8_t * __restrict gas = x[i].qs + QK_K/4;
+        const int8_t  * __restrict q8 = y[i].qs;
+        __m256i sumi1 = _mm256_setzero_si256();
+        __m256i sumi2 = _mm256_setzero_si256();
+        for (int ib32 = 0; ib32 < QK_K/32; ib32 += 2) {
+            const __m256i q8_1 = _mm256_loadu_si256((const __m256i *)q8); q8 += 32;
+            const __m256i q8_2 = _mm256_loadu_si256((const __m256i *)q8); q8 += 32;
+            const __m256i q2_1 = _mm256_set_epi32(iq3xxs_grid[q3[7]], iq3xxs_grid[q3[6]], iq3xxs_grid[q3[5]], iq3xxs_grid[q3[4]],
+                                                  iq3xxs_grid[q3[3]], iq3xxs_grid[q3[2]], iq3xxs_grid[q3[1]], iq3xxs_grid[q3[0]]);
+            q3 += 8;
+            const __m256i q2_2 = _mm256_set_epi32(iq3xxs_grid[q3[7]], iq3xxs_grid[q3[6]], iq3xxs_grid[q3[5]], iq3xxs_grid[q3[4]],
+                                                  iq3xxs_grid[q3[3]], iq3xxs_grid[q3[2]], iq3xxs_grid[q3[1]], iq3xxs_grid[q3[0]]);
+            q3 += 8;
+            memcpy(aux32, gas, 8); gas += 8;
+            const __m256i s2_1 = _mm256_set_epi64x(signs64[(aux32[0] >> 21) & 127], signs64[(aux32[0] >> 14) & 127],
+                                                   signs64[(aux32[0] >>  7) & 127], signs64[(aux32[0] >>  0) & 127]);
+            const __m256i s2_2 = _mm256_set_epi64x(signs64[(aux32[1] >> 21) & 127], signs64[(aux32[1] >> 14) & 127],
+                                                   signs64[(aux32[1] >>  7) & 127], signs64[(aux32[1] >>  0) & 127]);
+            const __m256i q8s_1 = _mm256_sign_epi8(q8_1, s2_1);
+            const __m256i q8s_2 = _mm256_sign_epi8(q8_2, s2_2);
+            const __m256i dot1  = _mm256_maddubs_epi16(q2_1, q8s_1);
+            const __m256i dot2  = _mm256_maddubs_epi16(q2_2, q8s_2);
+            const uint16_t ls1 = aux32[0] >> 28;
+            const uint16_t ls2 = aux32[1] >> 28;
+            const __m256i p1 = _mm256_madd_epi16(dot1, _mm256_set1_epi16(2*ls1+1));
+            const __m256i p2 = _mm256_madd_epi16(dot2, _mm256_set1_epi16(2*ls2+1));
+            sumi1 = _mm256_add_epi32(sumi1, p1);
+            sumi2 = _mm256_add_epi32(sumi2, p2);
+        }
+
+        accumf = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(_mm256_add_epi32(sumi1, sumi2)), accumf);
+
+    }
+
+    *s = 0.25f * hsum_float_8(accumf);
+}
+
+// ggml_vec_dot_iq4_xs_q8_K AVX2 branch (arch/x86/quants.c:4004-4064, verbatim).
+__attribute__((target("avx2,fma")))
+void ggml_vec_dot_iq4_xs_q8_K(int n, float * __restrict s, size_t bs, const void * __restrict vx, size_t bx, const void * __restrict vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+    assert(n % QK_K == 0);
+
+    const BlockIq4Xs * __restrict x = (const BlockIq4Xs *)vx;
+    const BlockQ8K   * __restrict y = (const BlockQ8K *)vy;
+
+    const int nb = n / QK_K;
+
+    const __m128i values128 = _mm_loadu_si128((const __m128i*)kvalues_iq4nl);
+    const __m128i m4b  = _mm_set1_epi8(0x0f);
+
+    __m256 accum = _mm256_setzero_ps();
+    for (int ibl = 0; ibl < nb; ++ibl) {
+        const uint8_t * qs = x[ibl].qs;
+        const int8_t  * q8 = y[ibl].qs;
+        uint16_t sh = x[ibl].scales_h;
+        __m256i sumi1 = _mm256_setzero_si256();
+        __m256i sumi2 = _mm256_setzero_si256();
+        for (int ib = 0; ib < QK_K/32; ib += 2) {
+            const __m128i q4bits_1 = _mm_loadu_si128((const __m128i*)qs);  qs += 16;
+            const __m128i q4bits_2 = _mm_loadu_si128((const __m128i*)qs);  qs += 16;
+            const __m256i q8b_1 = _mm256_loadu_si256((const __m256i *)q8); q8 += 32;
+            const __m256i q8b_2 = _mm256_loadu_si256((const __m256i *)q8); q8 += 32;
+            const __m256i q4b_1 = MM256_SET_M128I(_mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(q4bits_1, 4), m4b)),
+                                                  _mm_shuffle_epi8(values128, _mm_and_si128(q4bits_1, m4b)));
+            const __m256i q4b_2 = MM256_SET_M128I(_mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(q4bits_2, 4), m4b)),
+                                                  _mm_shuffle_epi8(values128, _mm_and_si128(q4bits_2, m4b)));
+            const __m256i p16_1 = mul_add_epi8(q4b_1, q8b_1);
+            const __m256i p16_2 = mul_add_epi8(q4b_2, q8b_2);
+            const int16_t ls1 = ((x[ibl].scales_l[ib/2] & 0xf) | ((sh << 4) & 0x30)) - 32;
+            const int16_t ls2 = ((x[ibl].scales_l[ib/2] >>  4) | ((sh << 2) & 0x30)) - 32;
+            sh >>= 4;
+            const __m256i p_1 = _mm256_madd_epi16(p16_1, _mm256_set1_epi16(ls1));
+            const __m256i p_2 = _mm256_madd_epi16(p16_2, _mm256_set1_epi16(ls2));
+            sumi1 = _mm256_add_epi32(p_1, sumi1);
+            sumi2 = _mm256_add_epi32(p_2, sumi2);
+        }
+        accum = _mm256_fmadd_ps(_mm256_set1_ps(fp16_to_f32(x[ibl].d)*y[ibl].d),
+                _mm256_cvtepi32_ps(_mm256_add_epi32(sumi1, sumi2)), accum);
+    }
+
+    *s = hsum_float_8(accum);
+}
+
+#undef MM256_SET_M128I
+#undef UNUSED
+
+// nrc=1 adapters onto the executor's GEMV call shape: one packed weight row vs one
+// q8_K activation row. The activation row is quantized ONCE per task (input row in
+// submit(), intermediate per (token,route) in the prepare phase) and reused across
+// every expert dot that reads it - the same amortization the nvfp4/q4_0 W4A8 paths use.
+using ggufdot_i8_fn = float (*)(const uint8_t* row, const void* q8, int K);
+
+float q6_k_dot_i8(const uint8_t* row, const void* q8, int K) {
+  float s;
+  ggml_vec_dot_q6_K_q8_K(K, &s, sizeof(float), row, 0, q8, 0, 1);
+  return s;
+}
+
+float iq3_xxs_dot_i8(const uint8_t* row, const void* q8, int K) {
+  float s;
+  ggml_vec_dot_iq3_xxs_q8_K(K, &s, sizeof(float), row, 0, q8, 0, 1);
+  return s;
+}
+
+float iq4_xs_dot_i8(const uint8_t* row, const void* q8, int K) {
+  float s;
+  ggml_vec_dot_iq4_xs_q8_K(K, &s, sizeof(float), row, 0, q8, 0, 1);
+  return s;
+}
+
+// Tier for the gguf dots. "scalar" = the fp32-LUT kernels above (correctness
+// reference + fallback, bf16 activations); "avx2" = the verbatim ggml integer
+// kernels (W4A8-K: q8_K activations). Default auto picks AVX2 when the CPU has
+// AVX2+FMA - the same detection pattern as pick_isa - scalar otherwise.
+// FREETOKEN_GGUF_DOT_TIER={scalar,avx2} overrides (A/B the tiers); an explicit
+// tier is never forced above CPU support (pick_isa's cap-down semantics).
+enum GgufDotTier { GGUF_DOT_SCALAR = 0, GGUF_DOT_AVX2 = 1 };
+
+inline GgufDotTier pick_gguf_dot_tier() {
+  GgufDotTier best =
+      (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) ? GGUF_DOT_AVX2
+                                                                        : GGUF_DOT_SCALAR;
+  if (const char* f = getenv("FREETOKEN_GGUF_DOT_TIER")) {
+    if (!std::strcmp(f, "scalar")) return GGUF_DOT_SCALAR;
+    if (!std::strcmp(f, "avx2")) return GGUF_DOT_AVX2;
+  }
+  return best;
+}
+
+inline ggufdot_i8_fn select_ggufdot_i8(int f) {
+  if (f == WF_IQ3_XXS) return iq3_xxs_dot_i8;
+  if (f == WF_IQ4_XS) return iq4_xs_dot_i8;
+  if (f == WF_Q6_K) return q6_k_dot_i8;
+  return nullptr;
+}
+#endif  // CPU_MOE_X86
 
 // Each ctor pointer arg is the address of a CPU int64 array of length
 // num_layers (one base address per layer, built by cpu_executor.py's
@@ -1455,6 +1880,12 @@ struct CpuMoeExecutor {
   bool is_gguf = false;
   ggufdot_fn gdot = nullptr, udot = nullptr, ddot = nullptr;
   int g_row_bytes = 0, u_row_bytes = 0, d_row_bytes = 0;
+  // W4A8-K integer tier (verbatim ggml AVX2 kernels): selected at construction
+  // when the CPU has AVX2+FMA (FREETOKEN_GGUF_DOT_TIER overrides). Reads the SAME
+  // packed rows as the scalar tier - only the activation format changes (q8_K,
+  // quantized once per row and reused across the expert dots).
+  bool gguf_i8 = false;
+  ggufdot_i8_fn gdot_i8 = nullptr, udot_i8 = nullptr, ddot_i8 = nullptr;
   // ds_fp4: the caller already FP8-round-tripped the input activations on the GPU
   // (same reference grid), so submit() must not repeat it on the host-callback
   // thread. That scalar per-element pass is single-threaded ON THE DECODE CRITICAL
@@ -1477,6 +1908,14 @@ struct CpuMoeExecutor {
   // AVX-VNNI W4A8: per-16-block int8 activations [even(8),odd(8)] + per-block scale.
   std::vector<int8_t> xi8_scratch, gi8_scratch;  // [max_tokens*H], [max_tokens*top_k*I]
   std::vector<float> xas_scratch, gas_scratch;   // [max_tokens*H/16], [..*top_k*I/16]
+  // GGUF W4A8-K: q8_K activation rows. The input row (H elems -> H/256 blocks) is
+  // quantized once per task in submit(); each (token,route) intermediate (I elems
+  // -> I/256 blocks) once in the prepare phase. 292 B per 256-elem block =
+  // ~23 KB/token at the glm5next geometry (H=4096, I=2048, top_k=8) - pre-sized in
+  // the ctor, grown at most once in submit(); the hot path only indexes into them
+  // (no hot-path allocations).
+  std::vector<BlockQ8K> xq8k_scratch;  // [max_tokens * H/256]
+  std::vector<BlockQ8K> gq8k_scratch;  // [max_tokens * top_k * I/256]
   std::string isa_str;
 
   std::vector<std::thread> workers;
@@ -1628,12 +2067,24 @@ struct CpuMoeExecutor {
       gdot = select_ggufdot(fmt);
       udot = select_ggufdot(fmt_up);
       ddot = select_ggufdot(fmt_down);
+      // Integer tier: the verbatim ggml AVX2 kernels (W4A8-K) when the CPU has
+      // AVX2+FMA; the scalar bf16 dots stay resolved as the fallback tier.
+#if CPU_MOE_X86
+      if (pick_gguf_dot_tier() == GGUF_DOT_AVX2) {
+        gdot_i8 = select_ggufdot_i8(fmt);
+        udot_i8 = select_ggufdot_i8(fmt_up);
+        ddot_i8 = select_ggufdot_i8(fmt_down);
+        gguf_i8 = gdot_i8 != nullptr && udot_i8 != nullptr && ddot_i8 != nullptr;
+      }
+#endif
     }
     const char* q4tag = use_q4a8 ? (cpu_has_avxvnni() ? "+vnni(q4_0-w4a8)" : "+q4_0-w4a8") : "";
     const char* vnni_tag =
         cpu_has_avx512vnni() ? "+avx512vnni(nvfp4-w4a8)" : "+vnni(nvfp4-w4a8)";
     isa_str = std::string(c.name) + (use_vnni ? vnni_tag : "") + q4tag +
-              (is_gguf ? "+gguf(iq/qk)" : "");
+              (is_gguf ? std::string("+gguf(iq/qk)") +
+                               (gguf_i8 ? "+avx2-w4a8k" : "+w4a16")
+                       : "");
     isa = isa_str.c_str();
     for (int i = 0; i < 16; ++i) e2m1_lut[i] = kE2M1[i];
     for (int i = 0; i < 256; ++i) e4m3_lut[i] = e4m3_decode((uint8_t)i);
@@ -1661,6 +2112,11 @@ struct CpuMoeExecutor {
       xas_scratch.assign(static_cast<size_t>(max_tokens) * (H / 32), 0);
       gi8_scratch.assign(static_cast<size_t>(max_tokens) * top_k * I, 0);
       gas_scratch.assign(static_cast<size_t>(max_tokens) * top_k * (I / 32), 0);
+    }
+    // GGUF W4A8-K: q8_K activation scratch (see the member comment for sizing).
+    if (gguf_i8) {
+      xq8k_scratch.assign(static_cast<size_t>(max_tokens) * (H / QK_K), BlockQ8K{});
+      gq8k_scratch.assign(static_cast<size_t>(max_tokens) * top_k * (I / QK_K), BlockQ8K{});
     }
     for (int t = 0; t < num_threads; ++t)
       workers.emplace_back([this, t] { worker_loop(t); });
@@ -1710,6 +2166,18 @@ struct CpuMoeExecutor {
     }
   }
 
+  // q8_K for the gguf W4A8-K tier: quantize_row_q8_K_ref (verbatim ggml, above)
+  // over bf16 rows widened to fp32 one 256-block at a time. Done once per row -
+  // the input row per task (submit), each intermediate per (token,route) in the
+  // prepare phase - and reused across every expert dot that reads it.
+  void quant_q8_k(const bf16_t* x, int K, BlockQ8K* out) {
+    float xb[QK_K];
+    for (int b = 0; b < K / QK_K; ++b) {
+      for (int j = 0; j < QK_K; ++j) xb[j] = bf16_to_f32(x[(size_t)b * QK_K + j]);
+      quantize_row_q8_K_ref(xb, out + b, QK_K);
+    }
+  }
+
   // gate_up output row `row` (in [0, 2I)) dotted with activation over K = H. ``e`` is
   // the layer-local expert row (0..num_experts); the layer bases (already resolved
   // once per task/pass by the caller via tbl_at) pick the layer's own tensors.
@@ -1741,7 +2209,7 @@ struct CpuMoeExecutor {
   inline float gemm2_dot(const bf16_t* down_l, const uint8_t* dn_packed_l,
                          const uint8_t* dn_scale_l, const uint16_t* dn_global_l, int e, int row,
                          const bf16_t* g, const float* ge, const float* go, const int8_t* gi8,
-                         const float* gas) {
+                         const float* gas, const BlockQ8K* gq8) {
     if (fmt == WF_BF16) {
       const bf16_t* w = down_l + ((size_t)e * H + row) * I;
       return dot(w, g, I);
@@ -1752,7 +2220,8 @@ struct CpuMoeExecutor {
     }
     if (is_gguf) {
       const uint8_t* w = dn_packed_l + ((size_t)e * H + row) * (size_t)d_row_bytes;
-      return ddot(w, g, I);  // fused dequant over the raw bf16 intermediate
+      if (gguf_i8) return ddot_i8(w, gq8, I);  // W4A8-K: q8_K intermediate (prep_g_row)
+      return ddot(w, g, I);  // scalar tier: fused dequant over the raw bf16 intermediate
     }
     const size_t r = (size_t)e * H + row;
     if (use_vnni)
@@ -1880,8 +2349,11 @@ struct CpuMoeExecutor {
 
   // GGUF K-quant pass 1: gate/up are SEPARATE per-role tables ([E, I, row_bytes]
   // each, rows = I over K = H) with per-role fmt -- the gguf file has no packed
-  // gate_up bank. Activations stay bf16 (no prequant, no deinterleave), so the
-  // down pass reads the raw bf16 intermediate.
+  // gate_up bank. Scalar tier: activations stay bf16 (no prequant), so the down
+  // pass reads the raw bf16 intermediate. W4A8-K tier: the input row was
+  // q8_K-quantized once per token in submit(); every gate/up dot of every route
+  // reuses it (the quantized row is also why the down leg quantizes the
+  // intermediate per route in prep_g_row).
   void do_pass1_gguf(const MoeTask* t, int64_t p) {
     const int64_t ib = p % n_iblk;
     const int64_t tk = p / n_iblk;
@@ -1892,10 +2364,21 @@ struct CpuMoeExecutor {
     const float w_in = apply_on_input ? t->w[static_cast<size_t>(tok) * top_k + k] : 1.0f;
     const uint8_t* gate_l = static_cast<const uint8_t*>(tbl_at(gate_tbl, t->layer_id));
     const uint8_t* up_l = static_cast<const uint8_t*>(tbl_at(up_tbl, t->layer_id));
-    const bf16_t* x_row = t->x + (size_t)tok * H;
     bf16_t* g_row = g_scratch.data() + ((size_t)tok * top_k + k) * I;
     const int i0 = static_cast<int>(ib) * IBLK;
     const int i1 = std::min(I, i0 + IBLK);
+    if (gguf_i8) {
+      const BlockQ8K* xq8 = xq8k_scratch.data() + (size_t)tok * (H / QK_K);
+      for (int i = i0; i < i1; ++i) {
+        const float gate =
+            gdot_i8(gate_l + ((size_t)e * I + i) * (size_t)g_row_bytes, xq8, H) * w_in;
+        const float up =
+            udot_i8(up_l + ((size_t)e * I + i) * (size_t)u_row_bytes, xq8, H) * w_in;
+        g_row[i] = act_epilogue(gate, up);
+      }
+      return;
+    }
+    const bf16_t* x_row = t->x + (size_t)tok * H;
     for (int i = i0; i < i1; ++i) {
       const float gate = gdot(gate_l + ((size_t)e * I + i) * (size_t)g_row_bytes, x_row, H) * w_in;
       const float up = udot(up_l + ((size_t)e * I + i) * (size_t)u_row_bytes, x_row, H) * w_in;
@@ -1937,8 +2420,9 @@ struct CpuMoeExecutor {
         const float* gas = use_vnni ? gas_scratch.data() + gr * (I / 16)
                          : use_q4a8 ? gas_scratch.data() + gr * (I / 32)
                                       : nullptr;
+        const BlockQ8K* gq8 = gguf_i8 ? gq8k_scratch.data() + gr * (I / QK_K) : nullptr;
         acc += gemm2_dot(down_l, dn_packed_l, dn_scale_l, dn_global_l, e, h, g_row, ge, go, gi8,
-                         gas) * w_out;
+                         gas, gq8) * w_out;
       }
       y_row[h] = f32_to_bf16(acc);
     }
@@ -2064,6 +2548,11 @@ struct CpuMoeExecutor {
   // round-trips it (DSV4 act_quant), then both formats deinterleave to fp32 even/odd
   // (reused across every down output row).
   void prep_g_row(int64_t r) {
+    if (gguf_i8) {  // W4A8-K: q8_K-quantize the intermediate row for the down GEMV.
+      quant_q8_k(g_scratch.data() + (size_t)r * I, I,
+                 gq8k_scratch.data() + (size_t)r * (I / QK_K));
+      return;
+    }
     bf16_t* g = g_scratch.data() + (size_t)r * I;
     if (use_q4a8) {  // q4_0 W4A8: Q8_0-quantize the intermediate row for the down GEMV.
       quant_q8_0(g, I, gi8_scratch.data() + (size_t)r * I,
@@ -2116,9 +2605,10 @@ struct CpuMoeExecutor {
     }
     barrier(local_sense);
     // Row-major fp4: prepare the intermediate rows (per token,route) before the down
-    // GEMV -- ds_fp4 FP8 round-trips (DSV4 act_quant), both deinterleave to fp32; q4_0
-    // W4A8 Q8_0-quantizes. Needs all of pass1 done (a full row spans every iblk).
-    if (needs_di || use_q4a8) {
+    // GEMV -- ds_fp4 FP8 round-trips (DSV4 act_quant), both deinterleave to fp32;
+    // q4_0 W4A8 Q8_0-quantizes; gguf W4A8-K q8_K-quantizes. Needs all of pass1 done
+    // (a full row spans every iblk).
+    if (needs_di || use_q4a8 || gguf_i8) {
       for (;;) {
         int64_t r = prt_next.fetch_add(1, std::memory_order_relaxed);
         if (r >= prt_total) break;
@@ -2166,7 +2656,7 @@ struct CpuMoeExecutor {
     if (need > g_scratch.size()) g_scratch.resize(need);
     p1_total = static_cast<int64_t>(t->num_tokens) * top_k * n_iblk;
     p2_total = static_cast<int64_t>(t->num_tokens) * n_hblk;
-    prt_total = (needs_di || use_q4a8) ? static_cast<int64_t>(t->num_tokens) * top_k : 0;
+    prt_total = (needs_di || use_q4a8 || gguf_i8) ? static_cast<int64_t>(t->num_tokens) * top_k : 0;
     p1_next.store(0, std::memory_order_relaxed);
     p2_next.store(0, std::memory_order_relaxed);
     prt_next.store(0, std::memory_order_relaxed);
@@ -2218,6 +2708,17 @@ struct CpuMoeExecutor {
       for (int tok = 0; tok < t->num_tokens; ++tok)
         quant_q8_0(t->x + (size_t)tok * H, H, xi8_scratch.data() + (size_t)tok * H,
                    xas_scratch.data() + (size_t)tok * (H / 32));
+    }
+    // GGUF W4A8-K: q8_K-quantize each token's input row once (single-threaded, tiny
+    // for decode) -- every gate/up dot of this task reuses it. The intermediate rows
+    // quantize in the threaded prepare phase (prep_g_row) after pass 1.
+    if (gguf_i8) {
+      const size_t nb_in = static_cast<size_t>(t->num_tokens) * (H / QK_K);
+      const size_t nb_int = static_cast<size_t>(t->num_tokens) * top_k * (I / QK_K);
+      if (nb_in > xq8k_scratch.size()) xq8k_scratch.resize(nb_in);
+      if (nb_int > gq8k_scratch.size()) gq8k_scratch.resize(nb_int);
+      for (int tok = 0; tok < t->num_tokens; ++tok)
+        quant_q8_k(t->x + (size_t)tok * H, H, xq8k_scratch.data() + (size_t)tok * (H / QK_K));
     }
     {
       std::lock_guard<std::mutex> lk(task_mtx);
