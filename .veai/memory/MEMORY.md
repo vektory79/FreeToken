@@ -1,16 +1,16 @@
-- [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-13edf6413fdc.md) — PR #408 nvfp4 KV port to vektory79 + 1M-token KV on RTX 5090: merge clean, reserve+fill measured, decode flat
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; IOMMU tax = old 4 GB/s
-- [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-ac92781688a8.md) — ft serve MoE flags: cpu-threads dead for offload; benchbw v4 profile post-iommu 25% fetch; threads 16==20 flat
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-b9def4525192.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
-- [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-124193259365.md) — gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3 OK; gcc trips ATen List_inl.h
 - [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
 - [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-30a075828b64.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts
 - [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-8ce65b535fed.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-2039b53cb2e9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-fb58a59761d2.md) — GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s
-- [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-2fbd9f4276bf.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
-- [ft-gguf-glm5next-phase5-acceptance](ft-gguf-glm5next-phase5-acceptance-975a360a0e4a.md) — GGUF glm5next: Phases 1-6 committed through 028f2d9; digit-split fixed (battery 6/6); sizing+prefetch waves in flight
-- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-590e12c7424d.md) — GGUF glm5next: CAMPAIGN COMPLETE - 6 commits, all quality defects closed, production-usable
 - [lean-subagent-context](lean-subagent-context-b42997304646.md) — Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)
 - [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-7a85eb5d2682.md) — Synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets; analytic uniform fixtures catch what parity cannot
+- [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-67df3b73da55.md) — gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3; CC/CXX scoped to build since 1635ecd
+- [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-0c2bf3951cd7.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 VRAM shift broke the 1M boot
+- [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-e4766181008c.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
+- [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-35ff08215256.md) — ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions
+- [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-321fcf0b0112.md) — gguf hybrid decode: per-layer handshake floor 1.9-3 ms x42 layers dominates; pool split starves CPU; needs batching
+- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-504d543c618e.md) — GGUF glm5next hybrid follow-on campaign: 8 commits, functional PASS, perf MISS (handshake floor), Task 06 re-scoped

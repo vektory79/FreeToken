@@ -1,9 +1,9 @@
 ---
 name: "pr408-kv-nvfp4-1m-port"
-description: "PR #408 nvfp4 KV port to vektory79 + 1M-token KV on RTX 5090: merge clean, reserve+fill measured, decode flat"
+description: "PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 VRAM shift broke the 1M boot"
 type: project
-lastUpdated: 2026-09-12T11:35
-lastRecall: 2026-09-14T11:45
+lastUpdated: 2026-09-15T01:50
+lastRecall: 2026-09-15T01:49
 ---
 
 # PR #408 port: nvfp4 KV cache -> 1M tokens on RTX 5090
@@ -38,3 +38,5 @@ Hardware-verified 2026-09-12 on the user's GLM-5.3-Flash-NVFP4 / RTX 5090 / FTW 
 - PR #408 thread: gdevenyi's GSM8K-300 greedy on Qwen3.8-Flash-Next (QSA, sm_89, TP2): fp8 vs nvfp4 identical 98.0% (294/300) - different architecture, same conclusion.
 - Battery gotchas: glm reasoning parser burns max_tokens (96 -> empty content; use 768+); bf16 leg needs --kv-reserve-tokens 262144 override at ratio 0.89 (524288 fails floor assert); needle harness /tmp/ft_needle.sh.
 - Caveat: E2M1 rounding does perturb latents (tests prove only dequantized-reference parity, not bf16 equivalence); identity at greedy on 12 tasks + needle + GSM8K datapoint = degradation below argmax-flip threshold in all measured cases. For a stronger statistical claim: bigger task battery (the harness is reusable).
+
+- 2026-09-14 VRAM update (supersedes the boot claim above at face value): the canonical 1M nvfp4 command (ratio 0.89, --kv-cache-dtype nvfp4) now FAIL-FASTS at boot - min plan 8.19 GiB > budget 6.63 GiB after an unexplained budget shift on the box (it booted 2026-09-12). Working reserve until explained: --kv-reserve-tokens 524288 -> 322 slots (< 336 WS), decode ~14.1 tok/s @64k. See glm53-post-iommu-baseline (final section).

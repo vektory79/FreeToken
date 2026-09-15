@@ -3,7 +3,7 @@ name: "ft-pr-relevance-glm-hybrid"
 description: "PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable"
 type: project
 lastUpdated: 2026-09-13T02:18
-lastRecall: 2026-09-13T23:39
+lastRecall: 2026-09-15T01:49
 ---
 
 # Upstream PR applicability for GLM-5.3-Flash-NVFP4 hybrid on RTX 5090 (researched 2026-09-12, branch vektory79 = main + #408 port)

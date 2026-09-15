@@ -1,9 +1,9 @@
 ---
 name: "ft-serve-moe-flags-semantics"
-description: "ft serve MoE flags: cpu-threads dead for offload; benchbw v4 profile post-iommu 25% fetch; threads 16==20 flat"
+description: "ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions"
 type: project
-lastUpdated: 2026-09-12T23:27
-lastRecall: 2026-09-14T20:42
+lastUpdated: 2026-09-15T03:05
+lastRecall: 2026-09-15T03:11
 ---
 
 # ft serve MoE flag semantics (code audit, 2026-09-12, file:line verified)
@@ -33,3 +33,9 @@ lastRecall: 2026-09-14T20:42
 - CPU executor boot log carries the serving geometry: "CPU MoE executor ready: threads=16 (pinned to cores 0..23) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=4096 I=2048 experts=288 layers=42 top_k=8" -> GLM hybrid decode working set = 42x8 = 336 pairs (NOT 43x8=344; layer 45 is the MTP layer, not a serving MoE layer).
 - --moe-prefill-hit-d2d (store_true, default False): help states "Effective with --moe-cache-size > 2 * num_experts" = 576 slots for 288 experts -> unusable with large-KV auto plans (only 347-480 slots).
 - Doc rot: config.py:52 "Ignored by other backends" is stale (hybrid uses moe_cpu_threads); --kv-cache-dtype nvfp4 help (args.py:433-447) predates #408 MLA/DSA support.
+
+## 2026-09-15 (hybrid campaign Task 02, commit aad5d3a): per-partition cpu-threads split
+Engine._init_cpu_moe_executors builds ONE CpuMoeExecutor per OffloadMoeCache partition; resolve_pool_affinities(num_pools, requested) returns DISJOINT core sets (explicit N splits evenly, remainder to earlier pools, each share floored at 1 worker; 0=auto splits physical cores evenly, coordinator core carved out per pool inside the executor). Single-cache path byte-identical (whole-machine pool). The multi-partition cpu/hybrid ValueError is lifted iff every partition passes partition_executor_rejection (capability: _WFMT_IDS; "gguf" alias requires all layer type ids in _GGUF_TYPE_FMTS). Known nit: explicit --moe-cpu-threads > total cores wraps and can overlap pool cores (extreme misconfig, perf-only).
+
+## 2026-09-15 correction (commit eb7de4c, Task 07 hardening)
+The wrapped-overlap nit above is FIXED: resolve_pool_affinities now clamps the explicit total to the usable core set (one warning, floor-at-one, never wraps across pools); resolve_threads_and_affinity(0, core-free subset) returns max(1, len(core_ids)). The config.py/args.py help-text rot is also fixed: --moe-cpu-threads help now states the cpu/hybrid/offload+--moe-cpu-layers usage and the per-partition disjoint split. Watchdog errors carry pool attribution ("[pool i/n: ...]"). Gate advice: offload + --moe-cpu-layers failures advise "adjust or drop --moe-cpu-layers" (not "use offload instead").

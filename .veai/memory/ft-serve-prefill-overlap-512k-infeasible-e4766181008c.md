@@ -2,8 +2,8 @@
 name: "ft-serve-prefill-overlap-512k-infeasible"
 description: "prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions"
 type: project
-lastUpdated: 2026-09-14T11:48
-lastRecall: 2026-09-14T22:05
+lastUpdated: 2026-09-15T01:50
+lastRecall: 2026-09-15T03:11
 ---
 
 # ft serve --moe-prefill-overlap: slot-floor incompatibility with big KV (GLM-5.3, RTX 5090)
@@ -18,5 +18,5 @@ Question (2026-09-12): can dropping `--disable-moe-prefill-overlap` at KV=524288
 
 ## Cross-context instance (2026-09-13/14): the same 2E invariant bites multi-partition offload caches (gguf glm5next)
 - The gguf per-signature OffloadMoeCache partitions (GLM-5.3 GGUF, 3 width signatures) set per-partition floors of 1x num_experts; prefill_overlap=True needs 2xE per partition (offload_cache.py:176 __post_init__) -> the real-file boot died at 131s: 1326 auto slots < 3x576 = 1728 minimum.
-- RESOLVED in Phase 5 (see ft-gguf-glm5next-phase5-acceptance): per-partition overlap DEGRADE via Engine._partition_prefill_overlap - overlap only when the group's slots >= 2*num_experts; minority signatures run synchronous materialized prefill. Deliberately NOT a per-partition 2E budget floor: flooring wide minority signatures would cost ~16 GiB. The Phase 6 tuned plan runs overlap OFF on all partitions (464/288/288 < 576).
+- RESOLVED in Phase 5 of the gguf campaign (see ft-serve-gguf-glm5next-unsupported): per-partition overlap DEGRADE via Engine._partition_prefill_overlap - overlap only when the group's slots >= 2*num_experts; minority signatures run synchronous materialized prefill. Deliberately NOT a per-partition 2E budget floor: flooring wide minority signatures would cost ~16 GiB. The Phase 6 tuned plan runs overlap OFF on all partitions (464/288/288 < 576).
 - Lesson: ANY budget split that turns one MoE cache into partitions must resolve the 2E overlap invariant PER PARTITION (here: per-group degrade; a blanket 2E floor in the split would over-reserve, and the greedy auto plan only knows the pre-split total and asserts downstream).
