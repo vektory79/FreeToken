@@ -1012,7 +1012,16 @@ class Engine:
             pool_cores = [None]
             pool_threads = [config.moe_cpu_threads]
         else:
-            pool_cores = resolve_pool_affinities(len(caches), config.moe_cpu_threads)
+            # Weight the split by each partition's LAYER COUNT: a partition's decode
+            # cost scales with its layer count, and the Task 05 measurement showed
+            # the even split starving the dominant partition (6/16 threads on the
+            # real file's 39/2/1 layers -> ~2.96 GB/s effective CPU leg vs 11.3
+            # benched). The splitter keeps the disjointness + floor-at-one invariants.
+            pool_cores = resolve_pool_affinities(
+                len(caches),
+                config.moe_cpu_threads,
+                weights=[cache.num_layers for cache in caches],
+            )
             # auto (0) keeps the executor's own auto sizing inside its core subset;
             # an explicit budget arrives pre-split (one share per pool, no doubling)
             pool_threads = [

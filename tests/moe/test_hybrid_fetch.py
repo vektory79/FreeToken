@@ -358,6 +358,45 @@ def test_resolve_pool_affinities_clamps_explicit_overspend():
     assert [len(p) for p in resolve_pool_affinities(3, 2)] == [1, 1, 1]
 
 
+def test_resolve_pool_affinities_weights_by_layer_count(monkeypatch):
+    """Task 06 B: the thread budget is distributed across pools PROPORTIONAL TO
+    THE PARTITION LAYER COUNT. Task 05 measured the even split starving the
+    dominant partition (6/16 threads on the real file's 39/2/1 layer distribution
+    -> ~2.96 GB/s effective CPU leg vs 11.3 benched). The real file's weights at
+    16 threads: 39/42*16 = 14.86 -> 15 workers (largest-remainder + floor-at-one),
+    the two single-layer partitions keep one each. Disjointness and floor-at-one
+    invariants are unchanged."""
+    from freetoken.moe.cpu_executor import resolve_pool_affinities
+
+    weights = [39, 2, 1]  # the real glm5next file: dominant + two minority partitions
+    # explicit --moe-cpu-threads: weighted largest-remainder, floor-at-one preserved
+    # (the split may overspend the flag by pools-1 workers, as the even split could)
+    assert [len(p) for p in resolve_pool_affinities(3, 16, weights=weights)] == [15, 1, 1]
+    assert [len(p) for p in resolve_pool_affinities(3, 20, weights=weights)] == [19, 1, 1]
+
+    # auto: the same weighting over the physical cores, trimmed back to a DISJOINT
+    # cover (floor-at-one alone would hand out 19+1+1 = 21 cores on a 20-core box)
+    reps = list(range(100, 120))  # deterministic 20-physical-core rig
+    monkeypatch.setattr("freetoken.moe.cpu_executor.physical_core_cpus", lambda: list(reps))
+    pools = resolve_pool_affinities(3, 0, weights=weights)
+    flat = [c for p in pools for c in p]
+    assert len(flat) == len(set(flat)), f"pools share cores: {pools}"
+    assert sorted(flat) == reps  # disjoint + complete cover of the physical cores
+    assert [len(p) for p in pools] == [18, 1, 1]
+
+    # explicit split keeps disjoint physical-first ordered slices
+    pools = resolve_pool_affinities(3, 16, weights=weights)
+    flat = [c for p in pools for c in p]
+    assert len(flat) == len(set(flat)), f"pools share cores: {pools}"
+    assert pools[0] == reps[:15]
+
+    # floor-at-one invariant under weights: a starved pool is worse than overspending
+    assert all(len(p) >= 1 for p in resolve_pool_affinities(3, 3, weights=weights))
+
+    # even split preserved when weights are absent (backward compatibility)
+    assert [len(p) for p in resolve_pool_affinities(3, 4)] == [2, 1, 1]
+
+
 def test_resolve_threads_and_affinity_physical_core_free_subset_is_coherent():
     # Task 07 A-info: auto sizing inside an allow_cores subset with NO physical-core
     # representative used to return nthreads=0 with non-empty core ids.

@@ -21,6 +21,7 @@ import os
 import threading
 import time
 import weakref
+from collections.abc import Sequence
 
 import torch
 
@@ -264,22 +265,56 @@ def resolve_threads_and_affinity(
     return max(1, len(core_ids)), core_ids
 
 
-def resolve_pool_affinities(num_pools: int, requested: int) -> list[list[int]]:
+def resolve_pool_affinities(
+    num_pools: int, requested: int, weights: Sequence[int] | None = None
+) -> list[list[int]]:
     """Split the CPU budget across per-cache executor pools (partition-aware hybrid).
 
     Every pool pins its workers, so N pools need DISJOINT cores or they oversubscribe
     one core set N-wide (and each auto-sized pool reserves a coordinator core of its
-    own -- disjoint pools keep those disjoint too). Returns one core list per pool:
-    an explicit ``--moe-cpu-threads`` count is split as evenly as possible (the
-    remainder to the earlier pools, each share floored at one worker -- a starved
-    pool is worse than overspending the flag by pools-1 threads) and assigned cores
-    physical-first, CLAMPED to the usable core set so the pools stay disjoint (an
-    over-budget flag is dropped with a warning instead of wrapping onto cores that
-    an earlier pool already pins); ``requested == 0`` (auto) splits the physical
-    cores evenly and keeps one worker per core. Degenerate cases (more pools than
-    cores) share cores rather than starve a pool.
+    own -- disjoint pools keep those disjoint too). Returns one core list per pool.
+
+    The budget is distributed PROPORTIONAL TO THE POOL WEIGHTS (default: even). The
+    engine passes each partition's LAYER COUNT: a partition's decode cost scales with
+    its layer count, and the Task 05 measurement showed the even split starving the
+    dominant partition (6/16 threads on the real file's 39/2/1 layer distribution ->
+    ~2.96 GB/s effective CPU leg vs 11.3 benched). Allocation: floor(total * w_i / W)
+    with the leftover units to the largest fractional remainders (ties -> earlier
+    pools), every share floored at one worker -- a starved pool is worse than
+    overspending the flag by pools-1 threads, so an explicit ``--moe-cpu-threads``
+    split may overspend the same way the even split always could. The AUTO path
+    additionally trims any floor-at-one overflow back out of the largest pool: auto
+    splits the physical cores themselves, and the pools must stay a disjoint cover
+    of them. Cores are assigned physical-first, CLAMPED to the usable core set so
+    the pools stay disjoint (an over-budget flag is dropped with a warning instead
+    of wrapping onto cores that an earlier pool already pins); ``requested == 0``
+    (auto) keeps one worker per core. Degenerate cases (more pools than cores)
+    share cores rather than starve a pool.
     """
     reps = physical_core_cpus()
+
+    def _weighted_counts(total: int, trim_to_total: bool) -> list[int]:
+        if not weights or len(weights) != num_pools or sum(weights) <= 0:
+            size, extra = divmod(total, num_pools)
+            return [size + (1 if i < extra else 0) for i in range(num_pools)]
+        w = [float(x) for x in weights]
+        raw = [total * x / sum(w) for x in w]
+        counts = [int(r) for r in raw]  # floor
+        leftover = total - sum(counts)
+        by_frac = sorted(range(num_pools), key=lambda i: (-(raw[i] - counts[i]), i))
+        for i in by_frac[:leftover]:
+            counts[i] += 1
+        counts = [max(1, c) for c in counts]  # floor at one (may overspend total)
+        if trim_to_total:
+            # the auto path hands out the physical cores themselves: take the
+            # floor-at-one overflow back from the largest (dominant) pool
+            while sum(counts) > total:
+                j = max(range(num_pools), key=lambda i: counts[i])
+                if counts[j] <= 1:
+                    break
+                counts[j] -= 1
+        return counts
+
     if requested and requested > 0:
         try:
             allowed = sorted(os.sched_getaffinity(0))
@@ -297,23 +332,23 @@ def resolve_pool_affinities(num_pools: int, requested: int) -> list[list[int]]:
             )
             total = len(order)
         total = max(total, num_pools)  # every pool keeps at least one worker
-        base, extra = divmod(total, num_pools)
         pools, start = [], 0
-        for i in range(num_pools):
-            n = max(1, base + (1 if i < extra else 0))
+        for n in _weighted_counts(total, trim_to_total=False):
             if start + n <= len(order):
                 pools.append(list(order[start:start + n]))
             else:
-                # degenerate (more pools than cores): share cores rather than starve
+                # degenerate (more workers than cores): share cores rather than starve
                 pools.append([order[(start + j) % len(order)] for j in range(n)])
             start += n
         return pools
-    size, extra = divmod(len(reps), num_pools)
     pools, start = [], 0
-    for i in range(num_pools):
-        n = size + (1 if i < extra else 0)
+    for i, n in enumerate(_weighted_counts(len(reps), trim_to_total=True)):
         # more pools than cores: share a core instead of handing out an empty set
-        pools.append(reps[start:start + n] if n else [reps[i % len(reps)]])
+        pools.append(
+            list(reps[start:start + n])
+            if n and start + n <= len(reps)
+            else ([reps[(start + j) % len(reps)] for j in range(n)] if n else [reps[i % len(reps)]])
+        )
         start += n
     return pools
 
