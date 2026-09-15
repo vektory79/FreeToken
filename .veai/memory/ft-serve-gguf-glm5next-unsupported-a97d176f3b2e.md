@@ -1,9 +1,9 @@
 ---
 name: "ft-serve-gguf-glm5next-unsupported"
-description: "GGUF glm5next hybrid follow-on campaign: 8 commits, functional PASS, perf MISS (handshake floor), Task 06 re-scoped"
+description: "GGUF glm5next hybrid: Task 06 landed (11f1a80+979e3fc); profile bakes f=29.5%, CPU leg 65.6 GB/s; re-acceptance pending"
 type: project
-lastUpdated: 2026-09-15T05:27
-lastRecall: 2026-09-15T03:11
+lastUpdated: 2026-09-15T15:54
+lastRecall: 2026-09-15T17:27
 ---
 
 # GGUF glm5next (Path A): campaign complete - see PLAN.md for the full record
@@ -36,3 +36,9 @@ Chain: 4162f7c (config shim + registry + AOT claim) -> 4443d7e (iter_gguf_weight
 
 ## 2026-09-15: hybrid campaign (follow-on to THIS campaign) - functional PASS, perf MISS
 Plan: .tasks/gguf-glm5next-hybrid/PLAN.md (Tasks 01-05+07 closed; Task 06 re-scoped). 8 commits: 5a04423 (CPU GEMV iq3_xxs/iq4_xs/q6_k, per-projection tables), bd02232 (hardening fix wave), 427a431 (negative-path tests), 2169baa (benchbw CPU leg; fraction 0.781; r=3.6-3.7), aad5d3a (per-cache executors, disjoint pools, capability-gated multi-partition), f6b94ad + ef83ee8 (engine gate accepts gguf+hybrid via header-scan capability check), eb7de4c (hardening ride-along), 1635ecd (CC/CXX JIT leak fix). Hardware (Task 05): hybrid boots/serves the real file, battery 24/24, fraction 78% active, VRAM noise - BUT decode 2.99 tok/s vs 14.25 offload control: per-layer GPU<->CPU handshake floor (1.9-3 ms x 42 layers) + dominant-pool thread starvation; see the gguf-hybrid-decode-handshake-floor memory and .tasks/gguf-glm5next-hybrid/verification/. Offload remains the RECOMMENDED strategy for this file until re-scoped Task 06 (handshake batching + SIMD + weighted affinities) lands.
+
+## 2026-09-15 (evening): NVFP4 A/B REVERSES the Task 06 NO-GO
+Measured A/B on the user's exact 1M NVFP4 command (single variable = strategy): hybrid 13.77-14.46 tok/s vs offload 9.91-10.12 (@64k; short 14.46/10.12) = 1.39-1.43x hybrid win. Both boot TODAY (the 09-14 fail-fast note was transient); identical plans, 341 slots >= 336 WS - VRAM competition REFUTED. Decomposition: offload PCIe-bound (all 5.7 misses/layer, 3.36 GiB/step, 34.2 GB/s effective); hybrid f=24.9%, CPU integer leg 4.70 experts/layer at 40.2 GB/s required vs 55.6 benched, 19.9/20 cores. The GGUF "handshake floor" was mis-attributed PCIe fetch volume (see gguf-hybrid-decode-handshake-floor memory). GGUF path gaps vs NVFP4: scalar-only IQ/QK tier, no activation-prequant reuse, per-role tables vs packed gate_up, starved pool split, benchbw f=78% baked the slow leg. REVISED: with the ggml integer-kernel port (research/ggml-cpu-kernel-study.md, ~350-450 LOC + ~40 quant, microbench gate >=40 GB/s vs 11.7) + weighted pools + packed tables, GGUF hybrid ceiling ~11-14 tok/s = offload parity hinges on the microbench; CPU-only mode projected 10-14 tok/s with ~134 GB VRAM freed. Artifact: verification/nvfp4-ab-measurements.md.
+
+## 2026-09-15 (late): Task 06 implemented - profile now bakes f=29.5%
+Landed: 11f1a80 (verbatim ggml AVX2 W4A8-K tier in select_ggufdot_i8 + quantize_row_q8_K; scalar fallback; TIER env override) + 979e3fc (weighted pool split by partition layer count, real file 39/2/1 -> [15,1,1] @16T). benchbw re-profile: CPU leg 11.65 -> 65.6 GB/s standalone / 51.6 overlapped (1.28x over the 40.2 GB/s target), fetch fraction 78.0 -> 29.5%, cpu/pcie ratio 0.267 -> 1.523 (verdict stays "offload"). The f=78% references above are STALE - the cached profile now bakes f=29.5% with the avx2-w4a8k tier. Projected GGUF hybrid ~13-16 tok/s; hardware re-acceptance pending.

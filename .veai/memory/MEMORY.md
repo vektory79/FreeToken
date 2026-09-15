@@ -3,7 +3,6 @@
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
 - [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
 - [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-30a075828b64.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts
-- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-8ce65b535fed.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-2039b53cb2e9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-fb58a59761d2.md) — GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s
 - [lean-subagent-context](lean-subagent-context-b42997304646.md) — Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)
@@ -12,5 +11,9 @@
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-0c2bf3951cd7.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 VRAM shift broke the 1M boot
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-e4766181008c.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-35ff08215256.md) — ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions
-- [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-321fcf0b0112.md) — gguf hybrid decode: per-layer handshake floor 1.9-3 ms x42 layers dominates; pool split starves CPU; needs batching
-- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-504d543c618e.md) — GGUF glm5next hybrid follow-on campaign: 8 commits, functional PASS, perf MISS (handshake floor), Task 06 re-scoped
+- [process-hygiene-protocol](process-hygiene-protocol-acfeb33263ee.md) — User rule for test waves: process census pre/postflight, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs
+- [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-e072d0274c3d.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
+- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-a97d176f3b2e.md) — GGUF glm5next hybrid: Task 06 landed (11f1a80+979e3fc); profile bakes f=29.5%, CPU leg 65.6 GB/s; re-acceptance pending
+- [benchbw-profile-clobber-trap](benchbw-profile-clobber-trap-6b9f0d04e5e9.md) — benchbw writes the FULL per-GPU profile per run: single-dtype run clobbers other formats' fractions; no TTL/fingerprint
+- [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-d98055871b80.md) — GGUF hybrid per-layer cost = fetch volume + 0.6-1.0 ms sync; hardware-validated 1.43 ms/layer at 16.67 tok/s
+- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-39843d88ac42.md) — GGUF glm5next hybrid FINAL: re-acceptance 16.67 tok/s vs offload 12.97 - hybrid RECOMMENDED; 9 commits through 63b9bff

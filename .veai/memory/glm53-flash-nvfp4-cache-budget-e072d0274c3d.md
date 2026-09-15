@@ -2,8 +2,8 @@
 name: "glm53-flash-nvfp4-cache-budget"
 description: "GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu"
 type: project
-lastUpdated: 2026-09-13T23:44
-lastRecall: 2026-09-15T01:49
+lastUpdated: 2026-09-15T14:56
+lastRecall: 2026-09-15T17:10
 ---
 
 # GLM-5.3-Flash-NVFP4 on RTX 5090: --moe-cache-auto budget floor
@@ -32,11 +32,8 @@ Resolved: moe_cache_size=326, num_pages=4113 (263,232 KV tokens, 2.93 GiB), free
 
 ## Alternative (keep overlap): cap --kv-reserve-tokens at <= ~46k tokens (576 slots need budget - 0.54 GiB). Default reserve 8192 boots but leaves only ~8k KV tokens (issue #111).
 
-## Related upstream (FlashML-org/FreeToken)
-- PR #300 (OPEN) KV ladder - grow KV on demand from expert slots. Verdict for THIS model: no decode gain (slots already >= working set 336 on every plan; see ft-pr-relevance-glm-hybrid) - it buys flexibility, not speed, here.
-- PR #340: dummy-page off-by-one in the auto KV floor (kv_reserve_pages+1); makes floor slightly stricter, not a fix.
-- PR #198: explicit --num-pages/--num-tokens now participates in the auto reserve (fixes issue #383 class).
-- Issue #401: no room for prefill after auto boot; its workaround: explicit --moe-cache-size below the auto number. PR #337: NVMe disk tier for expert banks (RAM overflow).
+## Related upstream
+PR applicability verdicts for this setup live in ft-pr-relevance-glm-hybrid (#300 kv-ladder: no decode gain for this model; #340/#198/#337 N/A) - check there before porting any perf PR. Issue #401 class (no room for prefill after auto boot): workaround is explicit --moe-cache-size below the auto number.
 
 ## How to apply
 Any boot of this model class on a 32GB card: compute the min plan first; prefer --disable-moe-prefill-overlap + memory_ratio ~0.85 + --max-prefill-length 4096 over raising memory_ratio; expect the first prefill to autotune triton kernels (one-time 256 MiB bench cache).

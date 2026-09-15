@@ -3,7 +3,7 @@ name: "ft-gguf-kernel-jit-toolchain"
 description: gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3; CC/CXX scoped to build since 1635ecd
 type: project
 lastUpdated: 2026-09-15T01:48
-lastRecall: 2026-09-15T01:49
+lastRecall: 2026-09-15T16:03
 ---
 
 # gguf CUDA kernel JIT toolchain on vektory79: clang++ host required

@@ -3,7 +3,7 @@ name: "pr408-kv-nvfp4-1m-port"
 description: "PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 VRAM shift broke the 1M boot"
 type: project
 lastUpdated: 2026-09-15T01:50
-lastRecall: 2026-09-15T01:49
+lastRecall: 2026-09-15T14:51
 ---
 
 # PR #408 port: nvfp4 KV cache -> 1M tokens on RTX 5090
