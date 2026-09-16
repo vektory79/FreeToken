@@ -7,15 +7,19 @@
 - [lean-subagent-context](lean-subagent-context-b42997304646.md) — Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)
 - [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-7a85eb5d2682.md) — Synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets; analytic uniform fixtures catch what parity cannot
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-67df3b73da55.md) — gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3; CC/CXX scoped to build since 1635ecd
-- [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-e4766181008c.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-35ff08215256.md) — ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions
 - [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-e072d0274c3d.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
-- [ft-serve-gguf-glm5next-unsupported](ft-serve-gguf-glm5next-unsupported-a97d176f3b2e.md) — GGUF glm5next hybrid: Task 06 landed (11f1a80+979e3fc); profile bakes f=29.5%, CPU leg 65.6 GB/s; re-acceptance pending
 - [benchbw-profile-clobber-trap](benchbw-profile-clobber-trap-6b9f0d04e5e9.md) — benchbw writes the FULL per-GPU profile per run: single-dtype run clobbers other formats' fractions; no TTL/fingerprint
 - [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-d98055871b80.md) — GGUF hybrid per-layer cost = fetch volume + 0.6-1.0 ms sync; hardware-validated 1.43 ms/layer at 16.67 tok/s
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-39843d88ac42.md) — GGUF glm5next hybrid FINAL: re-acceptance 16.67 tok/s vs offload 12.97 - hybrid RECOMMENDED; 9 commits through 63b9bff
 - [cuda-debug-tool-strategy](cuda-debug-tool-strategy-dec30f16a02e.md) — CUDA debug strategy: CUDA_LAUNCH_BLOCKING first, compute-sanitizer second, python instrumentation fallback
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-90784dc7d0a9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
-- [process-hygiene-protocol](process-hygiene-protocol-acfeb33263ee.md) — User rule for test waves: process census pre/postflight, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-029031181f9f.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 1M break was transient
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-e4232bb48315.md) — Self-sufficient Orchestrator skill: 7 GGUF phases, 38 traps, ORCHESTRATION.md; used-by Orchestrator; .veai/skills only
+- [git-integration-preferences](git-integration-preferences-761015c71440.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
+- [vektory79-main-rewrite-gotcha](vektory79-main-rewrite-gotcha-44d497ec530c.md) — vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits
+- [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-943a3bdf3964.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails (python -m green), pgrep census match
+- [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
+- [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-78dd276b7ddd.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
+- [process-hygiene-protocol](process-hygiene-protocol-ea279db69539.md) — Test-wave hygiene: census, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs; cross-wave GPU OOM = Environment
+- [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-28ff604b5543.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate

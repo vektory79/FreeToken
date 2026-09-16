@@ -3,7 +3,7 @@ name: "glm53-post-iommu-baseline"
 description: "GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s"
 type: project
 lastUpdated: 2026-09-14T11:07
-lastRecall: 2026-09-15T19:57
+lastRecall: 2026-09-16T15:06
 ---
 
 # GLM-5.3-Flash-NVFP4 hybrid on RTX 5090: post-iommu=pt re-baseline (2026-09-12)
