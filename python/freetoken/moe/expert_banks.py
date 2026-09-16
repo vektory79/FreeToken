@@ -385,6 +385,44 @@ def gguf_expert_bank_types(model_path, model_config) -> dict[int, tuple[int, int
     }
 
 
+def gguf_signature_groups(model_path, model_config) -> tuple[list[list[int]], list[int]] | None:
+    """(signature groups, per-group slot bytes) of a bare .gguf file, from its tensor
+    table alone (the _gguf_bank_bytes header-only scan: milliseconds, no tensor data).
+
+    Groups mirror Engine._group_bank_layers on the LOADED banks: the gguf provider
+    packs each bank layer as uint8 (n_expert, output_rows, row_bytes), so two layers
+    share a signature iff their per-role (rows, row_bytes) agree. ``None`` keeps the
+    late split check as the only gate - an unprovable layout (not a bare .gguf, the
+    gguf provider not serving, incomplete banks) must never fail a boot the real
+    banks would fund.
+    """
+    from freetoken.models.gguf.reader import is_gguf_path
+
+    expert_quant = getattr(model_config, "expert_quant", "none")
+    fmt = expert_quant if expert_quant != "none" else (
+        getattr(model_config, "moe_weight_format", None) or expert_quant
+    )
+    if fmt != "gguf" or not model_path or not is_gguf_path(model_path):
+        return None
+    num_experts = int(getattr(model_config, "num_experts", 0) or 0)
+    num_moe = int(getattr(model_config, "num_moe_layers", 0) or 0)
+    if num_experts <= 0 or num_moe <= 0:
+        return None
+    per_layer = _gguf_bank_role_stacks(
+        model_path, model_config, lambda t: (t.rows // num_experts, t.row_bytes)
+    )
+    if per_layer is None:
+        return None
+    roles = ("gate", "up", "down")
+    keys = {layer: tuple(per_layer[layer][r] for r in roles) for layer in range(num_moe)}
+    groups: dict[tuple, list[int]] = {}
+    for layer in range(num_moe):
+        groups.setdefault(keys[layer], []).append(layer)
+    # per-slot bytes = one expert's packed rows across the three banks; group 0 holds
+    # bank layer 0, the width the --moe-cache-auto envelope is denominated in
+    return list(groups.values()), [sum(r * b for r, b in k) for k in groups]
+
+
 def bank_bytes_estimate(model_config, method=None, model_path=None) -> int | None:
     """Estimated total expert-bank bytes of a raw checkpoint before loading it.
 

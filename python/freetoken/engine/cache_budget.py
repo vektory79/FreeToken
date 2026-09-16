@@ -45,6 +45,44 @@ def required_bytes(
     return moe_cache_size * per_expert_bytes + num_pages * cache_per_page
 
 
+def partition_floor_slots(per_group_slot_bytes: list[int], num_experts: int) -> int:
+    """Layer-0-width slot count that funds every signature group's ``num_experts``-slot
+    floor: each group's floor costs ``num_experts`` slots at its own byte width, so the
+    floors' byte-weighted demand against the layer-0-width envelope is
+    ``num_experts * sum(per_group_slot_bytes) / per_group_slot_bytes[0]``, rounded up.
+    Both the pre-load gguf gate and the late split check raise from this figure so the
+    early and late numbers can never diverge."""
+    # a bit header can yield zero groups or a zero-width first group; die loudly here
+    # instead of IndexError/ZeroDivisionError downstream
+    assert per_group_slot_bytes, "no signature groups to floor"
+    assert per_group_slot_bytes[0] > 0, "the layer-0 slot width must be positive"
+    return -(-num_experts * sum(per_group_slot_bytes) // per_group_slot_bytes[0])
+
+
+def check_partition_floors(
+    groups: list[list[int]],
+    per_group_slot_bytes: list[int],
+    num_experts: int,
+    envelope_slots: int,
+) -> None:
+    """Reject an --moe-cache-auto envelope that cannot fund every signature group's
+    ``num_experts``-slot floor, naming the honest numbers: the groups and their layer
+    counts, the per-group floor, the byte-weighted need in layer-0-width slots, the
+    available envelope, and the remedy. An envelope exactly equal to the need passes."""
+    need = partition_floor_slots(per_group_slot_bytes, num_experts)
+    if envelope_slots >= need:
+        return
+    counts = "/".join(str(len(g)) for g in groups)
+    widths = "/".join(str(b) for b in per_group_slot_bytes)
+    raise ValueError(
+        f"--moe-cache-auto budget cannot fund the per-signature slot floors: "
+        f"{len(groups)} signature groups ({counts} layers; groups {groups}) each need "
+        f"{num_experts} slots (one whole expert layer) at {widths} bytes/slot, "
+        f"a byte-weighted minimum of {need} layer-0-width slots vs the planned "
+        f"{envelope_slots}; lower --kv-reserve-tokens or raise --memory-ratio"
+    )
+
+
 def plan_cache_budget(
     budget_bytes: int,
     per_expert_bytes: int,

@@ -726,15 +726,13 @@ class Engine:
                 sizes[i] -= take
                 excess -= take * per_slot[i]
             if excess > 0:
-                # same binding-group bound as the explicit-budget error, expressed
-                # against the auto planner's byte envelope
-                need = max(-(-num_experts * total_weight // w) for w in weights)
-                raise ValueError(
-                    f"--moe-cache-auto budget cannot fund the per-signature slot floors "
-                    f"({num_experts} slots per group; layers {groups}): the expert byte "
-                    f"envelope {cap_bytes / 2**30:.2f} GiB is below the partitioned "
-                    f"minimum of ~{need} slots (the binding group's proportional share)"
-                )
+                # safety net: the pre-load gate (engine init, before load_expert_banks)
+                # already rejects this honestly with the same helper whenever the
+                # header-only scan can prove the groups; reachable here only for
+                # layouts it cannot
+                from freetoken.engine.cache_budget import check_partition_floors
+
+                check_partition_floors(groups, per_slot, num_experts, byte_cap_slots)
         return sizes
 
     def _moe_rebuild_sizes(self, moe_cache_size: int) -> list[int]:
@@ -764,11 +762,16 @@ class Engine:
             )
         return sizes
 
-    def _resolve_auto_moe_cache_size(self, config: EngineConfig, banks, method=None) -> tuple[int, int, bool]:
+    def _resolve_auto_moe_cache_size(
+        self, config: EngineConfig, banks, method=None, per_expert_bytes=None
+    ) -> tuple[int, int, bool]:
         """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
 
         Pure glue over the Phase-1 budget policy; isolated here so it is unit-testable
-        without a GPU. Reused by the Phase-2 runtime rebuild.
+        without a GPU. Reused by the Phase-2 runtime rebuild. ``per_expert_bytes``
+        overrides the layer-0 slot width for the pre-load gate, which knows it from
+        the header-only gguf scan before any bank exists (the scan only answers when
+        it can prove the loaded layout, so the two figures agree).
         """
         from freetoken.engine.cache_budget import expert_bytes_per_slot, resolve_moe_cache_auto
 
@@ -776,13 +779,15 @@ class Engine:
         fixed_cache_size += state_pool_bytes(config)  # sibling GDN state pool, engine-summed
         num_experts = config.model_config.num_experts
         total_experts = config.model_config.num_moe_layers * num_experts
+        if per_expert_bytes is None:
+            per_expert_bytes = expert_bytes_per_slot(banks.sources)
         return resolve_moe_cache_auto(
             baseline_free=self._baseline_free,
             weights_bytes=self._weights_bytes,
             memory_ratio=config.memory_ratio,
             cache_per_page=cache_per_page,
             fixed_cache_size=fixed_cache_size,
-            per_expert_bytes=expert_bytes_per_slot(banks.sources),
+            per_expert_bytes=per_expert_bytes,
             num_experts=num_experts,
             total_experts=total_experts,
             prefill_overlap=config.moe_prefill_overlap,
@@ -790,6 +795,25 @@ class Engine:
             page_size=page_tokens,
             max_slots=method.slot_limit() if method is not None else None,
         )
+
+    @staticmethod
+    def _gguf_auto_floor_gate(config: EngineConfig, method, resolve_auto) -> None:
+        """Pre-load fail-fast for --moe-cache-auto on multi-signature gguf files: the
+        header-only scan proves the signature groups cheaply, so the same floor math
+        as _split_moe_cache_budget (the late check, kept as the safety net for layouts
+        the scan cannot prove) rejects an unfundable plan before the multi-minute
+        bank load instead of after it."""
+        if not config.moe_cache_auto or config.use_dummy_weight or method is not None:
+            return
+        from freetoken.engine.cache_budget import check_partition_floors
+        from freetoken.moe.expert_banks import gguf_signature_groups
+
+        scan = gguf_signature_groups(config.model_path, config.model_config)
+        if scan is None:
+            return
+        groups, per_group_slots = scan
+        envelope, _, _ = resolve_auto(config, None, method, per_expert_bytes=per_group_slots[0])
+        check_partition_floors(groups, per_group_slots, config.model_config.num_experts, envelope)
 
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
         method = shared_offload_method(self.model)
@@ -846,6 +870,9 @@ class Engine:
                 else HostResidency.PINNED.value
                 for i in range(config.model_config.num_moe_layers)
             ]
+        # after the split-residency overlap flip so the gate plans with the SAME
+        # prefill_overlap the post-load resolve will see
+        self._gguf_auto_floor_gate(config, method, self._resolve_auto_moe_cache_size)
         try:
             banks = load_expert_banks(
                 config.model_path,

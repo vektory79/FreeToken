@@ -1334,3 +1334,248 @@ def test_gguf_expert_sources_first_k_dense_offset_and_dense_guard(tmp_path):
     # dies loudly instead of desyncing the bank count
     with pytest.raises(ValueError, match="on dense layer 1"):
         load_gguf_moe_expert_sources(str(_write_iter_gguf(tmp_path / "orig.gguf")), cfg)
+
+
+# ---------------------------------------------------------------------------
+# Early honest fail-fast for the --moe-cache-auto per-signature floors: the
+# pre-load gate (Engine._gguf_auto_floor_gate) must reject an unfundable floor
+# set with the same numbers the late _split_moe_cache_budget check computes.
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace
+
+
+# Three signature groups over 8 MoE bank layers, mirroring the real GLM-5.3 GGUF
+# heterogeneity at toy geometry: 5x (IQ3_XXS, IQ3_XXS, IQ4_XS), 1x (IQ4_XS,
+# IQ4_XS, Q6_K), 2x (IQ3_XXS, IQ3_XXS, Q6_K). H=512 (gate/up ne0), I=256 (down
+# ne0), num_experts=4, so per-slot bytes are 169,984 / 246,784 / 207,872 and the
+# floor set needs ceil(4 * 624,640 / 169,984) = 15 layer-0-width slots.
+_TRIPLE_SIGS = [(18, 18, 23)] * 5 + [(23, 23, 14)] + [(18, 18, 14)] * 2
+_TRIPLE_GROUP_SLOT_BYTES = [169_984, 246_784, 207_872]
+
+
+def _write_triple_sig_gguf(path) -> str:
+    import gguf
+
+    # reuse the iter fixture's writer: it carries the glm5next.* metadata KV the
+    # load path's config parse requires; only the tensor set is ours
+    qt = {
+        18: gguf.GGMLQuantizationType.IQ3_XXS,
+        23: gguf.GGMLQuantizationType.IQ4_XS,
+        14: gguf.GGMLQuantizationType.Q6_K,
+        8: gguf.GGMLQuantizationType.Q8_0,
+    }
+    row_bytes = {18: 98, 23: 136, 14: 210}  # packed bytes per 256-element block
+    entries = {
+        # vocab embedding so the load path's gguf config parse (token_embd sizing) works
+        "token_embd.weight": (np.zeros((4, 512 // 32 * 34), np.uint8), qt[8]),
+    }
+    for layer, (gt, ut, dt) in enumerate(_TRIPLE_SIGS):
+        for role, type_id in (("gate", gt), ("up", ut), ("down", dt)):
+            if role == "down":
+                rows, ne0 = 512 * 4, 256  # rows = ne1 * ne2 (H output rows x E experts)
+            else:
+                rows, ne0 = 256 * 4, 512   # rows = I output rows x E experts
+            raw = np.zeros((rows, ne0 // 256 * row_bytes[type_id]), np.uint8)
+            entries[f"blk.{layer}.ffn_{role}_exps.weight"] = (raw, qt[type_id])
+    return _write_iter_gguf(path, tensors=entries)
+
+
+def _gate_engine_and_config(path, kv_reserve_tokens):
+    # Engine.__new__ stub (same idiom as test_engine_resolve_auto_moe_cache_size_maps_kwargs)
+    # + an auto-plan config over the triple-signature gguf: budget 89,000,000 B,
+    # cache_per_page 98,304, per-slot (layer-0 width) 169,984 -> kv_reserve_tokens
+    # picks the envelope: 14,080 -> 14 slots, 14,048 -> 15, 14,016 -> 16.
+    import torch
+
+    from freetoken.engine.engine import Engine
+    from freetoken.kvcache.mha_pool import MHAKVCache
+    from freetoken.models.config import KVCacheGroupSpec
+
+    class StubModelConfig:
+        num_experts = 4
+        num_moe_layers = 8
+        first_k_dense_replace = 0
+        expert_quant = "none"
+        moe_weight_format = "gguf"
+        hidden_size = 512
+        moe_intermediate_size = 256
+        decode_target = "gpu"
+
+        def kv_cache_group_specs(self):
+            return [KVCacheGroupSpec(
+                name="full", layer_ids=(0, 1, 2), num_kv_heads=8, head_dim=64, sliding_window=None,
+            )]
+
+        def linear_attention_group(self):
+            return None
+
+    class StubConfig:
+        dtype = torch.float16
+        page_size = 16
+        max_running_req = 4
+        hybrid_swa_cache_mode = "auto"
+        memory_ratio = 0.9
+        moe_cache_auto = True
+        use_dummy_weight = False
+        model_path = path
+        moe_prefill_overlap = True
+        moe_strategy = "offload"
+        moe_cpu_layers = None
+        expert_load = "auto"
+        swa_full_tokens_ratio = 0.2
+        swa_num_pages_override = None
+        model_config = StubModelConfig()
+
+        class tp_info:
+            size = 1
+
+    StubConfig.kv_reserve_tokens = kv_reserve_tokens  # class bodies cannot close over locals
+
+    engine = Engine.__new__(Engine)  # bypass __init__/GPU
+    engine._baseline_free = 100_000_000
+    engine._weights_bytes = 1_000_000
+    engine._pool_cls = MHAKVCache
+    return engine, StubConfig()
+
+
+def test_moe_auto_floor_gate_fails_fast_before_bank_load(tmp_path):
+    # the 1M-reserve profile: the auto envelope (12 layer-0-width slots) cannot fund
+    # the 3 signature groups' 4-slot floors (byte-weighted minimum 14), so the gate
+    # must reject at planning time - BEFORE load_expert_banks reads the banks - and
+    # name the honest numbers (groups, per-group floors, weighted need, envelope)
+    # plus the remedy.
+    from freetoken.engine.engine import Engine
+
+    path = _write_triple_sig_gguf(tmp_path / "triple.gguf")
+    engine, config = _gate_engine_and_config(path, kv_reserve_tokens=14_080)  # envelope 14
+    with pytest.raises(ValueError, match=(
+        r"3 signature groups \(5/1/2 layers.*each need 4 slots.*"
+        r"at 169984/246784/207872 bytes/slot.*"
+        r"byte-weighted minimum of 15 layer-0-width slots vs the planned 14.*"
+        r"lower --kv-reserve-tokens or raise --memory-ratio"
+    )):
+        Engine._gguf_auto_floor_gate(config, None, engine._resolve_auto_moe_cache_size)
+
+
+def test_moe_auto_floor_gate_boundary_envelope_passes(tmp_path):
+    # envelope exactly == the weighted floor need (15 == 15): the early gate must
+    # stay silent AND the late split must accept the plan (the floor set is exactly
+    # byte-feasible, zero slack).
+    from freetoken.engine.engine import Engine
+
+    path = _write_triple_sig_gguf(tmp_path / "triple.gguf")
+    engine, config = _gate_engine_and_config(path, kv_reserve_tokens=14_048)  # envelope 15
+    Engine._gguf_auto_floor_gate(config, None, engine._resolve_auto_moe_cache_size)  # no raise
+
+    ns = SimpleNamespace(sources=_bank_like_sources(path))
+    groups = Engine._group_bank_layers(ns, 8)
+    sizes = Engine._split_moe_cache_budget(ns, groups, 15, 4, byte_cap_slots=15)
+    assert all(s >= 4 for s in sizes)
+    assert sum(s * b for s, b in zip(sizes, _TRIPLE_GROUP_SLOT_BYTES)) <= 15 * _TRIPLE_GROUP_SLOT_BYTES[0]
+
+
+def test_moe_auto_floor_gate_fitting_profile_unaffected(tmp_path):
+    # the 786k-reserve profile analog: envelope 16 funds the 15-slot floor need with
+    # one slot of headroom - the gate stays silent and the downstream split resolves
+    # the very numbers the late check produces (dominant group shrunk just above its
+    # floor, minority groups pinned at it), with no new exceptions.
+    from freetoken.engine.cache_budget import expert_bytes_per_slot
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.expert_banks import gguf_signature_groups
+
+    path = _write_triple_sig_gguf(tmp_path / "triple.gguf")
+    engine, config = _gate_engine_and_config(path, kv_reserve_tokens=14_016)  # envelope 16
+    Engine._gguf_auto_floor_gate(config, None, engine._resolve_auto_moe_cache_size)  # no raise
+
+    # exactness bridge: the header-only scan's grouping and per-group slot widths
+    # match what _group_bank_layers / expert_bytes_per_slot see on the loaded-bank
+    # shapes (uint8 (E, rows_per_expert, rb), the loader's layout)
+    scan_groups, scan_slots = gguf_signature_groups(str(path), config.model_config)
+    ns = SimpleNamespace(sources=_bank_like_sources(path))
+    groups = Engine._group_bank_layers(ns, 8)
+    assert scan_groups == groups == [[0, 1, 2, 3, 4], [5], [6, 7]]
+    assert scan_slots == [
+        expert_bytes_per_slot({n: [ns.sources[n][l] for l in m] for n in ns.sources}) for m in groups
+    ]
+
+    sizes = Engine._split_moe_cache_budget(ns, groups, 16, 4, byte_cap_slots=16)
+    assert sizes == [5, 4, 4]
+
+
+def test_gguf_signature_groups_match_loaded_banks(tmp_path):
+    # exactness bridge on a file the full load path accepts (metadata intact): the
+    # header-only scan's grouping and per-group slot widths equal what
+    # _group_bank_layers and expert_bytes_per_slot see on the materialized banks
+    from freetoken.engine.cache_budget import expert_bytes_per_slot
+    from freetoken.engine.engine import Engine
+    from freetoken.models.weight import load_gguf_moe_expert_sources
+    from freetoken.moe.expert_banks import gguf_signature_groups
+
+    path = _write_iter_gguf(tmp_path / "banks.gguf")
+    cfg = _bank_cfg()
+    scan_groups, scan_slots = gguf_signature_groups(str(path), cfg)
+    banks, _ = load_gguf_moe_expert_sources(str(path), cfg)
+    ns = SimpleNamespace(sources=banks)
+    groups = Engine._group_bank_layers(ns, cfg.num_moe_layers)
+    assert scan_groups == groups == [[0, 1]]
+    assert scan_slots == [
+        expert_bytes_per_slot({n: [banks[n][l] for l in m] for n in banks}) for m in groups
+    ]
+
+
+def _bank_like_sources(path, num_experts=4):
+    # the uint8 (E, rows_per_expert, rb) shapes load_gguf_expert_sources materializes
+    import torch
+
+    from freetoken.models.gguf.reader import iter_gguf_tensors
+
+    per = {"gate": [], "up": [], "down": []}
+    for t in iter_gguf_tensors(str(path)):
+        for suffix, role in (
+            ("ffn_gate_exps.weight", "gate"), ("ffn_up_exps.weight", "up"),
+            ("ffn_down_exps.weight", "down"),
+        ):
+            if t.name.endswith(suffix):
+                per[role].append(
+                    torch.zeros(num_experts, t.rows // num_experts, t.row_bytes, dtype=torch.uint8)
+                )
+                break
+    return per
+
+
+def test_init_offload_runs_floor_gate_before_bank_load(tmp_path, monkeypatch):
+    # pins the gate's POSITION inside _init_offload_moe_cache: an unfundable floor
+    # set must raise before load_expert_banks reads the banks, not after - a
+    # reordering that moved the call site must fail here
+    import freetoken.engine.engine as engine_mod
+
+    path = _write_triple_sig_gguf(tmp_path / "triple.gguf")
+    engine, config = _gate_engine_and_config(path, kv_reserve_tokens=14_080)  # envelope 14 < need 15
+    engine.model = object()  # shared_offload_method is patched out below
+    engine._host_tables_bytes = 0
+    loaded = {"called": False}
+
+    def _sentinel(*args, **kwargs):
+        loaded["called"] = True
+        raise AssertionError("load_expert_banks ran before the floor gate")
+
+    monkeypatch.setattr(engine_mod, "shared_offload_method", lambda model: None)
+    monkeypatch.setattr(engine_mod, "load_expert_banks", _sentinel)
+    with pytest.raises(ValueError, match="byte-weighted minimum of 15"):
+        engine._init_offload_moe_cache(config)
+    assert loaded["called"] is False
+
+
+def test_moe_auto_floor_gate_silent_for_non_gguf(tmp_path):
+    # the gate only answers for the gguf provider on a bare .gguf: a non-gguf expert
+    # format must pass silently even over a .gguf path (killer envelope 14 < need 15),
+    # and a gguf format must pass silently over a non-.gguf path (FTW-like layout)
+    from freetoken.engine.engine import Engine
+
+    path = _write_triple_sig_gguf(tmp_path / "triple.gguf")
+    engine, config = _gate_engine_and_config(path, kv_reserve_tokens=14_080)
+    config.model_config.moe_weight_format = None  # non-gguf expert path (marlin/awq-style)
+    Engine._gguf_auto_floor_gate(config, None, engine._resolve_auto_moe_cache_size)  # no raise
+
+    ftw_engine, ftw_config = _gate_engine_and_config(str(tmp_path / "ckpt"), kv_reserve_tokens=14_080)
+    Engine._gguf_auto_floor_gate(ftw_config, None, ftw_engine._resolve_auto_moe_cache_size)  # no raise
