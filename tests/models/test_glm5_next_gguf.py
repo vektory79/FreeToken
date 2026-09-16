@@ -245,6 +245,25 @@ def test_registry_resolves_the_glm5next_gguf_spec():
     assert iter_gguf_weights is gguf_module.iter_gguf_weights
 
 
+def test_engine_model_config_resolves_over_the_frozen_shim(glm5next_gguf):
+    # model_config clears the unbuilt encoder sections on a copy of hf_config; for
+    # GGUF that copy is the frozen GgufConfigShim, whose generated __setattr__
+    # raises FrozenInstanceError on ANY assignment - every ft serve *.gguf died here.
+    from freetoken.distributed import DistributedInfo
+    from freetoken.engine.config import EngineConfig
+
+    cfg = EngineConfig(
+        model_path=glm5next_gguf, tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16
+    )
+    model_config = cfg.model_config
+    assert model_config.architectures == ["Glm5NextGGUFForCausalLM"]
+    # the shim itself stays untouched: no phantom sections, metadata intact
+    shim = cfg.hf_config
+    assert not hasattr(shim, "vision_config") and not hasattr(shim, "audio_config")
+    assert shim.vocab_size == _VOCAB and shim.tie_word_embeddings is True
+    assert shim.metadata["glm5next.block_count"] == 46
+
+
 def test_iter_gguf_weights_rejects_expert_inclusion():
     # routed experts only serve from the offload cache (same contract as the HF reader);
     # the iterator is a generator, so the guard fires on first next() like weight.py's

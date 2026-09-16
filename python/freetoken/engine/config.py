@@ -137,7 +137,10 @@ class EngineConfig:
         hf_config = copy.copy(self.hf_config)
         built = {e.config_key for e in self.active_encoders}
         for key in set(ENCODER_SECTIONS) | {e.config_key for e in self.model_spec.encoders}:
-            if key not in built:
+            # GGUF's frozen GgufConfigShim carries no encoder sections and raises
+            # FrozenInstanceError on any setattr; sections the config never had
+            # already read as None through getattr's default downstream.
+            if key not in built and hasattr(hf_config, key):
                 setattr(hf_config, key, None)
         spec = self.model_spec
         quant = checkpoint_quant_config(self.model_path, hf_config, spec)

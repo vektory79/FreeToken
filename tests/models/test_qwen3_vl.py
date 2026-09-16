@@ -107,6 +107,28 @@ def test_a_family_without_registered_encoders_is_served_text_only(monkeypatch):
     assert not c.active_encoders and not c.served_modalities and not c.model_config.is_multimodal
 
 
+def test_unbuilt_encoder_sections_are_nulled_only_where_they_exist(monkeypatch):
+    # model_config clears the unbuilt encoder sections on a COPY of the config; pin
+    # the exact writes: the built tower's section survives, only the others are set
+    # to None, and the cached checkpoint config object itself is left alone.
+    calls = []
+
+    class _Recording(SimpleNamespace):
+        def __setattr__(self, name, value):
+            calls.append(name)
+            super().__setattr__(name, value)
+
+    hf = _hf_config()
+    hf.audio_config = SimpleNamespace(hidden_size=8)
+    recorded = _Recording(**vars(hf))
+    calls.clear()  # drop the constructor's own writes; watch only model_config
+    c = _engine_config(monkeypatch, recorded, object())
+    assert [e.kind for e in c.active_encoders] == ["vision"]
+    assert c.model_config.is_multimodal
+    assert calls == ["audio_config"]
+    assert recorded.vision_config is not None and recorded.audio_config is not None
+
+
 def test_tower_roots_make_the_fp8_ignore_list_match():
     from freetoken.layers.quantization import NameMap, QuantConfig
     from freetoken.models.register import get_model_spec
