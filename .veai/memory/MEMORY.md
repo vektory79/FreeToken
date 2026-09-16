@@ -16,10 +16,13 @@
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-90784dc7d0a9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-029031181f9f.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 1M break was transient
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-e4232bb48315.md) — Self-sufficient Orchestrator skill: 7 GGUF phases, 38 traps, ORCHESTRATION.md; used-by Orchestrator; .veai/skills only
-- [git-integration-preferences](git-integration-preferences-761015c71440.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
 - [vektory79-main-rewrite-gotcha](vektory79-main-rewrite-gotcha-44d497ec530c.md) — vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-943a3bdf3964.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails (python -m green), pgrep census match
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-78dd276b7ddd.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
 - [process-hygiene-protocol](process-hygiene-protocol-ea279db69539.md) — Test-wave hygiene: census, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs; cross-wave GPU OOM = Environment
 - [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-08c4102d02ca.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate
+- [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-7b70b4071ae8.md) — Skill merge-main-into-vektory79 (.veai/skills): merge origin/main into vektory79; duplicates->main; boot-smoke
+- [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
+- [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-bfc2e865360a.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
+- [git-integration-preferences](git-integration-preferences-8f8abb82eaac.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase

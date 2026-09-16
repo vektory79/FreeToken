@@ -3,7 +3,7 @@ name: "ft-gguf-nvfp4-1m-capacity-frozen-shim"
 description: "GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate"
 type: project
 lastUpdated: 2026-09-16T18:14
-lastRecall: 2026-09-16T17:11
+lastRecall: 2026-09-16T18:34
 ---
 
 # GGUF glm5next serve: 1M nvfp4 KV capacity + frozen-shim crash lesson (2026-09-15)

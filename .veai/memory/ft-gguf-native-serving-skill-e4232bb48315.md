@@ -3,7 +3,7 @@ name: "ft-gguf-native-serving-skill"
 description: "Self-sufficient Orchestrator skill: 7 GGUF phases, 38 traps, ORCHESTRATION.md; used-by Orchestrator; .veai/skills only"
 type: project
 lastUpdated: 2026-09-15T21:35
-lastRecall: 2026-09-16T17:52
+lastRecall: 2026-09-16T19:28
 ---
 
 # GGUF native serving skill: reusable methodology for any model family
