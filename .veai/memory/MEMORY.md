@@ -22,4 +22,4 @@
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-78dd276b7ddd.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
 - [process-hygiene-protocol](process-hygiene-protocol-ea279db69539.md) — Test-wave hygiene: census, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs; cross-wave GPU OOM = Environment
-- [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-28ff604b5543.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate
+- [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-08c4102d02ca.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate

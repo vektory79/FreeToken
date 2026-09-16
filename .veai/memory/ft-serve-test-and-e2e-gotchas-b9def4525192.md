@@ -3,7 +3,7 @@ name: "ft-serve-test-and-e2e-gotchas"
 description: "FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness"
 type: project
 lastUpdated: 2026-09-12T23:41
-lastRecall: 2026-09-16T15:22
+lastRecall: 2026-09-16T17:59
 ---
 
 # FreeToken test/e2e environment gotchas

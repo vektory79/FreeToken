@@ -2,7 +2,7 @@
 name: "ft-gguf-nvfp4-1m-capacity-frozen-shim"
 description: "GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate"
 type: project
-lastUpdated: 2026-09-16T17:12
+lastUpdated: 2026-09-16T18:14
 lastRecall: 2026-09-16T17:11
 ---
 
@@ -34,3 +34,7 @@ Debugging the user's 1M command on vektory79 post-merge f786d7c. Artifacts: .tas
 - PASS: 226k and 517k prompt_tokens fills (HTTP 200, ~251-254 tok/s prefill). FAIL: OOM at ~678k filled (86% of the 788,160-token pool): torch.OutOfMemoryError "Tried to allocate 336.00 MiB ... 371.12 MiB is free" in attention/dsv4_indexer.py:72 (kpool-select scores [1,4096,k_sel] grow linearly with depth) via dsa_indexer_kpool.py:276. Free-VRAM trajectory: 2845 -> 681 (226k) -> 99 (517k) -> OOM MiB. None of our diffs are in that path - capacity property, not a regression.
 - Full-pool fill does NOT fit at reserve 786432; 517k+ leaves only 99 MiB (decode-time transients razor-thin). Practical deep-fill lever: a SMALLER reserve frees headroom the indexer consumes (e.g. 524288 -> ~0.87 GiB more headroom; proposed, NOT hardware-verified). Gate stayed silent on hardware at boot (slots 1071 vs 1069 - benign ~10 MiB baseline drift).
 - Artifacts: verification-deepfills.md in .tasks/ft-serve-gguf-nvfp4-1m-crash-work/ (full traceback, depth table).
+
+## Merge round 2 (2026-09-15, user request "origin/master" = actually origin/main cac247a)
+- origin/master does NOT exist; the real target was origin/main. cade1a9 (FTW vision-encoder #486, 23 files) + cac247a (release 0.1.3). Merged as 5d93a30 "Merge branch 'main' into vektory79" (parents 8c0f1e7 [user's .veai Memory commit], cac247a). ZERO conflicts (ort auto-merged engine.py, glm5_next/__init__.py, weight.py); 0 duplicates, "main wins" not needed. Semantic check: main's load_weight keep-filter rewrite stays inside load_weight (FTW/per-family); load_gguf_moe_expert_sources untouched and structurally independent. 346 passed / 0 failed targeted + boot smoke /ready 91s, clean shutdown. Artifacts: .tasks/merge-main-round2-work/.
+- BOOT-NUMBERS ARE ENVELOPE-DEPENDENT: post-merge boot gave moe_cache_size=1091, slots [320,288,288], KV 789120 tok / 2.88 GiB, free-after-init 2.90 GiB vs the older reference 1071/[298,288,288]/788160/2.86 - all drifted from ~250 MiB more baseline-free VRAM at start. When comparing boots, the invariants are: slot gate SILENT on feasible configs, slots >= working set 336 total, more free = safer; absolute slot/page numbers move with start-free VRAM and version.

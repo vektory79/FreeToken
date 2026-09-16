@@ -3,7 +3,7 @@ name: "cuda-debug-tool-strategy"
 description: "CUDA debug strategy: CUDA_LAUNCH_BLOCKING first, compute-sanitizer second, python instrumentation fallback"
 type: project
 lastUpdated: 2026-09-15T19:12
-lastRecall: 2026-09-15T19:57
+lastRecall: 2026-09-16T17:52
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation
