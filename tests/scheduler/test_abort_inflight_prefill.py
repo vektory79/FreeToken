@@ -123,6 +123,10 @@ def test_abort_inflight_final_chunk_marks_then_drains():
     assert pool.num_free_slots > free_after_mark
     assert req in stub.finished_reqs
     assert sent == []                           # no DetokenizeMsg: abort ack stays terminal
+    match_ids = torch.cat([req.input_ids[:8], torch.tensor([99], dtype=torch.int32)])
+    mr = cm.match_req(SimpleNamespace(input_ids=match_ids, input_len=match_ids.numel()))
+    assert mr.cuda_handle.cached_len == 8       # the frozen donate of the carried L fired at drain
+    assert mr.mamba_value is not None
     cm.check_integrity()
 
 
@@ -192,11 +196,46 @@ def test_prefix_commit_sentinel_guard():
     assert [m.uid for m in sent] == [UID]  # un-marked path still publishes the token
 
 
-if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"{name}: PASS")
+def test_final_prefill_commit_clears_track_seqlen_and_donates():
+    """The finished=False prefill commit at the drain (scheduler.py:398) must consume and
+    clear the req's mamba_last_track_seqlen: snapshot_toolcall_anchor only fires when the
+    mark is None at decode entry, so a leftover L would silently disable tool-call
+    anchors. With L page-aligned and the ping-pong pair present, the chunk-commit
+    donation must also land (frozen snapshot reusable at prefix L). Drives the real
+    _process_last_data drain on the final-chunk state (plain Req in running_reqs);
+    chunk admission itself is not needed to reach the commit. L=8 is a scaled stand-in,
+    not a tracker-producible boundary: the tracker emits cached_len + k*64
+    (linear.py:120-127)."""
+    pool, cm, tm, dm, _pm, sent, stub = _setup()
+    req = _launch_req(pool, cm, tm, torch.arange(1, 13, dtype=torch.int32),
+                      track_seqlen=8)
+    frozen = req.mamba_ping_pong[0]     # mamba_next_track_idx==1 -> the forward wrote pp[0]
+    batch = Batch(reqs=[req], phase="prefill")
+    dm.filter_reqs(batch.reqs)          # final-chunk state: plain Req in running_reqs
+
+    free_before = pool.num_free_slots
+    Scheduler._process_last_data(stub, _as_last_data(batch))
+
+    assert req.mamba_last_track_seqlen is None, \
+        "final prefill commit must clear the pending x64 track mark before decode"
+    assert req.table_idx != -1 and req not in stub.finished_reqs  # finished=False path ran
+    assert [m.finished for m in sent] == [False]
+    # slot conservation: the donated frozen slot is tree-owned and replaced in the pair
+    assert pool.num_free_slots == free_before - 1
+    assert req.mamba_ping_pong[0] != frozen
+    match_ids = torch.cat([req.input_ids[:8], torch.tensor([99], dtype=torch.int32)])
+    mr = cm.match_req(SimpleNamespace(input_ids=match_ids, input_len=match_ids.numel()))
+    assert mr.cuda_handle.cached_len == 8
+    assert mr.mamba_value == frozen
+    # KV-page conservation for the still-running req: the 8 committed pages are
+    # tree-owned (the req's row aliases them); its cached_len-8 tail pages stay
+    # req-exclusive. check_integrity is idle-only accounting, so assert the exact count.
+    assert len(cm.free_slots) + 8 + (req.cached_len - 8) == cm.num_pages
+    # RA1: the donated node must be lock-protected (cache.py:408 inc_lock), or evict_mamba
+    # (candidate filter mamba_ref_count == 0) could reclaim it under the still-running req.
+    assert cm.prefix_cache.full_protected == 8
+    assert mr.cuda_handle.node.mamba_ref_count >= 1
+    cm.prefix_cache.check_integrity()   # structural only: cm.check_integrity() sees tail pages
 
 
 def test_post_terminal_overlap_step_is_dropped():
@@ -222,3 +261,10 @@ def test_post_terminal_overlap_step_is_dropped():
     assert [m for m in sent if isinstance(m, DetokenizeMsg)] == terminal  # no 2nd msg
     assert req.output_len == output_len_before                           # no append
     cm.check_integrity()
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"{name}: PASS")

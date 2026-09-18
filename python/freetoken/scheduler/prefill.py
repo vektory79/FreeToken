@@ -142,6 +142,7 @@ class PrefillAdder:
         next_track_idx: int = 0,
         restore_src: int | None = None,
         swa_evicted_seqlen: int = 0,
+        mamba_last_track_seqlen: int | None = None,
     ) -> Req | None:
         remain_len = pending_req.input_len - cached_len
         chunk_size = min(self.token_budget, remain_len)
@@ -225,6 +226,7 @@ class PrefillAdder:
         req.mamba_next_track_idx = next_track_idx
         req.mamba_restore_src = restore_src
         req.swa_evicted_seqlen = swa_evicted_seqlen  # carry the extend-free watermark across chunks
+        req.mamba_last_track_seqlen = mamba_last_track_seqlen
         return req
 
     def try_add_one(self, pending_req: PendingReq) -> Req | None:
@@ -242,6 +244,7 @@ class PrefillAdder:
                 next_track_idx=chunked_req.mamba_next_track_idx,
                 restore_src=None,  # continuation chunk already has live state
                 swa_evicted_seqlen=chunked_req.swa_evicted_seqlen,  # extend-free watermark so far
+                mamba_last_track_seqlen=chunked_req.mamba_last_track_seqlen,
             )
 
         if resource := self._try_allocate_one(pending_req):
