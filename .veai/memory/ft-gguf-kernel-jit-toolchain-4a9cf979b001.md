@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-kernel-jit-toolchain"
-description: gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3; CC/CXX scoped to build since 1635ecd
+description: "gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args"
 type: project
-lastUpdated: 2026-09-15T01:48
-lastRecall: 2026-09-15T19:57
+lastUpdated: 2026-09-17T18:21
+lastRecall: 2026-09-17T22:09
 ---
 
 # gguf CUDA kernel JIT toolchain on vektory79: clang++ host required
@@ -16,3 +16,6 @@ Verified 2026-09-13 (Phase 4 of the glm5next GGUF plan); UPDATED 2026-09-15 (hyb
 - WHY IT MATTERED (silent cross-module JIT pollution): the permanent CC/CXX=clang leak made any LATER flashinfer JIT build in the same process regenerate build.ninja with the clang host and fail (`alignas(64)` below CUtensorMap's default under CUDA 13.3) - reproducible on HEAD by running any gguf-kernel test before tests/moe/test_nvfp4_backends.py. Lesson: any JIT helper that mutates process env must scope the mutation to its own build call; test-ordering flakes that only appear when a gguf test runs earlier in the process are a red flag for exactly this class.
 - No non-JIT path for the gguf extension: root setup.py builds only _pinned_tensor/_cpu_moe/_ple_store; the torch JIT cache is keyed on source+flags hash; the freetoken-kernel-cache wheel is TVM-FFI-only with ZERO gguf coverage.
 - The clang++ requirement is documented in docs/install.md (prior campaign); the flashinfer interplay was undocumented until the 1635ecd fix.
+
+- v0 sort change (2026-09-17, uncommitted on vektory79): adding an OPTIONAL tensor arg to the JIT extension requires `std::optional<torch::Tensor>` in the pybind signature - torch's Tensor caster REJECTS None (verified on torch 2.11.0+cu130). Keep the python wrapper default (`order: torch.Tensor | None = None`) so older positional callers (fused_q4_0's 7-arg call) keep working. ggml_moe_a8_vec threads the param through all 19 moe_vec launcher templates - count them on any signature change (mechanical edits are where copy-paste errors hide).
+- moe_vec perm design: moe_vec_q takes `const int* order` (pair = order ? order[blockIdx.z] : blockIdx.z) and writes dst[pair*nrows+row], so the kernel itself inverts the expert-sorted order and outputs stay pair-major with NO python scatter; the same order works unchanged for the down call (top_k=1 -> token==pair indexes the interleaved rows). Lifetime nuance the review caught: a local named tensor in the host fn (order_buf) outlives the LAUNCH (enqueue), not the EXECUTION - safety past the async launch comes from torch's same-stream caching allocator (freed block reusable only on its allocation stream). Never generalize the pattern to cross-stream use without record_stream; word the comment accordingly.

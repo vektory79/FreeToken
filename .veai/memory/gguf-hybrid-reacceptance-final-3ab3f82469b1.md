@@ -1,9 +1,9 @@
 ---
 name: "gguf-hybrid-reacceptance-final"
-description: "GGUF glm5next hybrid FINAL: re-acceptance 16.67 tok/s vs offload 12.97 - hybrid RECOMMENDED; 9 commits through 63b9bff"
+description: "GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff"
 type: project
-lastUpdated: 2026-09-15T18:18
-lastRecall: 2026-09-16T18:34
+lastUpdated: 2026-09-16T20:16
+lastRecall: 2026-09-18T18:31
 ---
 
 # GGUF glm5next hybrid: FINAL re-acceptance - hybrid RECOMMENDED
@@ -19,9 +19,9 @@ All three gates PASS; hybrid is now the RECOMMENDED strategy for GLM-5.3-Flash-U
 ## Verified mechanism
 Offload is PCIe-bound: all 5.05 misses/layer cross PCIe = 2.14 GiB/step at 28.4 GB/s effective. Hybrid: f=30.7% auto (not cap-1), fetched 1.33/layer (~573 MB/step), CPU leg 3.72/layer (~1.61 GB/step at 26.9 GB/s effective, 19.9/20 cores), pools [15,1,1], isa avx2-w4a8k, plan 1234 slots (463/288/288). NVFP4 sanity: user's 1M command booted, f=24.8%, short decode 15.18 (profile restoration confirmed).
 
-## Commit chain (9 + 1)
-5a04423 (CPU GEMV per-projection) -> bd02232 (fix wave) -> 427a431 (negative tests) -> 2169baa (benchbw leg) -> aad5d3a (per-cache executors) -> f6b94ad + ef83ee8 (engine gate) -> eb7de4c (hardening) -> 63b9bff (cap-down + wrap guard + profile restore) -> 1635ecd (CC/CXX JIT leak). Campaign history in the ft-serve-gguf-glm5next-unsupported memory; plan artifacts in .tasks/gguf-glm5next-hybrid/.
+## Commit chain
+Full chain (11 hybrid commits + 1635ecd, incl. 11f1a80 ggml AVX2 W4A8-K tier and 979e3fc weighted pool split [15,1,1]) lives in ft-serve-gguf-glm5next-campaign - single copy kept there. Re-acceptance verified HEAD 63b9bff with no code changes; plan artifacts in .tasks/gguf-glm5next-hybrid/.
 
 ## Optional leftovers (not blocking)
 - Vendored kernel/csrc/gguf/*.cuh lack MIT attribution headers (gap noted by the kernel study).
-- benchbw profile has no kernel-tier fingerprint (pre-port profile silently consumed; doc note only).
+- benchbw profile has no kernel-tier fingerprint (pre-port profile silently consumed; doc note only) - expanded in benchbw-profile-clobber-trap.

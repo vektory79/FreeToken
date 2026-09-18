@@ -6,13 +6,10 @@
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-fb58a59761d2.md) — GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s
 - [lean-subagent-context](lean-subagent-context-b42997304646.md) — Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)
 - [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-7a85eb5d2682.md) — Synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets; analytic uniform fixtures catch what parity cannot
-- [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-67df3b73da55.md) — gguf CUDA kernel JIT needs clang++ host (kernel/gguf.py); nvcc 13.3; CC/CXX scoped to build since 1635ecd
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-35ff08215256.md) — ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions
 - [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-e072d0274c3d.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
 - [benchbw-profile-clobber-trap](benchbw-profile-clobber-trap-6b9f0d04e5e9.md) — benchbw writes the FULL per-GPU profile per run: single-dtype run clobbers other formats' fractions; no TTL/fingerprint
 - [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-d98055871b80.md) — GGUF hybrid per-layer cost = fetch volume + 0.6-1.0 ms sync; hardware-validated 1.43 ms/layer at 16.67 tok/s
-- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-39843d88ac42.md) — GGUF glm5next hybrid FINAL: re-acceptance 16.67 tok/s vs offload 12.97 - hybrid RECOMMENDED; 9 commits through 63b9bff
-- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-dec30f16a02e.md) — CUDA debug strategy: CUDA_LAUNCH_BLOCKING first, compute-sanitizer second, python instrumentation fallback
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-90784dc7d0a9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-029031181f9f.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 1M break was transient
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-e4232bb48315.md) — Self-sufficient Orchestrator skill: 7 GGUF phases, 38 traps, ORCHESTRATION.md; used-by Orchestrator; .veai/skills only
@@ -26,3 +23,11 @@
 - [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-bfc2e865360a.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
 - [git-integration-preferences](git-integration-preferences-8f8abb82eaac.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
+- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-3ab3f82469b1.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
+- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-426144b5f4b1.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys interactive session for live ft serve
+- [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
+- [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
+- [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-644461f37544.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
+- [ft-bare-logger-liveness-trap](ft-bare-logger-liveness-trap-6399769cb81b.md) — Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)
+- [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-6d6a7d0de8dd.md) — GGUF prefill MMQ roofline; v0 no-op; v2 grouped MMQ +16.4% measured; ceiling unmet, m-block re-reads; iq shim
+- [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-2fe8a7978c23.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 task pointer

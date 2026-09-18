@@ -3,7 +3,7 @@ name: "benchbw-profile-clobber-trap"
 description: "benchbw writes the FULL per-GPU profile per run: single-dtype run clobbers other formats' fractions; no TTL/fingerprint"
 type: project
 lastUpdated: 2026-09-15T17:28
-lastRecall: 2026-09-15T19:57
+lastRecall: 2026-09-16T20:14
 ---
 
 # benchbw profile clobber: single-dtype rerun drops other formats' fractions

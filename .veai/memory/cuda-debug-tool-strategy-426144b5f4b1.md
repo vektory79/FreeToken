@@ -1,9 +1,9 @@
 ---
 name: "cuda-debug-tool-strategy"
-description: "CUDA debug strategy: CUDA_LAUNCH_BLOCKING first, compute-sanitizer second, python instrumentation fallback"
+description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys interactive session for live ft serve"
 type: project
-lastUpdated: 2026-09-15T19:12
-lastRecall: 2026-09-16T17:52
+lastUpdated: 2026-09-17T18:21
+lastRecall: 2026-09-17T18:20
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation
@@ -43,3 +43,8 @@ before switching to launch blocking.
 **How to apply:** any new CUDA IMA/illegal-address during serving bring-up: bisect with
 CUDA_LAUNCH_BLOCKING first, escalate to compute-sanitizer only if the named kernel is not
 enough, reserve python instrumentation for wrapper-blocked cases.
+
+## Profiling (not debugging) a live serve: nsys interactive session (2026-09-17, Step-0 wave)
+- Zero-code-change profiling of `ft serve`: `nsys launch --session=NAME --trace=cuda .venv/bin/ft ...`, then `nsys start --session=NAME --sample=none` and `nsys stop --session=NAME` around a steady window anchored on server "input throughput" lines; analyze via `nsys export --type sqlite` (per-kernel sums grouped by short-name per chunk). Measured overhead was nil (chunks inside vs outside the window identical).
+- CLI traps: `nsys launch` REJECTS `-o` and `--sample` (both belong on `nsys start`); failed iterations leave leftover .nsys-rep files in CWD (repo root) - clean them up.
+- Launch-count cross-checks validate the capture window: gguf moe path = moe_vec_q 126/chunk (42 layers x gate/up/down) and fast_index_copy_multi 42/chunk.

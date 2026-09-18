@@ -3,7 +3,7 @@ name: "ft-pytest-worktree-baseline-gotchas"
 description: "FreeToken pytest: uv worktree editable trap, import-mode baseline fails (python -m green), pgrep census match"
 type: project
 lastUpdated: 2026-09-15T23:32
-lastRecall: 2026-09-16T18:34
+lastRecall: 2026-09-18T20:43
 ---
 
 # FreeToken pytest/worktree gotchas (merge wave 2026-09-15)
