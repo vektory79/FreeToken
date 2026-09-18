@@ -2,6 +2,7 @@
 // https://github.com/vllm-project/vllm/blob/4492e3a55428e161ca8db381edc28263e5da4c8d/csrc/quantization/gguf/vecdotq.cuh
 // copied and adapted from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-cuda/vecdotq.cuh
 // and https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-cuda/mmq.cu
+// vLLM source: Apache-2.0, (c) The vLLM authors; llama.cpp source: MIT, (c) The ggml authors
 static __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
   const uint16_t* x16 = (const uint16_t*)x;  // assume at least 2 byte alignment
 
@@ -2034,4 +2035,259 @@ vec_dot_iq4_xs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__
   }
   return d * (sumi1 + sumi2);
 #endif
+}
+
+// ---- iq3_xxs / iq4_xs MMQ tile glue (dense mul_mat_a8 + grouped moe_a8, types 18/23) ----
+// Vendored from vllm-project/vllm PR #36226 (Apache-2.0, (c) The vLLM authors),
+// https://github.com/vllm-project/vllm/pull/36226, which ports the iq3_xxs/iq4_xs
+// MMQ tile math of llama.cpp ggml/src/ggml-cuda/mmq.cuh @ 4696d5674
+// (MIT, (c) The ggml authors) onto this pre-dedup tile plugin interface.
+// Unlike the upstream loaders (which pre-decode grid LUTs into the tile), these
+// keep the RAW block bytes in tile_x_ql and decode inside vec_dot: the vendored
+// engine hands a loader only WARP_SIZE_GGUF int slots per tile row, which fits
+// one QK_K block of raw bytes but not its decoded 4-bytes-per-quant form.
+
+// The vendored MMVQ constants (QR4_XS=8, QI4_XS=8) spread one QK_K block over 8
+// load calls; the engine refills the tile every WARP_SIZE_GGUF/qi blocks, so MMQ
+// needs exactly one block per call: QR=2 -> QI=QK_K/(4*QR)=32 -> blocks_per_warp=1.
+#define QR_IQ4_XS_MMQ 2
+#define QI_IQ4_XS_MMQ (QK_K / (4 * QR_IQ4_XS_MMQ))
+#define VDR_IQ4_XS_Q8_1_MMQ 4
+
+template <int mmq_y>
+static __device__ __forceinline__ void allocate_tiles_iq4_xs(int** x_ql, half2** x_dm, int** x_qh, int** x_sc) {
+  __shared__ int tile_x_ql[mmq_y * (WARP_SIZE_GGUF) + mmq_y];
+  __shared__ float tile_x_d[mmq_y * (WARP_SIZE_GGUF / QI_IQ4_XS_MMQ) + mmq_y / QI_IQ4_XS_MMQ];
+  __shared__ int tile_x_sc[mmq_y * (WARP_SIZE_GGUF / 8) + mmq_y / 8];
+
+  *x_ql = tile_x_ql;
+  *x_dm = (half2*)tile_x_d;
+  *x_sc = tile_x_sc;
+}
+
+template <int mmq_y, int nwarps, bool need_check>
+static __device__ __forceinline__ void load_tiles_iq4_xs(
+    const void* __restrict__ vx,
+    int* __restrict__ x_ql,
+    half2* __restrict__ x_dm,
+    int* __restrict__ x_qh,
+    int* __restrict__ x_sc,
+    const int& i_offset,
+    const int& i_max,
+    const int& k,
+    const int& blocks_per_row) {
+  (void)x_qh;
+
+  const int kbx = k / QI_IQ4_XS_MMQ;   // == 0: one block per load call
+  const int kqsx = k % QI_IQ4_XS_MMQ;  // == k
+
+  const block_iq4_xs* bx0 = (const block_iq4_xs*)vx;
+  float* x_dmf = (float*)x_dm;
+
+  // packed nibbles: 128 bytes = 32 int slots per block
+#pragma unroll
+  for (int i0 = 0; i0 < mmq_y; i0 += nwarps) {
+    int i = i0 + i_offset;
+
+    if (need_check) {
+      i = min(i, i_max);
+    }
+    const block_iq4_xs* bxi = bx0 + i * blocks_per_row + kbx;
+    x_ql[i * (WARP_SIZE_GGUF + 1) + k] = get_int_from_uint8_aligned(bxi->qs, kqsx);
+  }
+
+  // super-block d, one float per row
+  const int blocks_per_tile_x_row = WARP_SIZE_GGUF / QI_IQ4_XS_MMQ;  // == 1
+  const int kbxd = k % blocks_per_tile_x_row;                        // == 0
+
+#pragma unroll
+  for (int i0 = 0; i0 < mmq_y; i0 += nwarps * QI_IQ4_XS_MMQ) {
+    int i = (i0 + i_offset * QI_IQ4_XS_MMQ + k / blocks_per_tile_x_row) % mmq_y;
+    if (need_check) {
+      i = min(i, i_max);
+    }
+    const block_iq4_xs* bxi = bx0 + i * blocks_per_row + kbxd;
+    x_dmf[i * (WARP_SIZE_GGUF / QI_IQ4_XS_MMQ) + i / QI_IQ4_XS_MMQ + kbxd] = __half2float(bxi->d);
+  }
+
+  // 8 sub-block scales decoded to (ls - 32) int8, packed 4 per int slot
+#pragma unroll
+  for (int i0 = 0; i0 < mmq_y; i0 += nwarps * 8) {
+    int i = (i0 + i_offset * 8 + k / (WARP_SIZE_GGUF / 8)) % mmq_y;
+    if (need_check) {
+      i = min(i, i_max);
+    }
+    const block_iq4_xs* bxi = bx0 + i * blocks_per_row + (k % (WARP_SIZE_GGUF / 8)) / (QI_IQ4_XS_MMQ / 8);
+
+    const int ksc = k % (WARP_SIZE_GGUF / 8);
+    if (ksc < 2) {
+      int scales_packed = 0;
+#pragma unroll
+      for (int sb = 0; sb < 4; ++sb) {
+        const int ib32 = ksc * 4 + sb;
+        const int8_t ls = ((bxi->scales_l[ib32 / 2] >> (4 * (ib32 % 2))) & 0xf) |
+                          (((bxi->scales_h >> (2 * ib32)) & 3) << 4);
+        ((int8_t*)&scales_packed)[sb] = ls - 32;
+      }
+      x_sc[i * (WARP_SIZE_GGUF / 8) + i / 8 + ksc] = scales_packed;
+    }
+  }
+}
+
+static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1_mul_mat(
+    const int* __restrict__ x_ql,
+    const half2* __restrict__ x_dm,
+    const int* __restrict__ x_qh,
+    const int* __restrict__ x_sc,
+    const int* __restrict__ y_qs,
+    const half2* __restrict__ y_ds,
+    const int& i,
+    const int& j,
+    const int& k) {
+  (void)x_qh;
+
+  const float* x_dmf = (const float*)x_dm;
+  const uint8_t* values = (const uint8_t*)kvalues_iq4nl;
+
+  // one 32-quant sub-block per call: 4 packed-nibble ints vs one q8_1 block
+  const int ib32 = k / 4;
+  const int8_t* sc_bytes = (const int8_t*)&x_sc[i * (WARP_SIZE_GGUF / 8) + i / 8 + ib32 / 4];
+  const float sub_scale = (float)sc_bytes[ib32 % 4];
+
+  const int index_y = j * WARP_SIZE_GGUF + (QR_IQ4_XS_MMQ * k) % WARP_SIZE_GGUF;
+
+  int sumi = 0;
+#pragma unroll
+  for (int l = 0; l < VDR_IQ4_XS_Q8_1_MMQ; ++l) {
+    int v1, v2;
+    get_int_from_table_16(x_ql[i * (WARP_SIZE_GGUF + 1) + k + l], values, v1, v2);
+    sumi = __dp4a(v1, y_qs[index_y + l], sumi);
+    sumi = __dp4a(v2, y_qs[index_y + l + 4], sumi);
+  }
+
+  // need_sum=true keeps ds as half2; the iq dots only use the d component
+  const float2 ds8 =
+      __half22float2(y_ds[j * (WARP_SIZE_GGUF / QI8_1) + (QR_IQ4_XS_MMQ * k / QI8_1) % (WARP_SIZE_GGUF / QI8_1)]);
+
+  return x_dmf[i * (WARP_SIZE_GGUF / QI_IQ4_XS_MMQ) + i / QI_IQ4_XS_MMQ] * sub_scale * ds8.x * sumi;
+}
+
+// IQ3_XXS: qs[3*QK_K/8] = 64 bytes of grid indices + 32 bytes of "gas"
+// (4 x 7-bit ksigns64 indices + a 4-bit scale per 32-quant sub-block).
+#define QR_IQ3_XXS_MMQ 2
+#define QI_IQ3_XXS_MMQ (QK_K / (4 * QR_IQ3_XXS_MMQ))
+#define VDR_IQ3_XXS_Q8_1_MMQ 4
+
+template <int mmq_y>
+static __device__ __forceinline__ void allocate_tiles_iq3_xxs(int** x_ql, half2** x_dm, int** x_qh, int** x_sc) {
+  // slots 0..15 = grid indices (64 bytes), slots 16..23 = gas (32 bytes)
+  __shared__ int tile_x_ql[mmq_y * (WARP_SIZE_GGUF) + mmq_y];
+  __shared__ float tile_x_d[mmq_y * (WARP_SIZE_GGUF / QI_IQ3_XXS_MMQ) + mmq_y / QI_IQ3_XXS_MMQ];
+
+  *x_ql = tile_x_ql;
+  *x_dm = (half2*)tile_x_d;
+}
+
+template <int mmq_y, int nwarps, bool need_check>
+static __device__ __forceinline__ void load_tiles_iq3_xxs(
+    const void* __restrict__ vx,
+    int* __restrict__ x_ql,
+    half2* __restrict__ x_dm,
+    int* __restrict__ x_qh,
+    int* __restrict__ x_sc,
+    const int& i_offset,
+    const int& i_max,
+    const int& k,
+    const int& blocks_per_row) {
+  (void)x_qh;
+  (void)x_sc;
+
+  const int kbx = k / QI_IQ3_XXS_MMQ;   // == 0
+  const int kqsx = k % QI_IQ3_XXS_MMQ;  // == k
+
+  const block_iq3_xxs* bx0 = (const block_iq3_xxs*)vx;
+  float* x_dmf = (float*)x_dm;
+
+  // block_iq3_xxs is 98 bytes: unaligned int reads throughout
+#pragma unroll
+  for (int i0 = 0; i0 < mmq_y; i0 += nwarps) {
+    int i = i0 + i_offset;
+
+    if (need_check) {
+      i = min(i, i_max);
+    }
+    const block_iq3_xxs* bxi = bx0 + i * blocks_per_row + kbx;
+    if (kqsx < 16) {
+      x_ql[i * (WARP_SIZE_GGUF + 1) + k] = get_int_from_uint8(bxi->qs, kqsx);
+    } else if (kqsx < 24) {
+      x_ql[i * (WARP_SIZE_GGUF + 1) + k] = get_int_from_uint8(bxi->qs + QK_K / 4, kqsx - 16);
+    } else {
+      x_ql[i * (WARP_SIZE_GGUF + 1) + k] = 0;
+    }
+  }
+
+  const int blocks_per_tile_x_row = WARP_SIZE_GGUF / QI_IQ3_XXS_MMQ;  // == 1
+  const int kbxd = k % blocks_per_tile_x_row;                         // == 0
+
+#pragma unroll
+  for (int i0 = 0; i0 < mmq_y; i0 += nwarps * QI_IQ3_XXS_MMQ) {
+    int i = (i0 + i_offset * QI_IQ3_XXS_MMQ + k / blocks_per_tile_x_row) % mmq_y;
+    if (need_check) {
+      i = min(i, i_max);
+    }
+    const block_iq3_xxs* bxi = bx0 + i * blocks_per_row + kbxd;
+    x_dmf[i * (WARP_SIZE_GGUF / QI_IQ3_XXS_MMQ) + i / QI_IQ3_XXS_MMQ + kbxd] = __half2float(bxi->d);
+  }
+}
+
+static __device__ __forceinline__ float vec_dot_iq3_xxs_q8_1_mul_mat(
+    const int* __restrict__ x_ql,
+    const half2* __restrict__ x_dm,
+    const int* __restrict__ x_qh,
+    const int* __restrict__ x_sc,
+    const int* __restrict__ y_qs,
+    const half2* __restrict__ y_ds,
+    const int& i,
+    const int& j,
+    const int& k) {
+  (void)x_qh;
+  (void)x_sc;
+
+  const float* x_dmf = (const float*)x_dm;
+
+  const int ib32 = k / 4;
+
+  // 8 grid indices for this sub-block
+  const uint8_t* q3 = (const uint8_t*)&x_ql[i * (WARP_SIZE_GGUF + 1) + ib32 * 2];
+
+  // gas: 4 x 7-bit sign indices + 4-bit scale for this sub-block
+  const uint16_t* gas = (const uint16_t*)&x_ql[i * (WARP_SIZE_GGUF + 1) + 16 + ib32];
+  uint32_t aux32 = gas[0] | (gas[1] << 16);
+  const float sub_scale = 0.5f + (aux32 >> 28);
+
+  int sumi = 0;
+#pragma unroll
+  for (int l = 0; l < VDR_IQ3_XXS_Q8_1_MMQ; ++l) {
+    const int sub = l;
+
+    const uint32_t signs_val = aux32 >> (7 * sub);
+    const uint32_t* signs = (const uint32_t*)(ksigns64 + (signs_val & 127));
+
+    const uint32_t* grid1 = iq3xxs_grid + q3[2 * sub + 0];
+    const uint32_t* grid2 = iq3xxs_grid + q3[2 * sub + 1];
+
+    // per-byte (g ^ s) - s folds the sign bits into signed 8-bit quants
+    const int grid_l = __vsub4(grid1[0] ^ signs[0], signs[0]);
+    const int grid_h = __vsub4(grid2[0] ^ signs[1], signs[1]);
+
+    const int index_y = j * WARP_SIZE_GGUF + (QR_IQ3_XXS_MMQ * (k + l)) % WARP_SIZE_GGUF;
+    sumi = __dp4a(grid_l, y_qs[index_y + 0], sumi);
+    sumi = __dp4a(grid_h, y_qs[index_y + 1], sumi);
+  }
+
+  const float2 ds8 =
+      __half22float2(y_ds[j * (WARP_SIZE_GGUF / QI8_1) + (QR_IQ3_XXS_MMQ * k / QI8_1) % (WARP_SIZE_GGUF / QI8_1)]);
+
+  // (ls*d + d/2)/2 == d * (0.5 + ls) * 0.5, the upstream scale fold
+  return x_dmf[i * (WARP_SIZE_GGUF / QI_IQ3_XXS_MMQ) + i / QI_IQ3_XXS_MMQ] * sub_scale * 0.5f * ds8.x * sumi;
 }

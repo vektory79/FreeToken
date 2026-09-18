@@ -1,5 +1,6 @@
 // Adatped from
 // https://github.com/vllm-project/vllm/blob/755ed7b05be4743237d3339c4ff8c22bcaae04f4/csrc/quantization/gguf/gguf_kernel.cu
+// vLLM source: Apache-2.0, (c) The vLLM authors
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -327,6 +328,30 @@ torch::Tensor ggml_mul_mat_a8(
             row,
             stream);
         break;
+      case 18:
+        ggml_mul_mat_iq3_xxs_q8_1_cuda(
+            (void*)W.data_ptr(),
+            (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(),
+            col,
+            row,
+            batch,
+            padded,
+            row,
+            stream);
+            break;
+      case 23:
+        ggml_mul_mat_iq4_xs_q8_1_cuda(
+            (void*)W.data_ptr(),
+            (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(),
+            col,
+            row,
+            batch,
+            padded,
+            row,
+            stream);
+            break;
     }
   });
   return Y;
@@ -368,6 +393,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -386,6 +412,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -404,6 +431,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -422,6 +450,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -440,6 +469,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -458,6 +488,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -476,6 +507,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -494,6 +526,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -512,6 +545,7 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -530,6 +564,45 @@ torch::Tensor ggml_moe_a8(
             padded,
             row,
             top_k,
+            (int)W.sizes()[0],
+            sorted_token_ids.sizes()[0],
+            stream);
+        break;
+      case 18:
+        ggml_moe_iq3_xxs_q8_1_cuda(
+            (void*)quant_X.data_ptr(),
+            (void*)W.data_ptr(),
+            (scalar_t*)Y.data_ptr(),
+            (int*)sorted_token_ids.data_ptr(),
+            (int*)expert_ids.data_ptr(),
+            (int*)num_tokens_post_padded.data_ptr(),
+            W.stride(0),
+            col,
+            row,
+            tokens,
+            padded,
+            row,
+            top_k,
+            (int)W.sizes()[0],
+            sorted_token_ids.sizes()[0],
+            stream);
+        break;
+      case 23:
+        ggml_moe_iq4_xs_q8_1_cuda(
+            (void*)quant_X.data_ptr(),
+            (void*)W.data_ptr(),
+            (scalar_t*)Y.data_ptr(),
+            (int*)sorted_token_ids.data_ptr(),
+            (int*)expert_ids.data_ptr(),
+            (int*)num_tokens_post_padded.data_ptr(),
+            W.stride(0),
+            col,
+            row,
+            tokens,
+            padded,
+            row,
+            top_k,
+            (int)W.sizes()[0],
             sorted_token_ids.sizes()[0],
             stream);
         break;
@@ -831,6 +904,10 @@ int64_t ggml_moe_get_block_size(int64_t type) {
       return MOE_X_Q5_K;
     case 14:
       return MOE_X_Q6_K;
+    case 18:
+      return MOE_X_IQ3_XXS;
+    case 23:
+      return MOE_X_IQ4_XS;
   }
   return 0;
 }

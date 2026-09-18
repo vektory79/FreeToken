@@ -882,3 +882,86 @@ def test_hybrid_avx2_tier_weighted_pools_production_combo(monkeypatch):
         f"avx2-tier merge diverges from the scalar merge beyond the W4A8-K envelope: "
         f"max {d.max():.6g} vs {envelope.max():.6g}"
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_grouped_prefill_on_fetch_choreography_views():
+    # prefill twin of the decode merge tests above: the grouped MMQ prefill must run
+    # on the OVERLAP choreography's streamed (non-materialized) bank views -
+    # begin_prefill -> double-buffer prefetch (next layer's H2D behind the GEMM) ->
+    # wait_prefill_layer - and match the same banks materialized into the slot
+    # cache plus the moe_vec decode path on identical routing.
+    import pathlib
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from test_cpu_moe_gguf_iq import _make_gguf_cache
+
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    sig = (18, 18, 23)  # the real file's dominant signature
+    E, H, I, bs, top_k = 8, 512, 256, 5, 4
+    dev = torch.device("cuda")
+    stub = _make_gguf_cache(sig, 1, E, H, I, seed=17, uniform=True)
+    banks = {role: list(per_layer) for role, per_layer in stub.bank_sources.items()}
+
+    def make(prefill_overlap=True):
+        cache = OffloadMoeCache(
+            num_layers=1, num_experts=E, cache_size=2 * E, device=dev,
+            quant_format="gguf", gguf_types=(sig,), prefill_overlap=prefill_overlap,
+        )
+        cache.set_bank_sources(banks)
+        return cache
+
+    def layer_for(c):
+        layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+        layer.quant_method = None
+        layer.activation = "silu"
+        layer.alpha = 1.0
+        layer.limit = None
+        layer.offload_cache = c
+        layer.layer_id = 0
+        return layer
+
+    gen = torch.Generator().manual_seed(11)
+    hidden = (torch.randn(bs, H, generator=gen) * 0.5).to(torch.bfloat16).to(dev)
+    ids = torch.stack(
+        [torch.randperm(E, generator=gen)[:top_k] for _ in range(bs)]
+    ).to(torch.int32).to(dev)
+    w = torch.rand(bs, top_k, generator=gen).to(dev)
+
+    # streamed views: the exact choreography _wait_prefill_overlap runs (the next
+    # layer's prefetch is a no-op at num_layers=1, like production's last layer)
+    ov = make()
+    ov.begin_prefill()
+    ov.prefetch_prefill_layer(0)
+    ov.prefetch_prefill_layer(1)
+    views = ov.wait_prefill_layer(0)
+    out = layer_for(ov)._expert_gemm(
+        ov, hidden, w, ids, views=views, n=E, alphas=None, is_prefill=True
+    )
+    ov.release_prefill_layer(0)
+    torch.cuda.synchronize()
+    assert out.shape == (bs, H)
+    assert torch.isfinite(out).all()
+
+    # materialized reference: same banks through the slot cache (the non-overlap
+    # prefill movement), separate cache so the streamed buffers stay borrowed.
+    # Per-pair MMQ math is position-independent, so identical bytes -> bitwise equal.
+    ref = make(prefill_overlap=False)
+    ref.materialize_layer(0)
+    ref.copy_missing()
+    out_mat = layer_for(ref)._expert_gemm(
+        ref, hidden, w, ids, views=ref.bank_views(E), n=E, alphas=None, is_prefill=True
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(out, out_mat), "streamed views must behave like materialized banks"
+
+    # same routing through the moe_vec decode path (tile vs pair accumulation order)
+    out_vec = layer_for(ref)._expert_gemm(
+        ref, hidden, w, ids, views=ref.bank_views(), n=None, alphas=None, is_prefill=False
+    )
+    torch.cuda.synchronize()
+    rel = (out.float() - out_vec.float()).abs().max() / (out_vec.float().abs().max() + 1e-6)
+    assert rel < 2e-2, f"grouped prefill diverges from moe_vec: rel {rel.item()}"

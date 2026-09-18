@@ -1,6 +1,7 @@
 // copied from
 // https://github.com/vllm-project/vllm/blob/4492e3a55428e161ca8db381edc28263e5da4c8d/csrc/quantization/gguf/mmq.cuh
 // copied from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-cuda/mmq.cu
+// vLLM source: Apache-2.0, (c) The vLLM authors; llama.cpp source: MIT, (c) The ggml authors
 template <
     typename scalar_t,
     int qk,
@@ -876,6 +877,161 @@ static void ggml_mul_mat_q6_K_q8_1_cuda(
   } else {
     const bool need_check = true;
     mul_mat_q6_K<scalar_t, need_check>
+        <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+  }
+}
+
+// ---- iq3_xxs / iq4_xs dense MMQ kernels (mul_mat_a8 types 18/23) ----
+// Same vendored provenance as the tile glue in vecdotq.cuh (vLLM PR #36226,
+// llama.cpp @ 4696d5674). need_sum=true matches the PR's vec_dot adapters,
+// which read the d component of the half2 ds slot.
+
+#if defined(USE_ROCM)
+#define MMQ_X_IQ3_XXS 64
+#define MMQ_Y_IQ3_XXS 128
+#define NWARPS_IQ3_XXS 8
+#else
+#define MMQ_X_IQ3_XXS 4
+#define MMQ_Y_IQ3_XXS 32
+#define NWARPS_IQ3_XXS 4
+#endif
+
+template <typename scalar_t, bool need_check>
+static __global__ void
+#if defined(USE_ROCM)
+__launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ3_XXS, 2)
+#endif
+    mul_mat_iq3_xxs(
+        const void* __restrict__ vx,
+        const void* __restrict__ vy,
+        scalar_t* __restrict__ dst,
+        const int ncols_x,
+        const int nrows_x,
+        const int ncols_y,
+        const int nrows_y,
+        const int nrows_dst) {
+  const int mmq_x = MMQ_X_IQ3_XXS;
+  const int mmq_y = MMQ_Y_IQ3_XXS;
+  const int nwarps = NWARPS_IQ3_XXS;
+
+  mul_mat_q<
+      scalar_t,
+      QK_K,
+      QR_IQ3_XXS_MMQ,
+      QI_IQ3_XXS_MMQ,
+      true,
+      block_iq3_xxs,
+      mmq_x,
+      mmq_y,
+      nwarps,
+      allocate_tiles_iq3_xxs<mmq_y>,
+      load_tiles_iq3_xxs<mmq_y, nwarps, need_check>,
+      VDR_IQ3_XXS_Q8_1_MMQ,
+      vec_dot_iq3_xxs_q8_1_mul_mat>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+}
+
+template <typename scalar_t>
+static void ggml_mul_mat_iq3_xxs_q8_1_cuda(
+    const void* vx,
+    const void* vy,
+    scalar_t* dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst,
+    cudaStream_t stream) {
+  const int mmq_x = MMQ_X_IQ3_XXS;
+  const int mmq_y = MMQ_Y_IQ3_XXS;
+  const int nwarps = NWARPS_IQ3_XXS;
+
+  const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
+  const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
+  const dim3 block_nums(block_num_x, block_num_y, 1);
+  const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
+
+  if (nrows_x % mmq_y == 0) {
+    const bool need_check = false;
+    mul_mat_iq3_xxs<scalar_t, need_check>
+        <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+  } else {
+    const bool need_check = true;
+    mul_mat_iq3_xxs<scalar_t, need_check>
+        <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+  }
+}
+
+#if defined(USE_ROCM)
+#define MMQ_X_IQ4_XS 64
+#define MMQ_Y_IQ4_XS 128
+#define NWARPS_IQ4_XS 8
+#else
+#define MMQ_X_IQ4_XS 4
+#define MMQ_Y_IQ4_XS 32
+#define NWARPS_IQ4_XS 4
+#endif
+
+template <typename scalar_t, bool need_check>
+static __global__ void
+#if defined(USE_ROCM)
+__launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ4_XS, 2)
+#endif
+    mul_mat_iq4_xs(
+        const void* __restrict__ vx,
+        const void* __restrict__ vy,
+        scalar_t* __restrict__ dst,
+        const int ncols_x,
+        const int nrows_x,
+        const int ncols_y,
+        const int nrows_y,
+        const int nrows_dst) {
+  const int mmq_x = MMQ_X_IQ4_XS;
+  const int mmq_y = MMQ_Y_IQ4_XS;
+  const int nwarps = NWARPS_IQ4_XS;
+
+  mul_mat_q<
+      scalar_t,
+      QK_K,
+      QR_IQ4_XS_MMQ,
+      QI_IQ4_XS_MMQ,
+      true,
+      block_iq4_xs,
+      mmq_x,
+      mmq_y,
+      nwarps,
+      allocate_tiles_iq4_xs<mmq_y>,
+      load_tiles_iq4_xs<mmq_y, nwarps, need_check>,
+      VDR_IQ4_XS_Q8_1_MMQ,
+      vec_dot_iq4_xs_q8_1_mul_mat>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+}
+
+template <typename scalar_t>
+static void ggml_mul_mat_iq4_xs_q8_1_cuda(
+    const void* vx,
+    const void* vy,
+    scalar_t* dst,
+    const int ncols_x,
+    const int nrows_x,
+    const int ncols_y,
+    const int nrows_y,
+    const int nrows_dst,
+    cudaStream_t stream) {
+  const int mmq_x = MMQ_X_IQ4_XS;
+  const int mmq_y = MMQ_Y_IQ4_XS;
+  const int nwarps = NWARPS_IQ4_XS;
+
+  const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
+  const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
+  const dim3 block_nums(block_num_x, block_num_y, 1);
+  const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
+
+  if (nrows_x % mmq_y == 0) {
+    const bool need_check = false;
+    mul_mat_iq4_xs<scalar_t, need_check>
+        <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+  } else {
+    const bool need_check = true;
+    mul_mat_iq4_xs<scalar_t, need_check>
         <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
   }
 }

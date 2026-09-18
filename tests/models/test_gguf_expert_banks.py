@@ -301,6 +301,185 @@ def test_expert_gemm_gguf_dispatch():
     assert not torch.allclose(outs[0], outs[1])  # per-layer types really dispatched
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_expert_gemm_gguf_grouped_prefill_matches_decode(monkeypatch):
+    # v2 grouped MMQ prefill: is_prefill=True routes through the moe_align trio +
+    # grouped ggml_moe_a8 (ONE trio shared by gate/up and down), stays numerically
+    # consistent with the moe_vec decode path on identical inputs, and leaves the
+    # decode path (moe_vec, no trio) completely untouched.
+    import freetoken.moe.fused as fused_mod
+
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    types = (8, 8, 8)  # Q8_0 layer: uniform banks keep the reference analytic
+    cache = OffloadMoeCache(
+        num_layers=1, num_experts=_NE, cache_size=_NE,
+        device=torch.device("cuda"), quant_format="gguf", gguf_types=(types,),
+    )
+    layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+    layer.quant_method = None
+    layer.activation = "swiglu_clamp"
+    layer.alpha = 1.0
+    layer.limit = 10.0
+    layer.layer_id = 0
+
+    torch.manual_seed(0)
+    # the per-token bias pushes every |g| past the swiglu_clamp limit, so the
+    # clamped epilogue absorbs the q8_1 x-quant noise exactly on both paths
+    base = 0.05 * torch.randn(5, _H, dtype=torch.float32, device="cuda")
+    bias = torch.linspace(1.0, 3.0, 5, device="cuda").unsqueeze(-1)
+    x = (base + bias).contiguous()
+    topk_ids = torch.stack(
+        [torch.randperm(_NE, device="cuda")[:2].to(torch.int32) for _ in range(5)]
+    )
+    topk_weights = torch.rand(5, 2, dtype=torch.float32, device="cuda")
+    topk_weights = (topk_weights / topk_weights.sum(-1, keepdim=True)).contiguous()
+
+    banks = _craft_uniform_gguf_banks(types, _NE)
+    views = tuple(banks[role].cuda() for role in ("gate", "up", "down"))
+
+    calls = {"align": 0}
+    real_align = fused_mod.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        calls["align"] += 1
+        return real_align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_mod, "moe_align_block_size", counting_align)
+    out_pre = layer._expert_gemm(
+        cache, x, topk_weights, topk_ids, views=views, n=_NE, alphas=None, is_prefill=True
+    )
+    assert out_pre.shape == (5, _H)
+    assert torch.isfinite(out_pre).all()
+    # gate/up and down share one trio (equal MOE_X block sizes -> a single align)
+    assert calls["align"] == 1
+
+    # decode must not build a trio at all (the branch is is_prefill-only)
+    def bomb(*args, **kwargs):
+        raise AssertionError("decode must not build a moe_align trio")
+
+    monkeypatch.setattr(fused_mod, "moe_align_block_size", bomb)
+    out_dec = layer._expert_gemm(
+        cache, x, topk_weights, topk_ids, views=views, n=None, alphas=None, is_prefill=False
+    )
+    torch.testing.assert_close(out_pre, out_dec, rtol=2e-2, atol=1e-2)
+
+    # analytic reference: uniform gate/up rows make the per-slot gate/up scalars
+    # w*sum(x); mirror the epilogue, then the uniform down bank collapses to a
+    # weighted sum of w * _EFF * inter per slot (same construction as the
+    # test_expert_gemm_gguf_dispatch reference above)
+    from freetoken.layers import swiglu_clamp_and_mul
+
+    S = x.sum(-1)
+    w = 0.25
+    pair = torch.stack((w * S, w * S), dim=-1)
+    inter = swiglu_clamp_and_mul(pair, alpha=1.0, limit=10.0)
+    ref = (topk_weights * (w * _EFF) * inter).sum(-1).unsqueeze(-1).expand(-1, _H)
+    assert torch.allclose(out_pre, ref, rtol=0.02, atol=1e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_grouped_prefill_noncontig_activations():
+    # lesson 028f2d9: the ggml kernels assume row-major activations; the grouped
+    # prefill must .contiguous() a strided/split view (e.g. KDA projections) instead
+    # of consuming it as garbage - the result must equal the contiguous input's.
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    types = (8, 8, 8)  # Q8_0 layer; uniform banks, deterministic kernels
+    cache = OffloadMoeCache(
+        num_layers=1, num_experts=_NE, cache_size=_NE,
+        device=torch.device("cuda"), quant_format="gguf", gguf_types=(types,),
+    )
+    layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+    layer.quant_method = None
+    layer.activation = "silu"
+    layer.alpha = 1.0
+    layer.limit = None
+    layer.layer_id = 0
+
+    torch.manual_seed(0)
+    # bf16: the silu epilogue's flashinfer kernel dispatches fp16-family only, and
+    # the ggml kernels take bf16 activations natively
+    big = torch.randn(5, 2 * _H, dtype=torch.bfloat16, device="cuda")
+    x_nc = big[:, :_H]  # split view: non-contiguous rows over a wider stride
+    assert not x_nc.is_contiguous()
+    topk_ids = torch.stack(
+        [torch.randperm(_NE, device="cuda")[:2].to(torch.int32) for _ in range(5)]
+    )
+    topk_weights = torch.rand(5, 2, dtype=torch.float32, device="cuda")
+    banks = _craft_uniform_gguf_banks(types, _NE)
+    views = tuple(banks[role].cuda() for role in ("gate", "up", "down"))
+
+    out_nc = layer._expert_gemm(
+        cache, x_nc, topk_weights, topk_ids, views=views, n=_NE, alphas=None, is_prefill=True
+    )
+    out_c = layer._expert_gemm(
+        cache, x_nc.contiguous(), topk_weights, topk_ids, views=views, n=_NE, alphas=None,
+        is_prefill=True,
+    )
+    assert out_nc.shape == out_c.shape == (5, _H)
+    assert torch.isfinite(out_nc).all()
+    assert torch.equal(out_nc, out_c), "strided input must match the contiguous one exactly"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_grid_caps_raise_before_kernel_launch():
+    # the prefill grid caps fire in the entry guards, before any MoE kernel launch:
+    # a [8192, 8] chunk (65536 pairs > 65535, issue #186) RUNS on the grouped MMQ
+    # path (the grouped grid counts bins, not pairs) and only a 4x bigger chunk
+    # trips the grouped sorted_numel/block_size cap; the moe_vec pair cap still
+    # guards its own branch - for prefill that branch is reachable only via ggml
+    # types outside the grouped kernel's moe switch (declared IQ2_XS here).
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    types = (8, 8, 8)
+    cache = OffloadMoeCache(
+        num_layers=1, num_experts=_NE, cache_size=2 * _NE,
+        device=torch.device("cuda"), quant_format="gguf", gguf_types=(types,),
+    )
+    layer = OffloadMoELayer.__new__(OffloadMoELayer)  # the branch only needs these attrs
+    layer.quant_method = None
+    layer.activation = "silu"
+    layer.alpha = 1.0
+    layer.limit = None
+    layer.layer_id = 0
+
+    banks = _craft_uniform_gguf_banks(types, _NE)
+    views = tuple(banks[role].cuda() for role in ("gate", "up", "down"))
+    ids = torch.randint(0, _NE, (8192, 8), dtype=torch.int32, device="cuda")
+    w = torch.rand(8192, 8, dtype=torch.float32, device="cuda")
+    x = torch.empty((8192, _H), dtype=torch.bfloat16, device="cuda")
+
+    out = layer._expert_gemm(
+        cache, x, w, ids, views=views, n=_NE, alphas=None, is_prefill=True
+    )
+    assert out.shape == (8192, _H)
+    assert torch.isfinite(out).all()
+
+    # the moe_vec 65535-pair cap fires before any kernel launch: the unsupported
+    # type (17 = IQ2_XS, block size 0) routes prefill to the moe_vec fallback
+    # whose entry guard raises - the Q8_0-layout bank bytes are never read
+    no_group_cache = OffloadMoeCache(
+        num_layers=1, num_experts=_NE, cache_size=2 * _NE,
+        device=torch.device("cuda"), quant_format="gguf", gguf_types=((17, 17, 17),),
+    )
+    with pytest.raises(ValueError, match="moe_vec grid limit"):
+        layer._expert_gemm(
+            no_group_cache, x, w, ids, views=views, n=_NE, alphas=None, is_prefill=True
+        )
+
+    big_ids = torch.randint(0, _NE, (32768, 8), dtype=torch.int32, device="cuda")
+    big_w = torch.rand(32768, 8, dtype=torch.float32, device="cuda")
+    big_x = torch.empty((32768, _H), dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(ValueError, match="grouped MMQ grid limit"):
+        layer._expert_gemm(
+            cache, big_x, big_w, big_ids, views=views, n=_NE, alphas=None, is_prefill=True
+        )
+
+
 def test_engine_offload_cache_gets_gguf_types():
     # The wiring fixture tests cannot reach: _init_offload_moe_cache must hand
     # banks.gguf_types to the built OffloadMoeCache (the None field default keeps

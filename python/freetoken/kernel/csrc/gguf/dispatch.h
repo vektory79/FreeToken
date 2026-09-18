@@ -2,6 +2,7 @@
 // sgl-kernel csrc/quantization/gguf, which are ports of llama.cpp). The donor
 // pulls these macros from its large include/utils.h; we only need the float
 // dispatch, so vendor just that to keep the JIT compile self-contained.
+// sgl-kernel source: Apache-2.0, (c) The sglang authors
 #pragma once
 
 #include <ATen/Dispatch.h>

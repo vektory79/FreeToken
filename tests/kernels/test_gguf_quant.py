@@ -196,17 +196,199 @@ def test_moe_vec_parity_vs_torch_reference(qtype):
             )
 
 
+def test_iq_formats_are_mmq_dispatchable():
+    # the v2 grouped-MMQ work lifted the iq dense-batch gap: both formats must sit
+    # in _MMQ (dense batches route to ggml_mul_mat_a8) and out of _IQ_ONLY.
+    from freetoken.layers.gguf import _IQ_ONLY, _MMQ
+
+    assert {GGML_IQ3_XXS, GGML_IQ4_XS} <= _MMQ
+    assert not {GGML_IQ3_XXS, GGML_IQ4_XS} & _IQ_ONLY
+
+
+@cuda
 @pytest.mark.parametrize("qtype", (GGML_IQ3_XXS, GGML_IQ4_XS))
-def test_dense_iq_above_mmvq_cutoff_fails_loudly(qtype):
-    # iq formats have no MMQ kernel: a dense batch above the MMVQ cutoff must raise,
-    # not silently dequantize per call (routed experts route through moe_vec).
+def test_dense_iq_above_mmvq_cutoff_uses_mmq(qtype):
+    # dense batch 27 > _MMVQ_SAFE: dispatches to ggml_mul_mat_a8 (the former
+    # NotImplementedError path) and must match the gguf-py dequant reference;
+    # the tolerance absorbs the kernel's internal x q8_1 quantization only.
     from freetoken.layers.gguf import fused_mul_mat_gguf
 
+    rng = np.random.default_rng(8)
     n = BLOCK_SHAPE[qtype][0]
-    qw = torch.zeros((8, row_bytes(n, qtype)), dtype=torch.uint8)
-    x = torch.zeros((8, n), dtype=torch.bfloat16)
-    with pytest.raises(NotImplementedError, match="no MMQ kernel"):
-        fused_mul_mat_gguf(x, qw, qtype)
+    raw, ref = _finite_fp16_chain_reference(rng, 8, row_bytes(n, qtype), qtype)
+    qw = torch.from_numpy(raw.copy()).cuda()
+    x = torch.randn(27, n, dtype=torch.bfloat16, device="cuda")
+    got = fused_mul_mat_gguf(x, qw, qtype).float()
+    want = x.float() @ torch.from_numpy(ref).cuda().float().T
+    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2 * want.abs().max().item())
+
+
+@cuda
+@pytest.mark.parametrize("qtype", (GGML_IQ3_XXS, GGML_IQ4_XS))
+def test_grouped_moe_parity_vs_reference(qtype):
+    # the grouped MMQ entry (moe_align trio -> ggml_moe_a8) for the two iq expert
+    # formats, checked pair-by-pair against the gguf-py dequant reference. The
+    # weight side dequantizes identically on both paths, so any tile/sign/scale
+    # bug shifts rows by O(factor * d) and fails this bound loudly.
+    from freetoken.kernel.gguf import ggml_moe_a8, ggml_moe_get_block_size
+    from freetoken.moe.fused import moe_align_block_size
+
+    rng = np.random.default_rng(3)
+    n = BLOCK_SHAPE[qtype][0] * 2
+    out_rows, experts, tokens, top_k = 32, 5, 7, 3
+    rb = row_bytes(n, qtype)
+    packed, refs = [], []
+    for _ in range(experts):
+        raw, ref = _finite_fp16_chain_reference(rng, out_rows, rb, qtype)
+        packed.append(torch.from_numpy(raw.copy()))
+        refs.append(torch.from_numpy(ref).to(torch.float32))
+    w = torch.stack(packed).cuda()  # [E, out_rows, rb]
+    x = torch.randn(tokens, n, dtype=torch.float32, device="cuda")
+    topk_ids = torch.stack(
+        [torch.randperm(experts, device="cuda")[:top_k].to(torch.int32) for _ in range(tokens)]
+    )
+    sorted_ids, expert_ids, npp = moe_align_block_size(
+        topk_ids, ggml_moe_get_block_size(qtype), experts
+    )
+    out = ggml_moe_a8(x, w, sorted_ids, expert_ids, npp, qtype, out_rows, top_k, tokens)
+    assert out.shape == (tokens * top_k, out_rows)
+    flat = out.float().cpu()
+    for t in range(tokens):
+        for k in range(top_k):
+            want = refs[int(topk_ids[t, k])] @ x[t].cpu()
+            torch.testing.assert_close(
+                flat[t * top_k + k], want, rtol=2e-2, atol=2e-2 * want.abs().max().item()
+            )
+
+
+@cuda
+def test_grouped_moe_expert_bound_288():
+    # pins the moe.cuh expert-bound fix: the legacy `exp_idx > 255` guard silently
+    # dropped experts 256..287 at E=288 and Y (torch.empty) kept garbage rows.
+    from freetoken.kernel.gguf import ggml_moe_a8, ggml_moe_get_block_size
+    from freetoken.moe.fused import moe_align_block_size
+
+    qtype = GGML_IQ4_XS
+    rng = np.random.default_rng(4)
+    n = BLOCK_SHAPE[qtype][0]
+    out_rows, experts, tokens, top_k = 16, 288, 4, 8
+    rb = row_bytes(n, qtype)
+    packed, refs = [], []
+    for _ in range(experts):
+        raw, ref = _finite_fp16_chain_reference(rng, out_rows, rb, qtype)
+        packed.append(torch.from_numpy(raw.copy()))
+        refs.append(torch.from_numpy(ref).to(torch.float32))
+    w = torch.stack(packed).cuda()
+    x = torch.randn(tokens, n, dtype=torch.float32, device="cuda")
+    topk_ids = torch.stack(
+        [torch.randperm(experts, device="cuda")[:top_k].to(torch.int32) for _ in range(tokens)]
+    )
+    # force half of token 0's routes onto experts the old guard dropped
+    topk_ids[0] = torch.tensor([287, 256, 285, 260, 286, 263, 0, 1], device="cuda", dtype=torch.int32)
+    assert int(topk_ids.max()) > 255
+    sorted_ids, expert_ids, npp = moe_align_block_size(
+        topk_ids, ggml_moe_get_block_size(qtype), experts
+    )
+    out = ggml_moe_a8(x, w, sorted_ids, expert_ids, npp, qtype, out_rows, top_k, tokens)
+    flat = out.float().cpu()
+    for t in range(tokens):
+        for k in range(top_k):
+            want = refs[int(topk_ids[t, k])] @ x[t].cpu()
+            torch.testing.assert_close(
+                flat[t * top_k + k], want, rtol=2e-2, atol=2e-2 * want.abs().max().item()
+            )
+
+
+@cuda
+@pytest.mark.parametrize("qtype", (GGML_Q8_0, GGML_Q6_K, GGML_IQ3_XXS, GGML_IQ4_XS))
+def test_grouped_moe_matches_moe_vec(qtype):
+    # all four MoE entries exist for both paths: the grouped MMQ path and the
+    # moe_vec GEMV must agree on identical inputs (same trio, same x q8_1
+    # quantization; only the tile reduction order differs). The iq formats
+    # (types 18/23) are the ones the grouped prefill actually serves.
+    from freetoken.kernel.gguf import ggml_moe_a8, ggml_moe_a8_vec, ggml_moe_get_block_size
+    from freetoken.moe.fused import moe_align_block_size
+
+    rng = np.random.default_rng(5)
+    n = BLOCK_SHAPE[qtype][0] * 2
+    out_rows, experts, tokens, top_k = 32, 5, 9, 4
+    rb = row_bytes(n, qtype)
+    packed = []
+    for _ in range(experts):
+        raw, _ = _finite_fp16_chain_reference(rng, out_rows, rb, qtype)
+        packed.append(torch.from_numpy(raw.copy()))
+    w = torch.stack(packed).cuda()
+    x = torch.randn(tokens, n, dtype=torch.float32, device="cuda")
+    topk_ids = torch.stack(
+        [torch.randperm(experts, device="cuda")[:top_k].to(torch.int32) for _ in range(tokens)]
+    )
+    vec = ggml_moe_a8_vec(x, w, topk_ids, top_k, qtype, out_rows, tokens)
+    sorted_ids, expert_ids, npp = moe_align_block_size(
+        topk_ids, ggml_moe_get_block_size(qtype), experts
+    )
+    grouped = ggml_moe_a8(x, w, sorted_ids, expert_ids, npp, qtype, out_rows, top_k, tokens)
+    assert grouped.shape == vec.shape == (tokens * top_k, out_rows)
+    torch.testing.assert_close(grouped.float(), vec.float(), rtol=1e-3, atol=1e-3)
+
+
+@cuda
+def test_moe_align_trio_contract():
+    # the trio the grouped entry consumes: int32 buffers, sentinel fill = numel
+    # (NOT -1), numel = pairs + (E+1)*(bs-1) whenever pairs >= E+1, and expert_ids
+    # inside the padded region are real expert ids (the pad bin E is what the
+    # kernel's expert bound must keep dropping).
+    from freetoken.moe.fused import moe_align_block_size
+
+    tokens, top_k, experts, bs = 40, 8, 288, 4
+    topk_ids = torch.randint(0, experts, (tokens, top_k), dtype=torch.int32, device="cuda")
+    sorted_ids, expert_ids, npp = moe_align_block_size(topk_ids, bs, experts)
+
+    pairs = topk_ids.numel()
+    assert sorted_ids.dtype == expert_ids.dtype == npp.dtype == torch.int32
+    assert sorted_ids.numel() == pairs + (experts + 1) * (bs - 1)
+    assert expert_ids.numel() == (sorted_ids.numel() + bs - 1) // bs
+    assert npp.shape == (1,)
+
+    sentinel = sorted_ids == pairs  # the producer's sentinel fill is topk_ids.numel()
+    assert sentinel.any(), "pad slots must carry the numel sentinel"
+    assert not (sorted_ids[~sentinel] >= pairs).any(), "real entries are pair indices"
+    total_padded = int(npp.item())
+    assert total_padded % bs == 0 and total_padded <= pairs + experts * bs
+    live = expert_ids[: total_padded // bs]
+    assert (live >= 0).all() and (live < experts).all(), "pad bin ids must not reach the kernel"
+
+
+@cuda
+@pytest.mark.parametrize("tokens", (40, 137))  # 320 and 1096 pairs: small and large producer paths
+def test_moe_align_tail_contract(tokens):
+    # TP2 tail pin, driven through the TRITON producer directly (the fused wrapper
+    # would pick the sgl_kernel op when it is installed): the grouped CUDA kernel
+    # launches bins past num_tokens_post_pad (its grid covers the padded buffer),
+    # so the producer must leave NO uninitialized slots. sorted_token_ids[npp:]
+    # carries the numel sentinel and expert_ids[npp/bs:] carries the sentinel
+    # expert id (num_experts), which moe_q's expert bound drops even before the
+    # >= boundary check rejects the bin.
+    from freetoken.kernel.triton.moe_align import moe_align_block_size as triton_align
+
+    top_k, experts, bs = 8, 288, 4
+    topk_ids = torch.randint(0, experts, (tokens, top_k), dtype=torch.int32, device="cuda")
+    sorted_ids, expert_ids, npp = triton_align(topk_ids, bs, experts)
+
+    pairs = topk_ids.numel()
+    total = int(npp.item())
+    assert total % bs == 0
+    tail = sorted_ids[total:]
+    assert tail.numel() > 0
+    assert (tail == pairs).all(), "sorted tail must carry the numel sentinel"
+    tb = total // bs
+    live = expert_ids[:tb]
+    assert (live >= 0).all() and (live < experts).all(), "live blocks carry real expert ids"
+    pad = expert_ids[tb:]
+    assert pad.numel() > 0
+    assert (pad == experts).all(), "expert_ids tail must carry the sentinel expert id"
+    # belt (moe_q boundary): bins starting at/after total are rejected; the first
+    # such bin is tb and the producer's sentinel values make it a safe read
+    assert expert_ids.numel() > tb and tb * bs >= total
 
 
 @cuda

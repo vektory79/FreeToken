@@ -14,10 +14,15 @@ required shapes exercise, since num_experts+1 > 64):
   * count[e]   = #tokens routed to expert e   (e in [0, effective_E))
   * cumsum[0]=0, cumsum[i] = cumsum[i-1] + ceil(count[i-1]/block)*block
   * num_tokens_post_pad = cumsum[effective_E]
-  * expert_ids[cumsum[i]/block : cumsum[i+1]/block) = i
+  * expert_ids[cumsum[i]/block : cumsum[i+1]/block) = i; every block past
+    num_tokens_post_pad/block carries the sentinel expert id ``num_experts`` (the
+    grouped CUDA kernel reads expert_ids[bin] before its boundary checks, so pad
+    bins must hold a value its expert bound drops).
   * sorted_token_ids: tokens scattered into [cumsum[e], cumsum[e]+count[e]); the
     order *within* an expert region is nondeterministic (atomicAdd), exactly like
-    the reference. Unwritten slots hold the sentinel value ``numel``.
+    the reference. The WHOLE buffer is sentinel-filled (``numel``), tail included:
+    the grouped kernel launches bins past num_tokens_post_pad (its grid covers the
+    padded buffer) and must never read uninitialized rows.
 
 Two paths, mirroring the sgl CUDA kernel's small/large split:
 
@@ -54,7 +59,7 @@ import triton.language as tl
 _SMALL_CAP = 1024  # fused single-CTA path for numel <= this (covers all decode shapes)
 
 
-@triton.jit(do_not_specialize=["numel", "sentinel"])
+@triton.jit(do_not_specialize=["numel", "sentinel", "sorted_numel", "max_mblk"])
 def _moe_align_small(
     topk_ids_ptr,
     sorted_token_ids_ptr,
@@ -64,6 +69,8 @@ def _moe_align_small(
     fill_counter_ptr,  # scratch [effective_E]: scatter rank counters
     numel,
     sentinel,
+    sorted_numel,      # len(sorted_token_ids): the whole buffer gets the sentinel
+    max_mblk,          # len(expert_ids): its tail gets the sentinel expert id
     effective_E: tl.constexpr,
     block_size: tl.constexpr,
     N_PAD: tl.constexpr,   # next_pow2(numel)
@@ -93,10 +100,16 @@ def _moe_align_small(
     for j in tl.range(0, tl.max(nblk, 0)):
         tl.store(expert_ids_ptr + excl_blk + j, le, mask=m_e & (j < nblk))
 
-    # sentinel-fill sorted[0:npp) (pre-barrier so the scatter stores win below)
+    # sentinel-fill the WHOLE sorted buffer and pin the expert_ids tail to the
+    # sentinel expert id (pre-barrier so the scatter stores win below): the grouped
+    # consumer launches bins past npp and must never read uninitialized slots
     fo = tl.arange(0, FILL)
-    for s in tl.range(0, npp, FILL):
-        tl.store(sorted_token_ids_ptr + s + fo, sentinel, mask=s + fo < npp)
+    tb = npp // block_size
+    for s in tl.range(0, sorted_numel, FILL):
+        tl.store(sorted_token_ids_ptr + s + fo, sentinel, mask=s + fo < sorted_numel)
+    for s in tl.range(0, max_mblk, FILL):
+        o = s + fo
+        tl.store(expert_ids_ptr + o, effective_E - 1, mask=(o >= tb) & (o < max_mblk))
 
     tl.debug_barrier()  # cumsum/fill_counter stores visible; sentinel ordered before scatter
 
@@ -159,7 +172,7 @@ def _cumsum_experts(
     tl.store(num_tokens_post_pad_ptr, total_tok)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_mblk"])
 def _fill_expert_ids(
     cumsum_ptr,
     expert_ids_ptr,
@@ -168,6 +181,7 @@ def _fill_expert_ids(
     effective_E: tl.constexpr,
     STEPS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    max_mblk,  # len(expert_ids): its tail gets the sentinel expert id
 ):
     # expert_ids[b] = expert owning block b = largest e with block_offset[e] <= b, where
     # block_offset[e] = cumsum[e] / block_size. Resolved for every block index in
@@ -185,7 +199,10 @@ def _fill_expert_ids(
         go = off <= b
         lo = tl.where(go, mid + 1, lo)
         hi = tl.where(go, hi, mid)
-    tl.store(expert_ids_ptr + b, lo - 1, mask=mask)
+    # tail blocks [total_blk, max_mblk) carry the sentinel expert id (num_experts):
+    # the grouped kernel reads expert_ids[b] for every launched bin BEFORE its
+    # boundary checks, so pad bins must hold a value its expert bound drops
+    tl.store(expert_ids_ptr + b, tl.where(mask, lo - 1, effective_E - 1), mask=b < max_mblk)
 
 
 @triton.jit(do_not_specialize=["numel"])
@@ -253,6 +270,8 @@ def moe_align_block_size(
             fill_counter,
             numel,
             numel,          # sentinel
+            max_num_tokens_padded,
+            max_num_m_blocks,
             effective_E,
             block_size,
             triton.next_power_of_2(numel),
@@ -304,6 +323,7 @@ def moe_align_block_size(
         effective_E,
         effective_E.bit_length(),
         BLOCK_SIZE=256,
+        max_mblk=max_num_m_blocks,
         num_warps=4,
         num_stages=3,
     )
