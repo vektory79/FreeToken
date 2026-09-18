@@ -3,7 +3,7 @@ name: "git-integration-preferences"
 description: "Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase"
 type: feedback
 lastUpdated: 2026-09-16T19:29
-lastRecall: 2026-09-16T19:28
+lastRecall: 2026-09-18T23:05
 ---
 
 # Предпочтения пользователя по интеграции веток (git)

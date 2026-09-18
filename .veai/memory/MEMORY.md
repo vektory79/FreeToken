@@ -12,7 +12,6 @@
 - [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-d98055871b80.md) — GGUF hybrid per-layer cost = fetch volume + 0.6-1.0 ms sync; hardware-validated 1.43 ms/layer at 16.67 tok/s
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-90784dc7d0a9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-029031181f9f.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 1M break was transient
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-e4232bb48315.md) — Self-sufficient Orchestrator skill: 7 GGUF phases, 38 traps, ORCHESTRATION.md; used-by Orchestrator; .veai/skills only
 - [vektory79-main-rewrite-gotcha](vektory79-main-rewrite-gotcha-44d497ec530c.md) — vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-943a3bdf3964.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails (python -m green), pgrep census match
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
@@ -27,7 +26,9 @@
 - [cuda-debug-tool-strategy](cuda-debug-tool-strategy-426144b5f4b1.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys interactive session for live ft serve
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
-- [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-644461f37544.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
 - [ft-bare-logger-liveness-trap](ft-bare-logger-liveness-trap-6399769cb81b.md) — Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)
 - [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-6d6a7d0de8dd.md) — GGUF prefill MMQ roofline; v0 no-op; v2 grouped MMQ +16.4% measured; ceiling unmet, m-block re-reads; iq shim
 - [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-2fe8a7978c23.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 task pointer
+- [ft-gate-baseline-nan-flake](ft-gate-baseline-nan-flake-680ee5b1dcea.md) — Full-gate baseline flake: test_gguf_expert_banks NaN isfinite only under suite ordering (Environment); gate 2135 passed
+- [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-b855848b830d.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-2fb4d7804e19.md) — gguf-native-serving skill: T01-T50 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978

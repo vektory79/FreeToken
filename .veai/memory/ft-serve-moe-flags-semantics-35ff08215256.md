@@ -3,7 +3,7 @@ name: "ft-serve-moe-flags-semantics"
 description: "ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions"
 type: project
 lastUpdated: 2026-09-15T03:05
-lastRecall: 2026-09-17T12:14
+lastRecall: 2026-09-18T23:03
 ---
 
 # ft serve MoE flag semantics (code audit, 2026-09-12, file:line verified)

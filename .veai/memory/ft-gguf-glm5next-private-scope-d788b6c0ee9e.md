@@ -3,7 +3,7 @@ name: "ft-gguf-glm5next-private-scope"
 description: "GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)"
 type: feedback
 lastUpdated: 2026-09-13T18:47
-lastRecall: 2026-09-16T15:06
+lastRecall: 2026-09-18T23:01
 ---
 
 # GGUF glm5next Path A is private-use local work; upstream gates waived

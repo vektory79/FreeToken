@@ -2,8 +2,8 @@
 name: "ft-serve-gguf-tuning-campaign-2026-09"
 description: "GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs"
 type: project
-lastUpdated: 2026-09-17T19:21
-lastRecall: 2026-09-18T18:31
+lastUpdated: 2026-09-18T23:49
+lastRecall: 2026-09-19T00:27
 ---
 
 # ft serve GGUF GLM-5.3-Flash: tuning campaign 2026-09-16/17 (RTX 5090)
@@ -49,3 +49,11 @@ S (FTW fast path) and/or fix-1 (radix L persistence) implementation; optional 0.
 - MMQ prefill kernel case opened by user request ("сколько даст tiled MMQ") - see memory ft-gguf-moe-prefill-mmq-gap; kernel-study fork (roofline with real GGUF-header geometry, IQ-MMQ port plan) was still running at session end.
 
 - (2026-09-18 consolidation: the MMQ prefill kernel memory was merged into ft-gguf-prefill-mmq-roofline, which now holds the measured nsys split, v0/v2 ceilings and the IQ MMQ port plan - reference that memory instead of the deleted ft-gguf-moe-prefill-mmq-gap.)
+
+## fix-1 implemented (2026-09-18, vektory79, UNCOMMITTED)
+- The root-cause statement above is now HISTORICAL: python/freetoken/scheduler/prefill.py forwards mamba_last_track_seqlen across chunk transitions (+3 lines: _add_one_req param/assignment, try_add_one continuation forwarding). Tests: regression tests in tests/scheduler/test_hybrid_cache_manager.py (pre-fix FAIL verified: None==64) + triaged strengtheners; scheduler + kvcache/radix 244 passed; full gate 2135 passed / 6 baseline-Environment.
+- Hardware PASS (RTX 5090, measure.py): repeat 65k @4096 -> HIT #cached-token 65472 (pre-fix 0); 8191 @ 0.85+mr1 -> HIT exactly 65536; prefill medians 300.6 (4096) / 336.4 (8128) tok/s, decode 13.9-14.7 tok/s. Boot deviations: 0.89 fail-fast (desktop VRAM tax) -> 0.90 for Run A, winner config 0.85+mr1 for Run B; 8191@0.90 OOMs in triton do_bench (256 MiB) - known headroom, not fix-related.
+- Artifacts: .tasks/fix1-radix-track-seqlen/ (TASK.md status, research/code-anchors.md, research/tests-and-harness.md, verification/hardware-report.md). Commit pending user request; stage ONLY prefill.py + the test file (working tree also has modified .veai/memory files).
+
+## fix-1 COMMITTED (2026-09-18)
+- 5b72aba "fix(scheduler): carry mamba_last_track_seqlen across prefill chunk transitions" on vektory79 (parent ebf071b), single commit, 3 files (prefill.py +3; test_hybrid_cache_manager.py +160; test_abort_inflight_prefill.py +51/-5), 214+/5-. No push. The "commit pending" note above is superseded.

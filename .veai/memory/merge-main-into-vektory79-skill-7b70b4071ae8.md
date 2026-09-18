@@ -3,6 +3,7 @@ name: "merge-main-into-vektory79-skill"
 description: "Skill merge-main-into-vektory79 (.veai/skills): merge origin/main into vektory79; duplicates->main; boot-smoke"
 type: reference
 lastUpdated: 2026-09-16T19:29
+lastRecall: 2026-09-18T23:06
 ---
 
 # Skill merge-main-into-vektory79 (оркестрирующий)
@@ -21,4 +22,3 @@ Purpose: полный регламент обновления ветки vektory
 Preamble: agent: Orchestrator, used-by ОТСУТСТВУЕТ (режим "все агенты" - выбор пользователя 2026-09-15; отличается от gguf-native-serving, где used-by: ["Orchestrator"]).
 
 Review cycle: review-1 fail (1 блокер: у call_test_agent не был задан формат результата; + W/T/I доработки) -> 9 правок (делегированы call_code_agent - оркестраторский write_file не перезаписывает существующие файлы .veai, см. veai-skill-overwrite-trap) -> review-2 pass. Артефакты проверок: .tasks/skill-review-merge-main-into-vektory79/ (временные).
-

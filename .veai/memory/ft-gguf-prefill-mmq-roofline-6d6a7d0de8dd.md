@@ -3,7 +3,7 @@ name: "ft-gguf-prefill-mmq-roofline"
 description: "GGUF prefill MMQ roofline; v0 no-op; v2 grouped MMQ +16.4% measured; ceiling unmet, m-block re-reads; iq shim"
 type: project
 lastUpdated: 2026-09-18T00:55
-lastRecall: 2026-09-18T18:31
+lastRecall: 2026-09-18T23:03
 ---
 
 # GGUF prefill MMQ roofline + campaign state (RTX 5090, 2026-09-17)
