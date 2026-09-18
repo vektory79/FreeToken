@@ -1,4 +1,4 @@
-# TRAPS.md - 38 ловушек для native GGUF serving
+# TRAPS.md - 50 ловушек для native GGUF serving (T01-T50, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -71,6 +71,9 @@
 - **T27** TTFT на cached prefix = first-decode-step overhead, не re-prefill.
 - **T28** KDA autotune ~256 MiB do_bench scratch - eager tail может OOM при
   малом free-after-init (capture-config boot может не OOM - другой VRAM профиль).
+  Тот же класс бьёт и в префилл: 8191@0.90 OOM в ПЕРВОМ префилл-чанке (triton
+  do_bench, driver.py:761: 256.00 MiB при ~187 MiB free) - для 8191 нужен
+  0.85+mr1 (free-after-init ~4.05 GiB; измерено 2026-09-18).
 - **T29** max_tokens=8 с reasoning parser -> пустой content (токены в
   reasoning_content) - не error.
 
@@ -118,6 +121,90 @@
   gate "excludes gguf by name" на engine.py:~1817 был баг-классом (PLAN.md,
   Task 04 DISCOVERY).
 
+## MMQ-prefill кампания 2026-09-17/18 (kernel swap) T39-T47
+
+Ловушки kernel-swap кампании MMQ-префилла (artifacts .tasks/mmq-prefill-kernel/,
+приёмка 7f8c570).
+
+- **T39** (Phase 4, design) Переупорядочивание (token,expert)-пар по expert id
+  (L2-сортировка) - throughput no-op на RTX 5090: тысячи резидентных CTA исполняют
+  соседние пары КОНКУРЕНТНО, порядок запуска не режет конкурентный трафик; BW-bound
+  член двигает только сокращение полного трафика (чтение весов один раз).
+  Измерено: 289.54->291.26 tok/s (+0.6% шум) при подтверждённой активности пути
+  (.tasks/mmq-prefill-kernel/v0-ab.md). Не гнаться за cache-locality reorderings
+  для стриминговых GEMV/MoE ядер.
+- **T40** (Phase 4, vendored-code audit) Перед переиспользованием вендоренных ядер
+  проверять молчаливые bound-допущения: moe.cuh exp_idx > 255 молча дропал
+  экспертов 256+ при E=288 (bound должен браться из expert-размерности
+  weight-тензора); moe_q ds-load читал token_offs[threadIdx.y] OOB (фикс -> [0];
+  латентный баг апстрима vLLM). Класс аудита: индексные константы, размеры
+  per-thread массивов, диапазоны expert-id vs геометрия модели.
+- **T41** (Phase 4, sourcing) Tile glue для iq-форматов не вендорится дословно из
+  llama.cpp на вендоренный pre-#8495 vLLM-интерфейс; рабочий источник - vLLM PR
+  #36226 (raw block bytes в tile_x_ql, decode внутри vec_dot); согласованность:
+  VDR=4 + need_sum=true (need_sum=false портит чтение half2 {d,sum}; VDR=2 даёт
+  double-count). Attribution называть ДВОЙНЫМ: vLLM (Apache-2.0) + llama.cpp
+  lineage (MIT) - MIT-only недостаточно.
+- **T42** (Phase 4, infra reuse) Перед портированием vLLM-хелперов проверять
+  наличие продюсера в freetoken: moe_align_block_size уже есть (moe/fused.py:47;
+  sgl-бекенд + triton-фолбэк; контракт трио: sentinel sorted_token_ids = numel,
+  expert_ids int32, num_tokens_post_pad (1,)); ggml_moe_a8/ggml_moe_get_block_size
+  были bound-but-dead. ОДНО трио обслуживает gate/up (top_k=8) и down (top_k=1,
+  tokens=M*top_k) - ядро делит flat pair index на свой аргумент top_k.
+- **T43** (Phase 6, measurement) Строка "input throughput" ПОСЛЕДНЕГО полного
+  чанка фиктивна (~1552-1602 tok/s при реальных ~290; tail-drain артефакт,
+  воспроизводится между кампаниями): медианы префилла считать исключая chunk 1
+  (warmup) И последний полный чанк.
+- **T44** (Phase 6, A/B validity) BEFORE-стадия обязана воспроизвести
+  историческую кампанийную базу (в пределах run-variance ~3%) - только после
+  этого дельта AFTER доверийна; иначе результат неинтерпретируем.
+- **T45** (Phase 6, A/B mechanics) Same-session A/B без stash: per-call env kill
+  switch (os.environ.get в forward-пути) + два бута с env-флипом; JIT disk-cache
+  компилирует один раз и обслуживает оба бута (python-only правки вообще не дают
+  пересборки). После приёмки свитч удалять (прецедент
+  FREETOKEN_GGUF_GROUPED_PREFILL: добавлен под A/B, удалён post-validation
+  7f8c570).
+- **T46** (Phase 6, liveness) Смена ядра требует kernel-level liveness proof:
+  nsys kernel-name контракт + ТОЧНАЯ математика счётчиков запусков (пример:
+  grouped moe ядра 42 слоя x 3 proj x 9 чанков = 1134 + moe_align 42x9 = 378;
+  ноль запусков старого ядра в префилл-чанках; старое ядро присутствует в decode
+  graph-replays). Bare stdlib logger'ы невидимы в boot-логах (init_logger не
+  вешает хендлер; lastResort дропает INFO) - one-time INFO маркеры ловить
+  PYTHONPATH sitecustomize-пробой.
+- **T47** (process, tooling search) Прежде чем пропустить валидационный пункт
+  из-за "нет тулинга", искать по ВСЕМ .tasks кампанийным папкам и /tmp (слишком
+  узкий grep стоил двух пропусков quality battery; батарея выжила в
+  gguf-glm5next-path-a + /tmp и была успешно адаптирована). Волатильные /tmp
+  артефакты копировать в .tasks немедленно.
+
+## Fix-1 radix кампания 2026-09-18 (scheduler/radix) T48-T50
+
+Ловушки кампании fix-1 radix-reuse (артефакты .tasks/fix1-radix-track-seqlen/;
+фикс 5b72aba "fix(scheduler): carry mamba_last_track_seqlen across prefill
+chunk transitions").
+
+- **T48** (scheduler, fixed 5b72aba) Дроп поля на переходе префилл-чанков:
+  mamba_last_track_seqlen (L) не форвардился из pending_req.chunked_req в
+  continuation Req (try_add_one, scheduler/prefill.py) -> промпт, чей ПОСЛЕДНИЙ
+  префилл-чанк кончается ниже x64 track boundary, финиширует с L=None -> нет
+  GDN snapshot donation -> МОЛЧИВЫЙ radix MISS на идентичном повторе.
+  Диагностическая сигнатура: повторный HIT на крупных чанках (8128 -> 65536),
+  MISS на мелких (4096 -> 0/49) при любом ratio/mr - конфиг-независимый баг
+  (НЕ dtype/mr/ratio/timing), зависит только от chunk size. Пост-фикс, повтор
+  65k: #cached-token 65472 @4096 / 65536 @8191 (8128-чанки, 0.85+mr1).
+- **T49** (gate, Environment-классификация) NaN/Environment-фейл полного
+  гейта, который проходит изолированно И с диффом, И без - это suite-ordering
+  Environment, а не регрессия (прецедент
+  test_gguf_expert_banks.py::test_grid_caps_raise_before_kernel_launch: NaN
+  isfinite только под full-suite порядком; гейт 2135 passed / 6 baseline-class
+  failed). Прежде чем винить изменение - изолированный A/B прогон.
+- **T50** (boot, slot-floor) Ранний slot-floor gate фейл-фастит, когда
+  десктопные приложения съедают VRAM (~492 MiB hoptodesk-налог): "minimum of
+  1059 layer-0-width slots vs planned 1040" при --memory-ratio 0.89. Лестница
+  ретраев: 0.89 -> 0.90 (free-after-init 2.59 GiB); для 8191 нужен 0.85+mr1
+  (см. T28). Налог переменный день ото дня - VRAM-конкуренция, а не регрессия
+  конфига.
+
 ## Debugging
 
 - **D01** CUDA IMA асинхронен: портивший launch ПРЕДШЕСТВУЕТ видимому кадру.
@@ -151,3 +238,14 @@
   per layer) + benchbw-ноги; шаг = max(ноги) + fixed sync; гэп объясняется тем,
   КАКАЯ память несёт промахи (DDR5 vs PCIe). Метод-образец:
   verification/nvfp4-ab-measurements.md.
+- **D09** nsys live-serve профилирование: nsys launch отвергает -o; рабочая
+  схема = launch + start-after-ready + --cuda-graph-trace=node; голый mid-run
+  start даёт отчёт с API/graph-записями, но БЕЗ eager kernel activities; анализ
+  через sqlite export; окно брэкетится по строкам "input throughput"; overhead
+  ~nil (чанки внутри/вне окна идентичны).
+- **D10** Step-0 split перед design kernel-swap: один nsys-проход + sqlite
+  export фиксирует раскол GEMM/copies/rest с kernel-name учётом на чанк
+  (пример: moe_vec_q 126/чанк = 42 слоя x 3 proj; fast_index_copy_multi
+  42/чанк); GPU idle ~0.05% = нет CPU-starvation; замер ДО проектирования
+  перекроил список бутылочных горлышек (dense q8_0 GEMM стал top "rest",
+  а не fetch copies).

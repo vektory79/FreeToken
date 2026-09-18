@@ -208,6 +208,17 @@ concurrent microbenches both leaked and invalidated their own numbers).
   backend death never completes - do not wait for it.
 - POSTFLIGHT census: re-run the ps census, kill this wave's survivors, census
   /dev/shm semaphores: `ls /dev/shm | grep -c "^sem\.mp-"`.
+- SWEEP verification: before killing leftovers verify cmdline + start-time
+  (spawn_main children reparented to systemd = stale orphans); IDE helpers
+  legitimately hold baseline semaphores (a PyCharm forkserver held 5 live
+  sem.mp-*) - attribute census deltas BEFORE killing, never kill IDE processes.
+- Semaphore census deltas may self-resolve: /dev/shm sem.mp-* files auto-unlink
+  when the holding multiprocessing resource_tracker dies (observed 11 -> 5,
+  zero manual rm) - re-census before manual cleanup.
+- RUNNER PID hygiene: a PID variable the watchdog references (MEASPID) must be
+  exported BEFORE the watchdog block - under `set -u` the watchdog subshell
+  exits when it references the unset MEASPID (the watchdog stops), while the
+  trap-on-EXIT cleanup still pkill's the ft tree.
 - BETWEEN-WAVE sweeps are REPORT-ONLY: never touch an active wave's processes;
   the active patterns are named in the prompt. A force-stopped agent is assumed
   dirty - the next wave starts with a sweep of ITS patterns.
@@ -227,8 +238,14 @@ concurrent microbenches both leaked and invalidated their own numbers).
   phase's acceptance criteria (in each brief under [tasks/](tasks/)).
 - `Assisted-by: Veai` trailer allowed; attribution follows the repo rules.
 - NO `git push`, no `gh pr create` / `gh pr comment` / `gh issue create` by agents.
-- The skill files themselves (`.veai/skills/gguf-native-serving/`) are staged
-  but uncommitted - committing them is the user's call; agents do not commit them.
+- Staging hygiene: stage by an EXPLICIT path list (never `git add -A` / `.` -
+  the index may hold stale staged versions from parallel sessions); verify
+  staged == worktree per file (`git diff --cached`); verify ZERO `.veai/memory`
+  entries staged (parallel orchestrator sessions churn it); re-run the fast
+  test waves immediately before committing; the commit body carries the
+  measured results (the why the diff does not show).
+- The skill files themselves (`.veai/skills/gguf-native-serving/`) are committed
+  (6e673ab); further skill edits stay uncommitted until the user asks.
 
 ## 9. Evidence rules, completion, escalation
 
@@ -263,7 +280,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T38 + recipes D01-D08; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T50 + recipes D01-D10; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),
@@ -281,3 +298,27 @@ Escalation points - go to the user with options, never silently rounded up:
   Anti-lesson: the Task-06 "handshake floor" estimate was fetch volume
   misattributed as sync (T33) - hardware with reference kernels beat the
   projection.
+
+## 11. Session-end self-update
+
+At the END of every session that produced reusable knowledge, the Orchestrator
+MUST run a self-update pass before closing out. Reusable knowledge: root
+causes with commit ids, measured expectation classes / numbers, new traps,
+protocol or hygiene refinements, corrections to now-stale facts.
+
+- Where to integrate - update-in-place over duplication, cross-reference
+  instead of repeating:
+  - [TRAPS.md](TRAPS.md) - a new T-number continuing the sequence, or an
+    in-place extension of an existing trap already covered;
+  - task briefs - expected-result classes (task-06 for serving expectations);
+  - this file - hygiene / protocol bullets (sections 7 and 8).
+- Consistency gates: trap / recipe counters stay in sync across the TRAPS.md
+  H1, the SKILL.md counter line and section 10; ASCII only - no em-dashes,
+  ASCII arrows; no lab-diary prose; open gaps are labeled open, without a
+  trap number.
+- Execution: delegate the integration to a Code subagent with the
+  session-fact payload; for non-trivial integrations run a review pass
+  (blocking_status) and apply cheap polish for non-blocking notes.
+- Boundaries: the pass NEVER commits or pushes by itself - commits remain an
+  explicit user decision (section 8); the SKILL.md YAML preamble is never
+  touched; no README creation.

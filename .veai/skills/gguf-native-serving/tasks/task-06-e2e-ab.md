@@ -28,6 +28,19 @@ run the quality battery, and deliver the honest verdict.
 5. Deliver: A/B table + quality table + honest verdict + artifacts under
    verification/phase6/ (or equivalent).
 
+## Expected result classes (glm5next reference, post fix 5b72aba)
+
+- Radix reuse on a repeated 65k prompt: #cached-token 65472 @4096-chunks /
+  65536 @8191-chunks (5b72aba made reuse work at ANY chunk size; the old
+  "0 cached @4096" class is obsolete). The deep-node LRU eviction gap remains
+  open (snapshot eviction, hybrid_radix_cache.py:168-237).
+- Prefill medians of full chunks (exclude the chunk-1 triton warmup, ~124
+  tok/s on 8128-chunk runs and ~92 on 4096-chunk runs, and the bogus
+  last-full-chunk line, T43): ~300 @4096 / ~336 @8128 tok/s class.
+- Decode steady: 13.5-14.7 tok/s class.
+- Boot fallback ladder under desktop VRAM pressure: 0.89 -> 0.90 -> 0.85+mr1
+  for 8191 (8191@0.90 OOMs in the first-chunk triton do_bench, T28/T50).
+
 ## Debugging an IMA or OOM
 
 - CUDA_LAUNCH_BLOCKING=1 makes the error synchronous (names the true launch).
@@ -48,6 +61,35 @@ run the quality battery, and deliver the honest verdict.
   VRAM profile). This is an artifact, not a regression.
 - T29: max_tokens=8 with a reasoning parser returns empty content (tokens
   burned in reasoning_content) - not an error.
+- T43: the last full chunk's "input throughput" line is bogus (~1552-1602 tok/s
+  vs real ~290; tail-drain artifact) - compute prefill medians excluding
+  chunk 1 (warmup) AND the last full chunk.
+- T44: the BEFORE stage must reproduce the historical campaign baseline (within
+  ~3% run variance) before the AFTER delta is trustworthy.
+- T45: same-session A/B without stash: per-call env kill switch + two boots with
+  an env flip; the JIT disk-cache compiles once for both boots; delete the
+  switch after acceptance (FREETOKEN_GGUF_GROUPED_PREFILL precedent).
+- T46: a kernel swap needs kernel-level liveness proof: nsys kernel-name contract
+  + exact launch-count math; bare stdlib loggers are invisible in boot logs -
+  catch one-time INFO markers via a PYTHONPATH sitecustomize probe.
+- T47: before skipping a validation item for "no tooling", search ALL .tasks
+  campaign folders and /tmp; copy volatile /tmp artifacts into .tasks immediately.
+- T48: silent radix MISS on an identical repeat when the FINAL prefill chunk
+  ends below the x64 track boundary - the pre-5b72aba scheduler dropped
+  mamba_last_track_seqlen across chunk transitions (config-independent,
+  chunk-size-dependent); post-fix expectations above.
+- T49: a NaN/Environment failure that passes in isolation with AND without the
+  diff is suite-ordering Environment, not a regression - verify isolated A/B
+  before blaming a change.
+- T50: the boot slot-floor gate fail-fasts when desktop VRAM tax lands
+  (~492 MiB) - retry ladder in the Expected result classes above.
+- D09: nsys live-serve profiling: `nsys launch` rejects -o; launch +
+  start-after-ready + --cuda-graph-trace=node works; a bare mid-run start yields
+  a report without eager kernel activities; analyze via sqlite export; bracket
+  the window by "input throughput" lines.
+- D10: Step-0 split before a kernel-swap design: one nsys pass + sqlite export
+  splits GEMM/copies/rest per chunk with kernel-name accounting; measure BEFORE
+  designing or the bottleneck ranking is wrong.
 
 ## Acceptance criteria
 

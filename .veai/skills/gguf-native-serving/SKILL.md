@@ -22,6 +22,12 @@ phase is a wave: Test -> Review -> Triage -> STOP GATE -> commit. Режимы
 исполнения, handoff, process-hygiene и commit-дисциплина описаны там; этот
 файл - доменная часть (discovery + 7 фаз), брифы задач:
 
+В конце сессии скилл самообновляется: новые знания сессии (причины с
+коммит-идами, замеренные классы ожиданий, новые ловушки, правки протокола)
+интегрируются в TRAPS.md / брифы / ORCHESTRATION.md (см. раздел
+"Session-end self-update" в [ORCHESTRATION.md](ORCHESTRATION.md)); проход
+никогда не коммитит сам - коммит остаётся решением пользователя.
+
 - [tasks/task-00-discovery.md](tasks/task-00-discovery.md)
 - [tasks/task-01-config-shim.md](tasks/task-01-config-shim.md)
 - [tasks/task-02-tensor-translator.md](tasks/task-02-tensor-translator.md)
@@ -137,7 +143,7 @@ prior-driven текст после 2-минутной загрузки - худ�
 
 ## Матрица ловушек (проверь КАЖДУЮ перед закрытием фазы)
 
-См. [TRAPS.md](TRAPS.md) - 38 ловушек, каждая из которых стоила реального
+См. [TRAPS.md](TRAPS.md) - 50 ловушек, каждая из которых стоила реального
 отладочного времени.
 
 ## Приёмка кампании

@@ -42,6 +42,21 @@ dequant.py BLOCK_SHAPE + convert path (is_gguf_model -> GGUFLinear/GGUFEmbedding
   untied, add a tie guard at convert time with a clear error.
 - T20: The single-signature degenerate case must be byte-identical to the
   pre-partition behavior (the existing tests pin this - keep them green).
+- T39: reordering (token,expert) pairs by expert id is a throughput no-op for
+  streaming GEMV/MoE kernels - resident CTAs execute neighboring pairs
+  concurrently; only full-traffic reduction moves the BW-bound term
+  (289.54->291.26 tok/s, noise) (.tasks/mmq-prefill-kernel/v0-ab.md).
+- T40: audit vendored kernels for silent bound assumptions: moe.cuh exp_idx > 255
+  silently dropped experts 256+ at E=288; moe_q ds-load read token_offs
+  [threadIdx.y] OOB - audit index constants, per-thread array sizes, expert-id
+  ranges vs model geometry.
+- T41: iq tile glue is not vendored verbatim from llama.cpp onto the vendored
+  pre-#8495 vLLM interface; the working source is vLLM PR #36226; keep
+  VDR=4 + need_sum=true; attribution is DOUBLE (vLLM Apache-2.0 + llama.cpp MIT).
+- T42: before porting vLLM helpers check freetoken for an existing producer -
+  moe_align_block_size (moe/fused.py:47) already serves the sentinel/int32/
+  post-pad trio; one trio serves gate/up (top_k=8) and down (top_k=1,
+  tokens=M*top_k).
 
 ## Acceptance criteria
 

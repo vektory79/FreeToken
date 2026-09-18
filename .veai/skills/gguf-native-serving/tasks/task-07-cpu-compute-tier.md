@@ -118,6 +118,10 @@ microbench 53-66 GB/s (16/20 threads) vs gate >= 40 -> hybrid 16.67 tok/s
   a reference A/B (D08).
 - T37: JIT helper CC/CXX leak - scope to the build invocation.
 - T38: engine capability gates query the capability set, never hardcode ids.
+- T44/T45: A/B mechanics apply to tier A/B too: the BEFORE stage must reproduce
+  the campaign baseline (~3% run variance) first; same-session A/B without
+  stash = per-call env kill switch + two boots with an env flip, switch deleted
+  after acceptance.
 
 ## Output
 
