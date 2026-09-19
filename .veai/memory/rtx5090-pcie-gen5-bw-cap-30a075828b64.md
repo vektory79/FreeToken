@@ -3,7 +3,7 @@ name: "rtx5090-pcie-gen5-bw-cap"
 description: "RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts"
 type: project
 lastUpdated: 2026-09-13T23:42
-lastRecall: 2026-09-18T23:06
+lastRecall: 2026-09-19T18:13
 ---
 
 # RTX 5090 PCIe Gen5 bandwidth cap on work.vektory79.me - ROOT CAUSE: IOMMU Translated mode (fixed 2026-09-12)

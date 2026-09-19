@@ -1,5 +1,3 @@
-- [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; IOMMU tax = old 4 GB/s
-- [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-b9def4525192.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
 - [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
 - [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-30a075828b64.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts
@@ -11,7 +9,6 @@
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-90784dc7d0a9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-029031181f9f.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 1M break was transient
 - [vektory79-main-rewrite-gotcha](vektory79-main-rewrite-gotcha-44d497ec530c.md) — vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits
-- [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-943a3bdf3964.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails (python -m green), pgrep census match
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-78dd276b7ddd.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
 - [process-hygiene-protocol](process-hygiene-protocol-ea279db69539.md) — Test-wave hygiene: census, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs; cross-wave GPU OOM = Environment
@@ -21,16 +18,22 @@
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-bfc2e865360a.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
 - [git-integration-preferences](git-integration-preferences-8f8abb82eaac.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-3ab3f82469b1.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
-- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-426144b5f4b1.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys interactive session for live ft serve
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
 - [ft-bare-logger-liveness-trap](ft-bare-logger-liveness-trap-6399769cb81b.md) — Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)
 - [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-b855848b830d.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-2fb4d7804e19.md) — gguf-native-serving skill: T01-T50 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978
 - [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-540a37c5ed9f.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 hypothesis now verified
 - [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-512a3fc6e85f.md) — gguf test methodology: _FP16_SCALE_FIELDS, analytic fixtures, seeded tolerance bounds (unseeded = latent flakes)
 - [ft-gguf-moe-mtile-kernel-traps](ft-gguf-moe-mtile-kernel-traps-c8b1b2a09ff4.md) — moe.cuh m-tile traps: x=weights y=activations naming, ds-fill garbage rows, block_size single source of truth
-- [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-1465018355bd.md) — GGUF prefill MMQ roofline: v0 no-op, v2 grouped +16.4%, 758-tok/s ceiling corrected (kernel left BW-bound regime)
 - [ft-gate-baseline-nan-flake](ft-gate-baseline-nan-flake-438a2a9c30e0.md) — Cap-test NaN flake root-caused to torch.empty x and FIXED in v3a (zeros); gate scale 2135 tests; classification method
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-28c5cc0c6fd3.md) — GLM-5.3 NVFP4 post-iommu baseline: 1M/512k budget recipes, chunk-size prefill lever; 09-14 fail-fast transient
-- [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-a08c378d222f.md) — v3a m-tile sweep: tile32 +67.2% = 556 tok/s @8128; ALU/LDS-bound; v3b no-go; committed 1706aae
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-aff684844ef6.md) — gguf-native-serving skill: T01-T52 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978
+- [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-00890797b80b.md) — v3 m-tile campaign: grouped MoE tile sweep +67.2%, committed 1706aae; MoE tile32 = 4.37 s, 1.8 s estimate refuted
+- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-f47c9e16cbc5.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu ERR_NVGPUCTRPERM blocked
+- [ft-gate-nodeid-collection-drift](ft-gate-nodeid-collection-drift-ed9c69f3e41e.md) — Full-gate nodeid counts drift across runs: test_quant_config.py collection-time glob parametrization; key on failure set
+- [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-08f4f089d42d.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
+- [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-f3b720f0ab4a.md) — GGUF prefill MMQ roofline analysis: step-0 nsys split, v0 no-op, v2 grouped +16.4%, ~758 ceiling unreachable (ALU-bound)
+- [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-ed33892b6a6b.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
+- [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; old ~4 GB/s likely IOMMU tax
+- [nsys-silent-no-collection-trap](nsys-silent-no-collection-trap-561ecdc4872d.md) — nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe
+- [ft-dense-q80-gemm-campaign](ft-dense-q80-gemm-campaign-f6b4fef59b69.md) — dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61% e2e (92.8% recovery); commit+flip pending; Candidate A next

@@ -3,7 +3,7 @@ name: "ft-gguf-v2-grouped-mmq-measured"
 description: "v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 hypothesis now verified"
 type: project
 lastUpdated: 2026-09-19T02:54
-lastRecall: 2026-09-19T03:10
+lastRecall: 2026-09-19T18:13
 ---
 
 # v2 grouped MMQ prefill: measured outcome and the remaining gap

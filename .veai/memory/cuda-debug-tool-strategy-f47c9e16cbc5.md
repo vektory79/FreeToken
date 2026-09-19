@@ -1,9 +1,9 @@
 ---
 name: "cuda-debug-tool-strategy"
-description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys interactive session for live ft serve"
+description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu ERR_NVGPUCTRPERM blocked"
 type: project
-lastUpdated: 2026-09-17T18:21
-lastRecall: 2026-09-19T03:10
+lastUpdated: 2026-09-19T17:59
+lastRecall: 2026-09-19T18:14
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation
@@ -48,3 +48,6 @@ enough, reserve python instrumentation for wrapper-blocked cases.
 - Zero-code-change profiling of `ft serve`: `nsys launch --session=NAME --trace=cuda .venv/bin/ft ...`, then `nsys start --session=NAME --sample=none` and `nsys stop --session=NAME` around a steady window anchored on server "input throughput" lines; analyze via `nsys export --type sqlite` (per-kernel sums grouped by short-name per chunk). Measured overhead was nil (chunks inside vs outside the window identical).
 - CLI traps: `nsys launch` REJECTS `-o` and `--sample` (both belong on `nsys start`); failed iterations leave leftover .nsys-rep files in CWD (repo root) - clean them up.
 - Launch-count cross-checks validate the capture window: gguf moe path = moe_vec_q 126/chunk (42 layers x gate/up/down) and fast_index_copy_multi 42/chunk.
+
+## ncu is BLOCKED on this box (2026-09-19, dense-q80-gemm Step 0)
+`ncu` fails with ERR_NVGPUCTRPERM (GPU perf counters not enabled for the user) - do not plan a profiling campaign around ncu; enabling counters requires the user (driver permission). Substitute software discriminators that pin a kernel's regime without counters: (1) measured-vs-model BW closure per op class - a UNIFORM measured/model ratio across different shapes = a throughput ceiling expressed in traffic units (here ~22 TF/s per-MAC), while closure near 1.0x = BW-bound (moe_vec closed at 0.92x; dense q8_0 did NOT at 0.62x); (2) M-sweep on one exact shape - time linear in M at a constant rate, with implied BW above the spec peak, proves BW-bound is physically impossible; (3) format A/B at identical shape/MACs - more bytes but slower = not BW-bound (q6_K: 23% fewer bytes, 6.3% slower); (4) per-class rate spread - e.g. kda_in_proj 18.08 TF/s at W=108.35 MB > L2 vs 20.9-22.4 TF/s for W<=71.3 MB isolates an L2-overflow mix.

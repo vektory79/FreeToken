@@ -2,8 +2,8 @@
 name: "ft-serve-test-and-e2e-gotchas"
 description: "FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness"
 type: project
-lastUpdated: 2026-09-12T23:41
-lastRecall: 2026-09-19T03:10
+lastUpdated: 2026-09-19T18:18
+lastRecall: 2026-09-19T18:13
 ---
 
 # FreeToken test/e2e environment gotchas
@@ -56,3 +56,6 @@ Durable operational facts discovered 2026-09-04 while fixing `ft serve` /ready +
   * trap on runner EXIT kills watchdog + client + server, so a failed run never leaks processes.
   * client: per-phase try/except that captures the HTTPError BODY (first ~400 chars, e.g. 422 validation detail), prints phase names as progress, exits non-zero if any phase failed - the runner then reports rc and the failure lines.
 - Why: a dead backend leaves uvicorn alive in "Waiting for connections to close"; /ready stays non-200 while the process is still alive, so a /ready-only poller hangs until its timeout.
+
+## Baseline pointer
+The 2026-09-12 full-gate baseline above is historical; current authority (09-15/19 classes + scale) lives in ft-pytest-worktree-baseline-gotchas (drift cause: ft-gate-nodeid-collection-drift). A quiet baseline class (test_prefill_hit_d2d) = drift, not regression.

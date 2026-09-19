@@ -3,7 +3,7 @@ name: "glm53-post-iommu-baseline"
 description: "GLM-5.3 NVFP4 post-iommu baseline: 1M/512k budget recipes, chunk-size prefill lever; 09-14 fail-fast transient"
 type: project
 lastUpdated: 2026-09-19T03:12
-lastRecall: 2026-09-19T03:10
+lastRecall: 2026-09-19T18:13
 ---
 
 # GLM-5.3-Flash-NVFP4 hybrid on RTX 5090: post-iommu=pt re-baseline (2026-09-12)
@@ -58,4 +58,3 @@ Applied the full #339 diff (clean on vektory79), reran A1: server prefill ~492-5
 ## 1M boot status history
 - 2026-09-14: the canonical 1M nvfp4 command (ratio 0.89) FAIL-FASTED (min plan 8.19 GiB > budget 6.63; booted 09-12) after an unexplained budget shift; working reserve was --kv-reserve-tokens 524288 -> 322 slots (< 336 WS), decode ~14.1 @64k.
 - 2026-09-15: that failure was TRANSIENT - the canonical 1M command boots again (341 slots, short decode 15.18, nvfp4 f=24.8% profile restored). A1 is the reference config again; the 322-slot baseline above is historical. See pr408-kv-nvfp4-1m-port (final section) and gguf-hybrid-reacceptance-final.
-

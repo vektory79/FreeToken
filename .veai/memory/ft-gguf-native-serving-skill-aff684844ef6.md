@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-native-serving-skill"
-description: "gguf-native-serving skill: T01-T50 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978"
+description: "gguf-native-serving skill: T01-T52 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978"
 type: project
-lastUpdated: 2026-09-19T01:14
-lastRecall: 2026-09-19T04:15
+lastUpdated: 2026-09-19T14:39
+lastRecall: 2026-09-19T18:25
 ---
 
 # GGUF native serving skill: reusable methodology for any model family
@@ -12,7 +12,7 @@ Single location: /media/ai/src/FreeToken/.veai/skills/gguf-native-serving/ (git-
 
 ## Structure
 - SKILL.md (~153 lines): YAML preamble (name gguf-native-serving, schemaVersion v0.1, description with trigger phrases, agent: Orchestrator, used-by: [Orchestrator] - user clarification 2026-09-15; an earlier manual-only probe validated the parser empirically then was deleted); Orchestration header + Russian pointer to the self-update rule (lines 25-29); 7-phase pipeline (discovery -> config shim -> tensor translator -> tokenizer -> kernel dispatch -> expert banks -> E2E A/B offload baseline -> Phase 7 CPU compute tier); explicit links to all siblings; counter line 50 traps.
-- TRAPS.md: T01-T50 + recipes D01-D10; pre-close checklist.
+- TRAPS.md: T01-T52 + recipes D01-D10; pre-close checklist. (CORRECTED 2026-09-19, dense-q80-gemm session: earlier memory said T01-T50; T51/T52 were added by the v3a m-tile campaign - on-disk TRAPS.md verified to have T01-T52; commit provenance of the skill-docs update not re-verified.)
 - ORCHESTRATION.md (11 sections, 324 lines): mode selection (7 phases ARE the default plan; briefs = task files), phase=wave quality loop (Review x2 mandatory for kernel/hardware/budget phases task-02/04/05/06/07), 8-item phase STOP GATE incl. per-phase commit gate, lossless handoff, process-hygiene protocol, §7 sweep/MEASPID hygiene bullets (2026-09-18: verify cmdline+start-time before kill; sem.mp-* auto-unlink on tracker death; never kill IDE helpers holding baseline semaphores; export MEASPID before watchdog under set -u), §8 commit discipline (Conventional Commits; Assisted-by: Veai allowed; explicit-path staging, never add -A; staged==worktree verify; ZERO .veai/memory staged; no push; one commit per phase at STOP GATE; measured-results body), §10 counter sync, §11 Session-end self-update.
 - tasks/task-00..07: task-00 discovery carries the WORKING-REFERENCE question (ask the user for llama.cpp sources; extract vec_dot kernels arch/<isa>/quants.c, quantize_row_* ggml-quants.c, ggml-common.h block layouts, CMakeCache ISA flags, ggml_backend_sched CPU-resident scheduling pattern) + CPU support-matrix row + "Upstream alignment or waive" user decision; task-07 = self-contained CPU-tier brief (microbench gate -> port recipe -> weighted pools -> benchbw FULL rerun -> single-variable end-to-end A/B).
 
@@ -22,9 +22,10 @@ At the END of every session that produced reusable knowledge (root causes with c
 ## Campaign knowledge (history, merged into traps)
 - 2026-09-15 hybrid/CPU-kernel campaign (T30-T38, D06-D08): env-override SIGILL cap-down; single-dtype profile clobber; concurrent-measurement corruption; fetch-volume-as-floor misattribution; even-split starvation; projection without reference anchor; stale profile without tier fingerprint; CC/CXX JIT leak; hardcoded capability gate; standalone microbench; serialized-run discipline; reference-A/B decomposition. Same day: preamble saga resolved; review cycles 1-2 fixed 3 blockers (links, Phase 0 -> task-00).
 - 2026-09-18 MMQ prefill campaign: T39 expert-sort reorder = throughput no-op (resident-CTA concurrency); T40 vendored-code audit (exp_idx>255 silent expert drop at E=288; moe_q token_offs OOB); T41 iq glue source = vLLM PR #36226 (VDR=4 + need_sum=true; Apache-2.0 + MIT); T42 moe_align_block_size reuse (ONE trio serves gate/up + down); T43 bogus last-full-chunk throughput line; T44 BEFORE-reproduces-baseline A/B validity gate; T45 per-call env kill switch for same-boot A/B; T46 kernel-level liveness (launch-count math; bare-logger boot-invisibility + sitecustomize probe); T47 tooling search across ALL .tasks folders + /tmp; D09 nsys live-serve recipe (start-after-ready + --cuda-graph-trace=node; sqlite export); D10 Step-0 GEMM/copies/rest split before kernel-swap design.
+- 2026-09-18/19 v3a m-tile campaign (ADDED 2026-09-19): T51 audit silent bound assumptions in the vendored body BEFORE reusing it at new tile shapes (dense body shares lineage with moe_q but is NOT identical); T52 traffic cuts pay sub-linearly once the kernel leaves the BW-bound regime - measure the regime first (ncu discriminator: mio_throttle/short_scoreboard = ALU-bound, barrier/long_scoreboard = staging-bound). Knob pattern: single source of truth, per-call env read, "do not flip after boot" docstring.
 - 2026-09-18 fix-1 radix campaign: T48 scheduler field-drop across chunk transitions (mamba_last_track_seqlen not forwarded -> radix MISS when the final chunk ends below the x64 boundary; FIXED upstream 5b72aba; repeat-65k expectations 65472@4096 / 65536@8128); T49 full-gate Environment-flake classification (test_gguf_expert_banks NaN passes isolated both ways); T50 0.89 slot-floor fail-fast -> 0.90 (desktop VRAM tax ~492 MiB); T28 extended (8191 first-chunk triton do_bench OOM 256 MiB at 0.90 -> 0.85+mr1); task-06 "Expected result classes (post 5b72aba)": prefill medians ~300@4096 / ~336@8128 (exclude chunk-1 warmup ~124@8128 / ~92@4096 and the bogus last-full-chunk line), decode 13.5-14.7 tok/s, boot ladder 0.89 -> 0.90 -> 0.85+mr1 for 8191; deep-node LRU eviction = open gap, deliberately no trap number.
 
 ## Current state
-- Committed through 055b978 "docs(skill): add mmq/radix campaign knowledge and session-end self-update rule" (parent 5b72aba; 6 files 211+/5-; Assisted-by: Veai per §8; zero .veai/memory staged; no push). Skill worktree clean vs 055b978.
+- Committed through 055b978 "docs(skill): add mmq/radix campaign knowledge and session-end self-update rule" (parent 5b72aba; 6 files 211+/5-; Assisted-by: Veai per §8; zero .veai/memory staged; no push). On-disk TRAPS.md has since gained T51/T52 from the v3a campaign (see Structure correction above).
 - Reviews: review-3 (A-G pass) and review-4 (A-F pass; 4 non-blocking nits incl. "blocking_status" term not defined in §11 text - future session-end pass candidate). Artifacts: .tasks/skill-review-gguf-native-serving/review-1..4.md.
 - Usage: run task-00 discovery (asks the reference-sources question), then 01-07 in order with the quality loop; TRAPS.md is the pre-close checklist. glm5next is the cited worked example (hybrid 16.67 tok/s vs offload 12.97 after the port).

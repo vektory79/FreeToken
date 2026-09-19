@@ -3,7 +3,7 @@ name: "ft-bare-logger-liveness-trap"
 description: "Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)"
 type: project
 lastUpdated: 2026-09-17T19:24
-lastRecall: 2026-09-18T23:05
+lastRecall: 2026-09-19T18:14
 ---
 
 # Bare-logger liveness trap in freetoken boot logs
