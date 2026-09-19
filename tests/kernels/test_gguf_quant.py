@@ -629,9 +629,10 @@ def _kda_nsplit_layer(rng, k, n):
 
 @cuda
 def test_kda_nsplit_env_knob(monkeypatch):
-    # FREETOKEN_GGUF_KDA_NSPLIT mirrors the v3a m-tile knob's shape: default 1,
-    # strict whitelist (no trim / numeric parsing, stragglers raise), read PER
-    # CALL so flipping the env between calls flips the launch structure.
+    # FREETOKEN_GGUF_KDA_NSPLIT mirrors the v3a m-tile knob's shape: default 2
+    # (split, the measured winner), strict whitelist (no trim / numeric parsing,
+    # stragglers raise), read PER CALL so flipping the env between calls flips
+    # the launch structure.
     from freetoken.layers.gguf import kda_in_proj_forward
 
     monkeypatch.delenv("FREETOKEN_GGUF_KDA_NSPLIT", raising=False)
@@ -640,18 +641,18 @@ def test_kda_nsplit_env_knob(monkeypatch):
 
     mmq, vec = _spy_kda_a8(monkeypatch)
     kda_in_proj_forward(lin, x)
-    assert mmq == [96] and vec == []
-    # "" is not a straggler: the empty value must behave exactly like unset (default 1)
+    assert mmq == [32, 64] and vec == []
+    # "" is not a straggler: the empty value must behave exactly like unset (default 2)
     monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "")
     kda_in_proj_forward(lin, x)
-    assert mmq == [96, 96] and vec == []
-    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
-    kda_in_proj_forward(lin, x)
-    assert mmq == [96, 96, 32, 64] and vec == []
+    assert mmq == [32, 64, 32, 64] and vec == []
     # per-call read: the same process flips back without any module state
     monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "1")
     kda_in_proj_forward(lin, x)
-    assert mmq == [96, 96, 32, 64, 96]
+    assert mmq == [32, 64, 32, 64, 96]
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+    kda_in_proj_forward(lin, x)
+    assert mmq == [32, 64, 32, 64, 96, 32, 64] and vec == []
     # invalid values fail fast before any launch, for any shape
     for bad in ("12", "0", "-2", "abc", " 2", "02", "+2"):
         monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", bad)

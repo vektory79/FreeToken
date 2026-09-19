@@ -110,14 +110,16 @@ class GGUFLinear(BaseOP):
 
 
 def _kda_nsplit_env() -> int:
-    """FREETOKEN_GGUF_KDA_NSPLIT: unset/empty or "1" = single launch, "2" = split.
+    """FREETOKEN_GGUF_KDA_NSPLIT: unset/empty or "2" = split, "1" = single launch.
     Strict whitelist read PER CALL (the v3a ft_gguf_moe_mtile pattern): no trim,
-    no numeric parsing, so " 2"/"02"/"+2" stragglers fail fast like the C knob."""
+    no numeric parsing, so " 2"/"02"/"+2" stragglers fail fast like the C knob.
+    Default 2: the split measured +2.61% e2e prefill (RTX 5090, MTILE=32) with
+    bitwise-identical outputs (.tasks/dense-q80-gemm/ab-nsplit.md)."""
     v = os.environ.get("FREETOKEN_GGUF_KDA_NSPLIT")
-    if v is None or v == "" or v == "1":
-        return 1
-    if v == "2":
+    if v is None or v == "" or v == "2":
         return 2
+    if v == "1":
+        return 1
     raise ValueError(f"FREETOKEN_GGUF_KDA_NSPLIT must be 1 or 2, got {v!r}")
 
 
