@@ -3,7 +3,7 @@ name: "ft-gguf-native-serving-skill"
 description: "gguf-native-serving skill: T01-T50 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978"
 type: project
 lastUpdated: 2026-09-19T01:14
-lastRecall: 2026-09-19T01:09
+lastRecall: 2026-09-19T04:15
 ---
 
 # GGUF native serving skill: reusable methodology for any model family

@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-test-fixture-crafting"
-description: "Synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets; analytic uniform fixtures catch what parity cannot"
+description: "gguf test methodology: _FP16_SCALE_FIELDS, analytic fixtures, seeded tolerance bounds (unseeded = latent flakes)"
 type: project
-lastUpdated: 2026-09-14T22:05
-lastRecall: 2026-09-18T23:05
+lastUpdated: 2026-09-19T02:54
+lastRecall: 2026-09-19T02:33
 ---
 
 # Crafting synthetic gguf quant tensors in FreeToken tests
@@ -22,3 +22,6 @@ How to apply: any new test crafting quantized gguf tensors or expert banks - reu
 
 ## Analytic-uniform fixtures beat parity (2026-09-15, hybrid campaign Task 01)
 Analytic uniform fixtures (exact expected values computed independently) catch fixture/packer-semantics bugs that parity-vs-reference CANNOT: same wrong bytes on both sides cancel out. In tests/moe/test_cpu_moe_gguf_iq.py the analytic test caught the IQ3_XXS scale nibble broadcast into the summed sign lanes (4x nibble) which the parity test missed by construction. Always pair parity-vs-gguf-py with an analytic uniform test.
+
+## Tolerance pinning near the noise floor (2026-09-18, v3a Review-A)
+Unseeded tolerance bounds sized at the noise floor are LATENT FLAKES: v2's unseeded grouped-vs-moe_vec 1e-3 for iq passed at commit time but fails 1/20 seeds for IQ4_XS (margin +2.0e-4, worst |a-b| ~1.2e-3). Method: seed the draw (torch.manual_seed), noise-scan ~20 seeds, size the bound >= ~2-5x the worst band (v3a landed 2e-2/1e-2 for iq; a 4e-3/2e-3 option keeps a 5x tighter tripwire). Systematic bug classes (ds-fill row garbage) shift whole pairs O(1) - 100x above the band - so loosening masks nothing real. Related gotcha: torch.empty bf16 inputs in guard-only tests yield ~1e38 garbage that overflows the q8_1 fp16 scale -> inf; use torch.zeros when the test only needs finite math.

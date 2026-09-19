@@ -3,7 +3,7 @@ name: "cuda-debug-tool-strategy"
 description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys interactive session for live ft serve"
 type: project
 lastUpdated: 2026-09-17T18:21
-lastRecall: 2026-09-18T23:06
+lastRecall: 2026-09-19T03:10
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation

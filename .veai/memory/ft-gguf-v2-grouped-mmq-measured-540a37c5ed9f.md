@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-v2-grouped-mmq-measured"
-description: "v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 task pointer"
+description: "v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 hypothesis now verified"
 type: project
-lastUpdated: 2026-09-18T20:46
-lastRecall: 2026-09-18T23:47
+lastUpdated: 2026-09-19T02:54
+lastRecall: 2026-09-19T03:10
 ---
 
 # v2 grouped MMQ prefill: measured outcome and the remaining gap
@@ -38,3 +38,6 @@ FREETOKEN_GGUF_GROUPED_PREFILL deleted: grouped MMQ prefill is now unconditional
 
 ## COMMITTED (2026-09-18)
 7f8c570 "feat(kernels): grouped mmq prefill for iq3_xxs/iq4_xs gguf experts" on vektory79 - exactly the 12 files, +1467/-66, staged by explicit path (stale-index defense), 126 tests re-verified green pre-commit, .veai/memory churn excluded, NOT pushed. v3 (close the read-once gap: weight-stationary schedule) recorded as .tasks/mmq-v3-stationary-moe/TASK.md - Step 0 = verify the ~4x/57x per-expert m-block re-read hypothesis, v3a = larger m-tile sweep (4/8/16/32, SMEM/occupancy + tail-padding watch), v3b = expert-stationary persistent kernel only if v3a saturates; quality tooling reusable; after MoE term the top bottlenecks are dense q8_0 GEMM 6.04 s and fetch copies 3.15 s.
+
+## SUPERSEDED (2026-09-18): the m-block re-read hypothesis above is now VERIFIED, and the reconciliation changed the picture
+Step-0 source read (campaign .tasks/mmq-v3-stationary-moe/, memory ft-gguf-v3-mtile-campaign) verified ceil(n_e/MOE_X) ~57x and the 3.97x traffic cut, BUT measured grouped MoE ~10 s is 2.2x ABOVE its 4.5 s DRAM floor: the grouped kernel left the BW-bound regime (per-MAC ALU/LDS + k-step serialization dominate). The ~758 tok/s ceiling is therefore NOT reachable by traffic reduction alone. v3a (m-tile 8/16/32 via FREETOKEN_GGUF_MOE_MTILE) is implemented, Review SHIP, hardware sweep pending - state in ft-gguf-v3-mtile-campaign.

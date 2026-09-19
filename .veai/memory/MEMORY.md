@@ -3,9 +3,7 @@
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
 - [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
 - [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-30a075828b64.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts
-- [glm53-post-iommu-baseline](glm53-post-iommu-baseline-fb58a59761d2.md) — GLM-5.3 NVFP4 baseline: 1M reserve fail-fasts on 09-14 VRAM; 524288-reserve baseline 322 slots / ~14.1 tok/s
 - [lean-subagent-context](lean-subagent-context-b42997304646.md) — Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)
-- [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-7a85eb5d2682.md) — Synthetic gguf quant tensors in tests: _FP16_SCALE_FIELDS offsets; analytic uniform fixtures catch what parity cannot
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-35ff08215256.md) — ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions
 - [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-e072d0274c3d.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
 - [benchbw-profile-clobber-trap](benchbw-profile-clobber-trap-6b9f0d04e5e9.md) — benchbw writes the FULL per-GPU profile per run: single-dtype run clobbers other formats' fractions; no TTL/fingerprint
@@ -27,8 +25,12 @@
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
 - [ft-bare-logger-liveness-trap](ft-bare-logger-liveness-trap-6399769cb81b.md) — Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)
-- [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-6d6a7d0de8dd.md) — GGUF prefill MMQ roofline; v0 no-op; v2 grouped MMQ +16.4% measured; ceiling unmet, m-block re-reads; iq shim
-- [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-2fe8a7978c23.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 task pointer
-- [ft-gate-baseline-nan-flake](ft-gate-baseline-nan-flake-680ee5b1dcea.md) — Full-gate baseline flake: test_gguf_expert_banks NaN isfinite only under suite ordering (Environment); gate 2135 passed
 - [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-b855848b830d.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-2fb4d7804e19.md) — gguf-native-serving skill: T01-T50 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978
+- [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-540a37c5ed9f.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 hypothesis now verified
+- [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-512a3fc6e85f.md) — gguf test methodology: _FP16_SCALE_FIELDS, analytic fixtures, seeded tolerance bounds (unseeded = latent flakes)
+- [ft-gguf-moe-mtile-kernel-traps](ft-gguf-moe-mtile-kernel-traps-c8b1b2a09ff4.md) — moe.cuh m-tile traps: x=weights y=activations naming, ds-fill garbage rows, block_size single source of truth
+- [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-1465018355bd.md) — GGUF prefill MMQ roofline: v0 no-op, v2 grouped +16.4%, 758-tok/s ceiling corrected (kernel left BW-bound regime)
+- [ft-gate-baseline-nan-flake](ft-gate-baseline-nan-flake-438a2a9c30e0.md) — Cap-test NaN flake root-caused to torch.empty x and FIXED in v3a (zeros); gate scale 2135 tests; classification method
+- [glm53-post-iommu-baseline](glm53-post-iommu-baseline-28c5cc0c6fd3.md) — GLM-5.3 NVFP4 post-iommu baseline: 1M/512k budget recipes, chunk-size prefill lever; 09-14 fail-fast transient
+- [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-a08c378d222f.md) — v3a m-tile sweep: tile32 +67.2% = 556 tok/s @8128; ALU/LDS-bound; v3b no-go; committed 1706aae

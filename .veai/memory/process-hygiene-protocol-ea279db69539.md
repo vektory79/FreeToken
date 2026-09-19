@@ -3,7 +3,7 @@ name: "process-hygiene-protocol"
 description: "Test-wave hygiene: census, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs; cross-wave GPU OOM = Environment"
 type: feedback
 lastUpdated: 2026-09-16T16:42
-lastRecall: 2026-09-18T23:13
+lastRecall: 2026-09-19T03:10
 ---
 
 # Process-hygiene protocol for agent test waves

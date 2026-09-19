@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-prefill-mmq-roofline"
-description: "GGUF prefill MMQ roofline; v0 no-op; v2 grouped MMQ +16.4% measured; ceiling unmet, m-block re-reads; iq shim"
+description: "GGUF prefill MMQ roofline: v0 no-op, v2 grouped +16.4%, 758-tok/s ceiling corrected (kernel left BW-bound regime)"
 type: project
-lastUpdated: 2026-09-18T00:55
-lastRecall: 2026-09-18T23:03
+lastUpdated: 2026-09-19T02:54
+lastRecall: 2026-09-19T03:10
 ---
 
 # GGUF prefill MMQ roofline + campaign state (RTX 5090, 2026-09-17)
@@ -38,3 +38,6 @@ v2 grouped MMQ: MoE 1.5-3 s -> chunk ~10.7 s -> ~758 tok/s (2.68x). Untouched by
 
 ## STATE (2026-09-18)
 v2 grouped MMQ prefill implemented + hardware A/B DONE: +16.4% @8128 (289.92 -> 337.61 tok/s), decode unchanged; liveness kernel-confirmed; the read-once ceiling was NOT met (grouped MoE ~1.8x on the term, m-block re-read hypothesis) - full details in memory ft-gguf-v2-grouped-mmq-measured. v0 expert-sort: no-op, reverted. 11-file v2 changeset uncommitted on vektory79 @ 1a444e4, commit pending user.
+
+## CEILING CORRECTION (2026-09-18, v3 Step-0)
+The ~758 tok/s projection is NOT reachable by traffic cuts alone: grouped DRAM floor is 4.54 s but measured ~10 s = 2.2x above it - the kernel LEFT the BW-bound regime (per-MAC ALU/LDS, 64-sync/block serialization, 98-B byte-assembly loads; L2 pushes the other way). m-tile / weight-stationary schedules are bounded by this non-DRAM floor. ncu discriminator: mio_throttle/short_scoreboard = ALU-bound, barrier/long_scoreboard = staging-bound. Details: memory ft-gguf-v3-mtile-campaign + .tasks/mmq-v3-stationary-moe/step0-source-read.md.
