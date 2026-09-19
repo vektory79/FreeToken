@@ -1,6 +1,9 @@
 // Adatped from
 // https://github.com/vllm-project/vllm/blob/755ed7b05be4743237d3339c4ff8c22bcaae04f4/csrc/quantization/gguf/gguf_kernel.cu
 // vLLM source: Apache-2.0, (c) The vLLM authors
+#include <cstdlib>
+#include <cstring>
+
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -357,6 +360,78 @@ torch::Tensor ggml_mul_mat_a8(
   return Y;
 }
 
+// ---- v3a grouped m-tile knob (FREETOKEN_GGUF_MOE_MTILE) ----
+// Single source of truth for the grouped m-tile: the ggml_moe_a8 dispatch and
+// ggml_moe_get_block_size (moe_align's block size) MUST agree - a trio
+// block_size diverging from the kernel mmq_x consumes expert bins cross-expert
+// and silently corrupts pairs. Read per call (getenv is cheap and boots are
+// separate processes; a static cache would also pin tests against env flips).
+static int ft_gguf_moe_mtile() {
+#if defined(USE_ROCM)
+  // m-tile variants are CUDA-only (tile 4 would make token_offs zero-length
+  // at nwarps 8); ROCm keeps its single 8-wide tile for all four types.
+  // The alias-return below relies on that single tile: pin it so a future
+  // per-type ROCm MOE_X change cannot silently diverge get_block_size from
+  // the kernel template.
+  static_assert(MOE_X_Q8_0 == MOE_X_Q6_K, "ROCm m-tile types diverged");
+  static_assert(MOE_X_Q8_0 == MOE_X_IQ3_XXS, "ROCm m-tile types diverged");
+  static_assert(MOE_X_Q8_0 == MOE_X_IQ4_XS, "ROCm m-tile types diverged");
+  return MOE_X_Q8_0;
+#else
+  const char* v = getenv("FREETOKEN_GGUF_MOE_MTILE");
+  if (v == nullptr || *v == '\0' || strcmp(v, "4") == 0) {
+    return 4;
+  }
+  if (strcmp(v, "8") == 0) {
+    return 8;
+  }
+  if (strcmp(v, "16") == 0) {
+    return 16;
+  }
+  if (strcmp(v, "32") == 0) {
+    return 32;
+  }
+  TORCH_CHECK(false, "FREETOKEN_GGUF_MOE_MTILE must be one of 4, 8, 16, 32, got '", v, "'");
+  return 4;  // unreachable: TORCH_CHECK throws
+#endif
+}
+
+// Shared 16-arg list of every grouped launcher call (bodies are byte-identical
+// across cases; only the tile template differs).
+#define FT_MOE_ARGS                                                      \
+  (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(), \
+      (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),     \
+      (int*)num_tokens_post_padded.data_ptr(), W.stride(0), col, row,     \
+      tokens, padded, row, top_k, (int)W.sizes()[0],                      \
+      sorted_token_ids.sizes()[0], stream
+
+#if defined(USE_ROCM)
+#define FT_MOE_TILE_SWITCH(T, TMAC)                                     \
+  do {                                                                  \
+    ggml_moe_##T##_q8_1_cuda<scalar_t, MOE_X_##TMAC>(FT_MOE_ARGS);      \
+  } while (0)
+#else
+#define FT_MOE_TILE_SWITCH(T, TMAC)                                     \
+  do {                                                                  \
+    switch (ft_gguf_moe_mtile()) {                                      \
+      case 4:                                                           \
+        ggml_moe_##T##_q8_1_cuda<scalar_t, 4>(FT_MOE_ARGS);             \
+        break;                                                          \
+      case 8:                                                           \
+        ggml_moe_##T##_q8_1_cuda<scalar_t, 8>(FT_MOE_ARGS);             \
+        break;                                                          \
+      case 16:                                                          \
+        ggml_moe_##T##_q8_1_cuda<scalar_t, 16>(FT_MOE_ARGS);            \
+        break;                                                          \
+      case 32:                                                          \
+        ggml_moe_##T##_q8_1_cuda<scalar_t, 32>(FT_MOE_ARGS);            \
+        break;                                                          \
+      default:                                                          \
+        TORCH_CHECK(false, "unsupported grouped m-tile");               \
+    }                                                                   \
+  } while (0)
+#endif
+
 torch::Tensor ggml_moe_a8(
     torch::Tensor X,  // input
     torch::Tensor W,  // expert weights
@@ -455,23 +530,7 @@ torch::Tensor ggml_moe_a8(
             stream);
         break;
       case 8:
-        ggml_moe_q8_0_q8_1_cuda(
-            (void*)quant_X.data_ptr(),
-            (void*)W.data_ptr(),
-            (scalar_t*)Y.data_ptr(),
-            (int*)sorted_token_ids.data_ptr(),
-            (int*)expert_ids.data_ptr(),
-            (int*)num_tokens_post_padded.data_ptr(),
-            W.stride(0),
-            col,
-            row,
-            tokens,
-            padded,
-            row,
-            top_k,
-            (int)W.sizes()[0],
-            sorted_token_ids.sizes()[0],
-            stream);
+        FT_MOE_TILE_SWITCH(q8_0, Q8_0);
         break;
       case 10:
         ggml_moe_q2_K_q8_1_cuda(
@@ -550,61 +609,13 @@ torch::Tensor ggml_moe_a8(
             stream);
         break;
       case 14:
-        ggml_moe_q6_K_q8_1_cuda(
-            (void*)quant_X.data_ptr(),
-            (void*)W.data_ptr(),
-            (scalar_t*)Y.data_ptr(),
-            (int*)sorted_token_ids.data_ptr(),
-            (int*)expert_ids.data_ptr(),
-            (int*)num_tokens_post_padded.data_ptr(),
-            W.stride(0),
-            col,
-            row,
-            tokens,
-            padded,
-            row,
-            top_k,
-            (int)W.sizes()[0],
-            sorted_token_ids.sizes()[0],
-            stream);
+        FT_MOE_TILE_SWITCH(q6_K, Q6_K);
         break;
       case 18:
-        ggml_moe_iq3_xxs_q8_1_cuda(
-            (void*)quant_X.data_ptr(),
-            (void*)W.data_ptr(),
-            (scalar_t*)Y.data_ptr(),
-            (int*)sorted_token_ids.data_ptr(),
-            (int*)expert_ids.data_ptr(),
-            (int*)num_tokens_post_padded.data_ptr(),
-            W.stride(0),
-            col,
-            row,
-            tokens,
-            padded,
-            row,
-            top_k,
-            (int)W.sizes()[0],
-            sorted_token_ids.sizes()[0],
-            stream);
+        FT_MOE_TILE_SWITCH(iq3_xxs, IQ3_XXS);
         break;
       case 23:
-        ggml_moe_iq4_xs_q8_1_cuda(
-            (void*)quant_X.data_ptr(),
-            (void*)W.data_ptr(),
-            (scalar_t*)Y.data_ptr(),
-            (int*)sorted_token_ids.data_ptr(),
-            (int*)expert_ids.data_ptr(),
-            (int*)num_tokens_post_padded.data_ptr(),
-            W.stride(0),
-            col,
-            row,
-            tokens,
-            padded,
-            row,
-            top_k,
-            (int)W.sizes()[0],
-            sorted_token_ids.sizes()[0],
-            stream);
+        FT_MOE_TILE_SWITCH(iq4_xs, IQ4_XS);
         break;
     }
   });
@@ -893,7 +904,12 @@ int64_t ggml_moe_get_block_size(int64_t type) {
     case 7:
       return MOE_X_Q5_1;
     case 8:
-      return MOE_X_Q8_0;
+    case 14:
+    case 18:
+    case 23:
+      // templated m-tile types: the knob is the one source of truth shared
+      // with the ggml_moe_a8 dispatch above
+      return ft_gguf_moe_mtile();
     case 10:
       return MOE_X_Q2_K;
     case 11:
@@ -902,12 +918,6 @@ int64_t ggml_moe_get_block_size(int64_t type) {
       return MOE_X_Q4_K;
     case 13:
       return MOE_X_Q5_K;
-    case 14:
-      return MOE_X_Q6_K;
-    case 18:
-      return MOE_X_IQ3_XXS;
-    case 23:
-      return MOE_X_IQ4_XS;
   }
   return 0;
 }

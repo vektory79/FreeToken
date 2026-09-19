@@ -302,11 +302,15 @@ def test_expert_gemm_gguf_dispatch():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_expert_gemm_gguf_grouped_prefill_matches_decode(monkeypatch):
+@pytest.mark.parametrize("mtile", (4, 8, 16, 32))
+def test_expert_gemm_gguf_grouped_prefill_matches_decode(monkeypatch, mtile):
     # v2 grouped MMQ prefill: is_prefill=True routes through the moe_align trio +
     # grouped ggml_moe_a8 (ONE trio shared by gate/up and down), stays numerically
     # consistent with the moe_vec decode path on identical inputs, and leaves the
-    # decode path (moe_vec, no trio) completely untouched.
+    # decode path (moe_vec, no trio) completely untouched. Swept over the v3a
+    # m-tile knob: gate/up/down must still share ONE align call at every tile
+    # because the knob is global (all served types report the same block size).
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", str(mtile))
     import freetoken.moe.fused as fused_mod
 
     from freetoken.layers.moe import OffloadMoELayer
@@ -380,10 +384,13 @@ def test_expert_gemm_gguf_grouped_prefill_matches_decode(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_grouped_prefill_noncontig_activations():
+@pytest.mark.parametrize("mtile", (4, 8, 16, 32))
+def test_grouped_prefill_noncontig_activations(monkeypatch, mtile):
     # lesson 028f2d9: the ggml kernels assume row-major activations; the grouped
     # prefill must .contiguous() a strided/split view (e.g. KDA projections) instead
     # of consuming it as garbage - the result must equal the contiguous input's.
+    # Re-pinned across the v3a m-tile sweep (the tile must not change the fix).
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", str(mtile))
     from freetoken.layers.moe import OffloadMoELayer
     from freetoken.moe.offload_cache import OffloadMoeCache
 
@@ -425,13 +432,16 @@ def test_grouped_prefill_noncontig_activations():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_grid_caps_raise_before_kernel_launch():
+def test_grid_caps_raise_before_kernel_launch(monkeypatch):
     # the prefill grid caps fire in the entry guards, before any MoE kernel launch:
     # a [8192, 8] chunk (65536 pairs > 65535, issue #186) RUNS on the grouped MMQ
-    # path (the grouped grid counts bins, not pairs) and only a 4x bigger chunk
-    # trips the grouped sorted_numel/block_size cap; the moe_vec pair cap still
-    # guards its own branch - for prefill that branch is reachable only via ggml
-    # types outside the grouped kernel's moe switch (declared IQ2_XS here).
+    # path (the grouped grid counts bins, not pairs) and only a bigger chunk trips
+    # the grouped sorted_numel/block_size cap; the moe_vec pair cap still guards
+    # its own branch - for prefill that branch is reachable only via ggml types
+    # outside the grouped kernel's moe switch (declared IQ2_XS here). The grouped
+    # cap arithmetic depends on the v3a m-tile, so the env is pinned explicitly
+    # and both tile 4 and tile 8 boundaries are covered below.
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "4")
     from freetoken.layers.moe import OffloadMoELayer
     from freetoken.moe.offload_cache import OffloadMoeCache
 
@@ -451,7 +461,10 @@ def test_grid_caps_raise_before_kernel_launch():
     views = tuple(banks[role].cuda() for role in ("gate", "up", "down"))
     ids = torch.randint(0, _NE, (8192, 8), dtype=torch.int32, device="cuda")
     w = torch.rand(8192, 8, dtype=torch.float32, device="cuda")
-    x = torch.empty((8192, _H), dtype=torch.bfloat16, device="cuda")
+    # zeros, not empty: uninitialized bf16 garbage can sit at ~1e38, whose q8_1
+    # scale d = amax/127 overflows fp16 and makes the dots inf; this test only
+    # needs finite math on the runs that reach a kernel
+    x = torch.zeros((8192, _H), dtype=torch.bfloat16, device="cuda")
 
     out = layer._expert_gemm(
         cache, x, w, ids, views=views, n=_NE, alphas=None, is_prefill=True
@@ -473,10 +486,33 @@ def test_grid_caps_raise_before_kernel_launch():
 
     big_ids = torch.randint(0, _NE, (32768, 8), dtype=torch.int32, device="cuda")
     big_w = torch.rand(32768, 8, dtype=torch.float32, device="cuda")
-    big_x = torch.empty((32768, _H), dtype=torch.bfloat16, device="cuda")
+    big_x = torch.zeros((32768, _H), dtype=torch.bfloat16, device="cuda")
     with pytest.raises(ValueError, match="grouped MMQ grid limit"):
         layer._expert_gemm(
             cache, big_x, big_w, big_ids, views=views, n=_NE, alphas=None, is_prefill=True
+        )
+
+    # v3a tile-8 re-pin: the grouped cap scales with block_size (262159 // 4 =
+    # 65539 trips at tile 4; 262179 // 8 = 32772 must RUN) and the next boundary
+    # sits near ~522k pairs (65536x8: 524323 // 8 = 65540). The moe_vec fallback
+    # cap stays env-independent - moe_vec never reads the knob.
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "8")
+    out8 = layer._expert_gemm(
+        cache, big_x, big_w, big_ids, views=views, n=_NE, alphas=None, is_prefill=True
+    )
+    assert out8.shape == (32768, _H)
+    assert torch.isfinite(out8).all()
+
+    huge_ids = torch.randint(0, _NE, (65536, 8), dtype=torch.int32, device="cuda")
+    huge_w = torch.rand(65536, 8, dtype=torch.float32, device="cuda")
+    huge_x = torch.zeros((65536, _H), dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(ValueError, match="grouped MMQ grid limit"):
+        layer._expert_gemm(
+            cache, huge_x, huge_w, huge_ids, views=views, n=_NE, alphas=None, is_prefill=True
+        )
+    with pytest.raises(ValueError, match="moe_vec grid limit"):
+        layer._expert_gemm(
+            no_group_cache, x, w, ids, views=views, n=_NE, alphas=None, is_prefill=True
         )
 
 

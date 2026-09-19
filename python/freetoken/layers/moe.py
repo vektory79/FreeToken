@@ -506,10 +506,15 @@ class OffloadMoELayer(MoELayer):
         flat pair index to its token by dividing by the top_k it is called with,
         so the gate/up calls (top_k) and the down call (top_k=1 over the M*top_k
         interleaved rows) walk the SAME sorted buffer. Gate/up/down may be
-        different ggml types; on CUDA every MOE_X block size is 4 so one trio
-        serves all three, and the per-size cache below only re-aligns when sizes
-        actually differ. The epilogue and topk_weights scatter/sum are identical
-        to the moe_vec path.
+        different ggml types; the grouped m-tile is ONE global knob
+        (FREETOKEN_GGUF_MOE_MTILE, default 4) read PER CALL, so every served
+        type reports the same block size, one trio serves all three, and the
+        per-size cache below only re-aligns when sizes actually differ. Do not
+        flip the knob after boot: the trio block_size and the kernel tile are
+        read at different moments, so a mid-boot flip would pair a buffer built
+        with the old tile against kernels launched with the new one; boot-time
+        selection is the supported pattern. The epilogue and topk_weights
+        scatter/sum are identical to the moe_vec path.
         """
         global _grouped_prefill_seen
         if not _grouped_prefill_seen:

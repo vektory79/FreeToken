@@ -103,19 +103,22 @@ static __device__ __forceinline__ void moe_q(
         }
       }
 
-      if (threadIdx.x < n_per_r / QK8_1) {
+      // Full-coverage y-ds fill, ported from the dense mul_mat_q ids0 loop
+      // (mmq.cuh): the old warp-tiled fill covered ds rows [0, nwarps) only
+      // (token_offs[0] assumed mmq_x/nwarps == 1), so rows >= nwarps were
+      // garbage at m-tiles > nwarps. ids walks every tile column via
+      // (tid.y*QI8_1 + tid.x/(32/QI8_1)) % mmq_x; pad slots carry the sentinel
+      // and are guarded like the qs fill.
+#pragma unroll
+      for (int ids0 = 0; ids0 < mmq_x; ids0 += nwarps * QI8_1) {
+        const int ids = (ids0 + threadIdx.y * QI8_1 + threadIdx.x / (WARP_SIZE_GGUF / QI8_1)) % mmq_x;
         const auto kby = threadIdx.x % (WARP_SIZE_GGUF / QI8_1);
-        // token_offs holds ONE entry per thread (mmq_x/nwarps == 1 here): the
-        // column this warp owns is sorted[col_dst_0 + tid.y] == token_offs[0].
-        // Indexing by tid.y reads past the array (uninitialized local memory ->
-        // wrong ds scales, varying run to run); upstream vLLM shipped this in
-        // dead code and it went live with the grouped prefill wiring.
-        const int col_y_eff = token_offs[0] / top_k;
+        const int col_y_eff = sorted_token_ids[col_dst_0 + ids] / top_k;
         const int block_x = ib0 * (qk / QK8_1) + ir * (WARP_SIZE_GGUF / QI8_1) + kby;
 
         if (col_y_eff < ncols_y && block_x < blocks_per_col_y) {
           const half2* dsi_src = &y[col_y_eff * blocks_per_col_y + block_x].ds;
-          half2* dsi_dst = &tile_y_ds[threadIdx.y * (WARP_SIZE_GGUF / QI8_1) + kby];
+          half2* dsi_dst = &tile_y_ds[ids * (WARP_SIZE_GGUF / QI8_1) + kby];
 
           if (need_sum) {
             *dsi_dst = *dsi_src;
@@ -682,7 +685,7 @@ static void ggml_moe_q5_1_q8_1_cuda(
 #define NWARPS_Q8_0 4
 #endif
 
-template <typename scalar_t, bool need_check>
+template <typename scalar_t, bool need_check, int mmq_x>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
@@ -702,7 +705,6 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
         const int nrows_dst,
         const int top_k,
         const int num_experts) {
-  const int mmq_x = MOE_X_Q8_0;
   const int mmq_y = MOE_Y_Q8_0;
   const int nwarps = NWARPS_Q8_0;
 
@@ -736,7 +738,7 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
       num_experts);
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int mmq_x>
 static void ggml_moe_q8_0_q8_1_cuda(
     const void* inp,
     const void* w,
@@ -754,7 +756,6 @@ static void ggml_moe_q8_0_q8_1_cuda(
     const int num_experts,
     const int tokens_post_padded,
     cudaStream_t stream) {
-  const int mmq_x = MOE_X_Q8_0;
   const int mmq_y = MOE_Y_Q8_0;
   const int nwarps = NWARPS_Q8_0;
 
@@ -765,7 +766,7 @@ static void ggml_moe_q8_0_q8_1_cuda(
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q8_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q8_0<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
@@ -782,7 +783,7 @@ static void ggml_moe_q8_0_q8_1_cuda(
         num_experts);
   } else {
     constexpr bool need_check = true;
-    moe_q8_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q8_0<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
@@ -1322,7 +1323,7 @@ static void ggml_moe_q5_K_q8_1_cuda(
 #define NWARPS_Q6_K 4
 #endif
 
-template <typename scalar_t, bool need_check>
+template <typename scalar_t, bool need_check, int mmq_x>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q6_K, 2)
@@ -1342,7 +1343,6 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q6_K, 2)
         const int nrows_dst,
         const int top_k,
         const int num_experts) {
-  const int mmq_x = MOE_X_Q6_K;
   const int mmq_y = MOE_Y_Q6_K;
   const int nwarps = NWARPS_Q6_K;
 
@@ -1376,7 +1376,7 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q6_K, 2)
       num_experts);
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int mmq_x>
 static void ggml_moe_q6_K_q8_1_cuda(
     const void* inp,
     const void* w,
@@ -1394,7 +1394,6 @@ static void ggml_moe_q6_K_q8_1_cuda(
     const int num_experts,
     const int tokens_post_padded,
     cudaStream_t stream) {
-  const int mmq_x = MOE_X_Q6_K;
   const int mmq_y = MOE_Y_Q6_K;
   const int nwarps = NWARPS_Q6_K;
 
@@ -1405,7 +1404,7 @@ static void ggml_moe_q6_K_q8_1_cuda(
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q6_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q6_K<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
@@ -1422,7 +1421,7 @@ static void ggml_moe_q6_K_q8_1_cuda(
         num_experts);
   } else {
     constexpr bool need_check = true;
-    moe_q6_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q6_K<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
@@ -1443,8 +1442,9 @@ static void ggml_moe_q6_K_q8_1_cuda(
 // ---- grouped-MoE twins for the iq types (moe_a8 types 18/23) ----
 // Same vendored provenance as the dense iq kernels in mmq.cuh (vLLM PR #36226,
 // llama.cpp @ 4696d5674); the moe_q wrappers are FreeToken-side, mirroring moe_q6_K.
-// MOE_X stays 4 on CUDA (8 on ROCm) for every served type, so ONE moe_align trio
-// can be shared by the gate/up and down projections of a layer.
+// The m-tile is a template param (v3a): CUDA picks it via FREETOKEN_GGUF_MOE_MTILE
+// in gguf_kernel.cu (default 4), ROCm keeps its single 8-wide tile; the knob is
+// global, so ONE moe_align trio still serves gate/up and down of a layer.
 
 #if defined(USE_ROCM)
 #define MOE_X_IQ3_XXS 8
@@ -1463,7 +1463,7 @@ static void ggml_moe_q6_K_q8_1_cuda(
 #endif
 #endif
 
-template <typename scalar_t, bool need_check>
+template <typename scalar_t, bool need_check, int mmq_x>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ3_XXS, 2)
@@ -1483,7 +1483,6 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ3_XXS, 2)
         const int nrows_dst,
         const int top_k,
         const int num_experts) {
-  const int mmq_x = MOE_X_IQ3_XXS;
   const int mmq_y = MOE_Y_IQ3_XXS;
   const int nwarps = NWARPS_IQ3_XXS;
 
@@ -1517,7 +1516,7 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ3_XXS, 2)
       num_experts);
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int mmq_x>
 static void ggml_moe_iq3_xxs_q8_1_cuda(
     const void* inp,
     const void* w,
@@ -1535,7 +1534,6 @@ static void ggml_moe_iq3_xxs_q8_1_cuda(
     const int num_experts,
     const int tokens_post_padded,
     cudaStream_t stream) {
-  const int mmq_x = MOE_X_IQ3_XXS;
   const int mmq_y = MOE_Y_IQ3_XXS;
   const int nwarps = NWARPS_IQ3_XXS;
 
@@ -1546,7 +1544,7 @@ static void ggml_moe_iq3_xxs_q8_1_cuda(
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_iq3_xxs<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_iq3_xxs<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
@@ -1563,7 +1561,7 @@ static void ggml_moe_iq3_xxs_q8_1_cuda(
         num_experts);
   } else {
     constexpr bool need_check = true;
-    moe_iq3_xxs<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_iq3_xxs<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
@@ -1597,7 +1595,7 @@ static void ggml_moe_iq3_xxs_q8_1_cuda(
 #endif
 #endif
 
-template <typename scalar_t, bool need_check>
+template <typename scalar_t, bool need_check, int mmq_x>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ4_XS, 2)
@@ -1617,7 +1615,6 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ4_XS, 2)
         const int nrows_dst,
         const int top_k,
         const int num_experts) {
-  const int mmq_x = MOE_X_IQ4_XS;
   const int mmq_y = MOE_Y_IQ4_XS;
   const int nwarps = NWARPS_IQ4_XS;
 
@@ -1651,7 +1648,7 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_IQ4_XS, 2)
       num_experts);
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int mmq_x>
 static void ggml_moe_iq4_xs_q8_1_cuda(
     const void* inp,
     const void* w,
@@ -1669,7 +1666,6 @@ static void ggml_moe_iq4_xs_q8_1_cuda(
     const int num_experts,
     const int tokens_post_padded,
     cudaStream_t stream) {
-  const int mmq_x = MOE_X_IQ4_XS;
   const int mmq_y = MOE_Y_IQ4_XS;
   const int nwarps = NWARPS_IQ4_XS;
 
@@ -1680,7 +1676,7 @@ static void ggml_moe_iq4_xs_q8_1_cuda(
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_iq4_xs<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_iq4_xs<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
@@ -1697,7 +1693,7 @@ static void ggml_moe_iq4_xs_q8_1_cuda(
         num_experts);
   } else {
     constexpr bool need_check = true;
-    moe_iq4_xs<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_iq4_xs<scalar_t, need_check, mmq_x><<<block_nums, block_dims, 0, stream>>>(
         w,
         inp,
         dst,
