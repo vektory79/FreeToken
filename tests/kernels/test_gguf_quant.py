@@ -591,6 +591,200 @@ def test_dense_gguf_noncontig_activations(batch):
     torch.testing.assert_close(got, got_c, rtol=2e-2, atol=2e-2 * want.abs().max().item())
 
 
+# ---- kda_in_proj N-split knob (FREETOKEN_GGUF_KDA_NSPLIT, wave 1 of
+# .tasks/dense-q80-gemm): the fused KDA in_proj MMQ GEMM (production N=24896 =
+# 108.35 MB > 96.0 MiB L2) may launch as two sub-N GEMMs whose weights fit L2.
+
+
+def _spy_kda_a8(monkeypatch):
+    """Record the out-feature count of every MMQ/vec launch. fused_mul_mat_gguf
+    resolves the wrappers from freetoken.kernel.gguf lazily per call, so patching
+    the module attrs intercepts every dispatch without touching csrc."""
+    import freetoken.kernel.gguf as kg
+
+    mmq, vec = [], []
+    real_mmq, real_vec = kg.ggml_mul_mat_a8, kg.ggml_mul_mat_vec_a8
+
+    def spy_mmq(w, x, qt, row):
+        mmq.append(row)
+        return real_mmq(w, x, qt, row)
+
+    def spy_vec(w, x, qt, row):
+        vec.append(row)
+        return real_vec(w, x, qt, row)
+
+    monkeypatch.setattr(kg, "ggml_mul_mat_a8", spy_mmq)
+    monkeypatch.setattr(kg, "ggml_mul_mat_vec_a8", spy_vec)
+    return mmq, vec
+
+
+def _kda_nsplit_layer(rng, k, n):
+    from freetoken.layers.gguf import GGUFLinear
+
+    lin = GGUFLinear(k, n, GGML_Q8_0)
+    raw, _ = _finite_fp16_chain_reference(rng, n, row_bytes(k, GGML_Q8_0), GGML_Q8_0)
+    lin.qweight = torch.from_numpy(raw.copy()).cuda()
+    return lin
+
+
+@cuda
+def test_kda_nsplit_env_knob(monkeypatch):
+    # FREETOKEN_GGUF_KDA_NSPLIT mirrors the v3a m-tile knob's shape: default 1,
+    # strict whitelist (no trim / numeric parsing, stragglers raise), read PER
+    # CALL so flipping the env between calls flips the launch structure.
+    from freetoken.layers.gguf import kda_in_proj_forward
+
+    monkeypatch.delenv("FREETOKEN_GGUF_KDA_NSPLIT", raising=False)
+    lin = _kda_nsplit_layer(np.random.default_rng(3), 512, 96)  # 96 = 3 x 32
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16) * 0.25
+
+    mmq, vec = _spy_kda_a8(monkeypatch)
+    kda_in_proj_forward(lin, x)
+    assert mmq == [96] and vec == []
+    # "" is not a straggler: the empty value must behave exactly like unset (default 1)
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "")
+    kda_in_proj_forward(lin, x)
+    assert mmq == [96, 96] and vec == []
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+    kda_in_proj_forward(lin, x)
+    assert mmq == [96, 96, 32, 64] and vec == []
+    # per-call read: the same process flips back without any module state
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "1")
+    kda_in_proj_forward(lin, x)
+    assert mmq == [96, 96, 32, 64, 96]
+    # invalid values fail fast before any launch, for any shape
+    for bad in ("12", "0", "-2", "abc", " 2", "02", "+2"):
+        monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", bad)
+        with pytest.raises(ValueError, match="FREETOKEN_GGUF_KDA_NSPLIT"):
+            kda_in_proj_forward(lin, x)
+
+
+@cuda
+def test_kda_nsplit_bitwise_parity(monkeypatch):
+    # production geometry: N=24896 = 2 x 12448 (12448 = 389 x 32), K=4096, MMQ
+    # batch. Disjoint 32-row tiles + k-only per-element reduction + deterministic
+    # x-quant: the split output must be BITWISE equal (torch.equal, no tolerance)
+    # to the single launch, and knob=1 must equal the plain GGUFLinear forward.
+    from freetoken.layers.gguf import kda_in_proj_forward
+
+    lin = _kda_nsplit_layer(np.random.default_rng(11), 4096, 24896)
+    x = torch.randn((256, 4096), device="cuda", dtype=torch.bfloat16) * 0.25
+
+    mmq, _ = _spy_kda_a8(monkeypatch)
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "1")
+    single = kda_in_proj_forward(lin, x)
+    assert mmq == [24896]
+    assert torch.equal(single, lin.forward(x))
+
+    mmq.clear()
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+    split = kda_in_proj_forward(lin, x)
+    assert mmq == [12448, 12448]
+    assert split.shape == single.shape and split.dtype == single.dtype
+    assert torch.equal(split, single)
+
+
+@cuda
+def test_kda_nsplit_parity_m_tail_batches(monkeypatch):
+    # M=7/13: batch > 6 (MMQ dispatch) but not a multiple of mmq_x = 4, so both
+    # launches ride the m-tile tail path (clamped y-loads, guarded dst writes).
+    # Production N=24896; the split output must stay BITWISE equal to the single
+    # launch even with the batch tail present.
+    from freetoken.layers.gguf import kda_in_proj_forward
+
+    lin = _kda_nsplit_layer(np.random.default_rng(17), 4096, 24896)
+    mmq, _ = _spy_kda_a8(monkeypatch)
+    for batch in (7, 13):
+        x = torch.randn((batch, 4096), device="cuda", dtype=torch.bfloat16) * 0.25
+        monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "1")
+        mmq.clear()
+        single = kda_in_proj_forward(lin, x)
+        assert mmq == [24896]
+        monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+        mmq.clear()
+        split = kda_in_proj_forward(lin, x)
+        assert mmq == [12448, 12448]
+        assert split.shape == single.shape and split.dtype == single.dtype
+        assert torch.equal(split, single)
+
+
+@cuda
+def test_kda_nsplit_parity_noncontig_x(monkeypatch):
+    # a strided x slice (row stride 2 x K) rides the split path too: the per-launch
+    # .contiguous() inside fused_mul_mat_gguf is deterministic, so both sub-launches
+    # quantize identical bytes and the output stays bitwise equal to the single launch.
+    from freetoken.layers.gguf import kda_in_proj_forward
+
+    lin = _kda_nsplit_layer(np.random.default_rng(19), 512, 24896)  # production N
+    base = torch.randn((26, 512), device="cuda", dtype=torch.bfloat16) * 0.25
+    x = base[::2]  # 13 x 512 view with row stride 2 x 512
+    assert not x.is_contiguous()
+
+    mmq, _ = _spy_kda_a8(monkeypatch)
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "1")
+    single = kda_in_proj_forward(lin, x)
+    assert mmq == [24896]
+    mmq.clear()
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+    split = kda_in_proj_forward(lin, x)
+    assert mmq == [12448, 12448]
+    assert torch.equal(split, single)
+
+
+@cuda
+def test_kda_nsplit_boundary_math(monkeypatch):
+    # the split boundary is pinned to the kernel's 32-row N tiles: chunks are
+    # 32-aligned and >= 32 rows; N not a multiple of 32 (or N < 64, where the
+    # second chunk would be < 32) falls back to the single launch, byte identical.
+    from types import SimpleNamespace
+
+    from freetoken.layers.gguf import kda_in_proj_forward
+
+    rng = np.random.default_rng(5)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16) * 0.25
+    mmq, _ = _spy_kda_a8(monkeypatch)
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+
+    mark = len(mmq)
+    for n in (48, 32):
+        lin = _kda_nsplit_layer(rng, 512, n)
+        got = kda_in_proj_forward(lin, x)
+        assert mmq[mark:] == [n]  # no split: the ragged shape falls back
+        assert torch.equal(got, lin.forward(x))
+        mark = len(mmq)
+    for n, want in ((64, [32, 32]), (96, [32, 64])):
+        lin = _kda_nsplit_layer(rng, 512, n)
+        single = lin.forward(x)
+        assert mmq[mark:] == [n]
+        mark = len(mmq)
+        got = kda_in_proj_forward(lin, x)
+        assert mmq[mark:] == want
+        assert torch.equal(got, single)  # 32-aligned split stays bitwise equal
+        mark = len(mmq)
+    # non-GGUF layers (plain bf16 / quant-method modules) pass through untouched
+    plain = SimpleNamespace(forward=lambda t: t + 1.0)
+    assert torch.equal(kda_in_proj_forward(plain, x), x + 1.0)
+
+
+@cuda
+def test_kda_nsplit_decode_batch_stays_mmvq(monkeypatch):
+    # batch <= 6 keeps the MMVQ vec kernels byte-identical even with the knob at
+    # 2: the split's scope guard covers only the dense MMQ path (batch > 6).
+    # (bs > 6 decode rides captured CUDA graphs - engine/graph.py
+    # GraphRunner._capture_graphs bakes the MMQ structure at boot - so the A/B
+    # wave re-captures and re-measures decode with the knob set.)
+    from freetoken.layers.gguf import fused_mul_mat_gguf, kda_in_proj_forward
+
+    lin = _kda_nsplit_layer(np.random.default_rng(13), 512, 24896)  # production N
+    x = torch.randn((4, 512), device="cuda", dtype=torch.bfloat16) * 0.25
+
+    mmq, vec = _spy_kda_a8(monkeypatch)
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+    got = kda_in_proj_forward(lin, x)
+    assert mmq == [] and vec == [24896]
+    assert torch.equal(got, fused_mul_mat_gguf(x, lin.qweight, GGML_Q8_0))
+
+
 # ---- the JIT module load must not leak CC/CXX into the process env ----
 
 # A nonexistent absolute path: resolution must fall through to the raw override.

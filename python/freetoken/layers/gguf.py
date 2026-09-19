@@ -13,6 +13,8 @@ TP is assumed to be 1 (the gemma4 GGUF path restricts to TP=1, like the HF path)
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from freetoken.models.gguf.dequant import (
@@ -107,6 +109,57 @@ class GGUFLinear(BaseOP):
         return out
 
 
+def _kda_nsplit_env() -> int:
+    """FREETOKEN_GGUF_KDA_NSPLIT: unset/empty or "1" = single launch, "2" = split.
+    Strict whitelist read PER CALL (the v3a ft_gguf_moe_mtile pattern): no trim,
+    no numeric parsing, so " 2"/"02"/"+2" stragglers fail fast like the C knob."""
+    v = os.environ.get("FREETOKEN_GGUF_KDA_NSPLIT")
+    if v is None or v == "" or v == "1":
+        return 1
+    if v == "2":
+        return 2
+    raise ValueError(f"FREETOKEN_GGUF_KDA_NSPLIT must be 1 or 2, got {v!r}")
+
+
+def kda_in_proj_forward(layer, x: torch.Tensor) -> torch.Tensor:
+    """Glm5NextKDA's fused ``in_proj`` forward - the ONLY call site that may
+    consume ``FREETOKEN_GGUF_KDA_NSPLIT`` (one helper, no knob ifs elsewhere).
+
+    At ``2`` the dense MMQ GEMM (batch > 6) launches as two sub-N GEMMs at a
+    32-row tile boundary so each launch's weight footprint fits L2: the
+    production N=24896 is 108.35 MB > 96.0 MiB L2, two 12448-row launches are
+    ~54.2 MB each. Disjoint 32-row tiles, k-only per-element reduction and
+    deterministic x-quant make the split bitwise identical to the single launch
+    (pinned by tests/kernels/test_gguf_quant.py). Everything outside the knob's
+    scope - batch <= 6 (MMVQ vec kernels), non-MMQ formats, N not a multiple of
+    32, N < 64 (a chunk would be < 32 rows), non-GGUF layers - falls back to the
+    plain forward, byte identical. Do not flip the knob after boot: decode CUDA
+    graphs capture the dense MMQ path for bs > 6 (engine/graph.py
+    GraphRunner._capture_graphs), baking whatever structure was live at capture
+    time - selection happens across boots, not mid-boot.
+    """
+    nsplit = _kda_nsplit_env()
+    if nsplit == 1 or not isinstance(layer, GGUFLinear):
+        return layer.forward(x)
+    qw, qt = layer.qweight, layer._quant_type
+    n_out, n_tok = qw.shape[0], x.shape[0]
+    # the split sits on a 32-row tile edge to keep need_check=false; that flag is a
+    # PERF guard keyed on N%32, NOT an exactness condition - bitwise parity rests on
+    # the disjoint 32-col tiles, the k-only per-element reduction and the
+    # deterministic per-launch x-quant
+    if n_tok <= _MMVQ_SAFE or qt not in _MMQ or n_out < 64 or n_out % 32 != 0:
+        return layer.forward(x)
+    half = (n_out // 2) // 32 * 32
+    out = torch.empty((n_tok, n_out), dtype=x.dtype, device=x.device)
+    # per-output-row packing makes a dim-0 slice a plain view (no repack); the
+    # narrow copy_ writes land each sub-launch result in the correct columns
+    out[:, :half].copy_(fused_mul_mat_gguf(x, qw.narrow(0, 0, half), qt))
+    out[:, half:].copy_(fused_mul_mat_gguf(x, qw.narrow(0, half, n_out - half), qt))
+    if layer.bias is not None:
+        out = out + layer.bias
+    return out
+
+
 class GGUFEmbedding(BaseOP):
     """Vocab embedding stored as a native GGUF block-quantized table.
 
@@ -144,4 +197,4 @@ class GGUFEmbedding(BaseOP):
         return y
 
 
-__all__ = ["GGUFLinear", "GGUFEmbedding", "fused_mul_mat_gguf"]
+__all__ = ["GGUFLinear", "GGUFEmbedding", "fused_mul_mat_gguf", "kda_in_proj_forward"]

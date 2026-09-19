@@ -256,3 +256,42 @@ def test_chunked_prefill_continuation(monkeypatch):
     _assert_close(out1, ref_out[T0:], "chunk1 out")
     _assert_close(pool.recurrent_states[0, 1], ref_h, "final state")
     _assert_close(pool.conv_states[0, 1], ref_conv, "final conv state")
+
+
+def test_nsplit_knob_non_gguf_passthrough(monkeypatch):
+    """FREETOKEN_GGUF_KDA_NSPLIT=2 must not touch the non-GGUF in_proj (a plain
+    quant-method layer here): kda_in_proj_forward falls back to the plain forward
+    byte identically. The gguf-path split itself is pinned bitwise in
+    tests/kernels/test_gguf_quant.py."""
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+    op = _make_op()
+    pool = _make_pool()
+    torch.manual_seed(10)
+    x = torch.randn(64, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    cu = torch.tensor([0, 64], dtype=torch.int32, device="cuda")
+    indices = torch.tensor([1], dtype=torch.int32, device="cuda")
+    _patch_ctx(
+        monkeypatch, pool,
+        SimpleNamespace(
+            is_decode=False,
+            fla_metadata=_fla(
+                cu, indices, torch.tensor([False], device="cuda"),
+                torch.tensor([1], dtype=torch.int64, device="cuda"),
+            ),
+        ),
+    )
+    out_split = op.forward(x)
+
+    monkeypatch.delenv("FREETOKEN_GGUF_KDA_NSPLIT", raising=False)
+    _patch_ctx(
+        monkeypatch, _make_pool(),
+        SimpleNamespace(
+            is_decode=False,
+            fla_metadata=_fla(
+                cu, indices, torch.tensor([False], device="cuda"),
+                torch.tensor([1], dtype=torch.int64, device="cuda"),
+            ),
+        ),
+    )
+    out_plain = _make_op().forward(x)
+    assert torch.equal(out_split, out_plain)
