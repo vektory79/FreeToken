@@ -280,7 +280,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T50 + recipes D01-D10; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T52 + recipes D01-D10; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),

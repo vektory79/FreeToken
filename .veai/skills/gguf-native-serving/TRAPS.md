@@ -1,4 +1,4 @@
-# TRAPS.md - 50 ловушек для native GGUF serving (T01-T50, рецепты D01-D10)
+# TRAPS.md - 52 ловушки для native GGUF serving (T01-T52, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -204,6 +204,35 @@ chunk transitions").
   ретраев: 0.89 -> 0.90 (free-after-init 2.59 GiB); для 8191 нужен 0.85+mr1
   (см. T28). Налог переменный день ото дня - VRAM-конкуренция, а не регрессия
   конфига.
+
+## MMQ v3a m-tile кампания 2026-09-18 T51-T52
+
+Ловушки кампании v3a m-tile widening (артефакты
+.tasks/mmq-v3-stationary-moe/; moe_q templated on mmq_x, env
+FREETOKEN_GGUF_MOE_MTILE, winner tile 32).
+
+- **T51** (v3a, design) Инверсия имён в moe.cuh: x = ВЕСА (m-инвариант,
+  mmq_y=32), y = АКТИВАЦИИ (y-tile = 144*mmq_x байт); бриф "tile_x растёт с
+  m-tile" вполовину неверен. Гейт корректности m>4 - y-ds fill в moe_q:
+  апстрим заполняет только ds-строки [0, nwarps) и читает token_offs[0],
+  валидно ТОЛЬКО при mmq_x/nwarps==1; при m=8/16/32 строки >= nwarps -
+  молчаливый мусор, проходящий shape-чеки. Любое расширение MOE_X требует
+  порта full-coverage ds-цикла плотного mul_mat_q (mmq.cuh:77-88) с
+  ids=(ids0+tid.y*QI8_1+tid.x/(32/QI8_1))%mmq_x, читающим
+  sorted_token_ids[col_dst_0+ids]. Эвиденс фикса:
+  .tasks/mmq-v3-stationary-moe/ (v3a-surface-map.md, аналитическая
+  ds-регрессия, поймавшая revert).
+- **T52** (v3a, measurement) Срез трафика платит, только пока ядро не
+  покинуло BW-bound режим; дальше связывает per-MAC ALU/LDS-пол, и
+  дальнейшие срезы трафика платят суб-линейно. Замер на v3a m-tile sweep
+  (tiles 4/8/16/32): отношения MoE-члена 0.500/0.260/0.152 против чистого
+  1/tile; маржинальный e2e-выигрыш уполовинивается на каждое удвоение
+  (+31.1/+17.5/+8.6%); nsys grouped MoE - 2.52x срез времени при 15.8x
+  срезе трафика на tile 16 -> вес-стационарная (v3b) трафик-редукционная
+  предпосылка мертва; expert battery BITWISE идентична между тайлами
+  (per-element порядок редукции tile-инвариантен). Привязывай проекции
+  MoE-ядер к измеренному режиму, а не к трафик-моделям. Эвиденс:
+  .tasks/mmq-v3-stationary-moe/v3a-ab.md.
 
 ## Debugging
 
