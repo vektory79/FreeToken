@@ -498,6 +498,34 @@ def load_ftw_banks(
             f"model config says num_moe_layers={num_layers}; the checkpoint does not "
             "match its config"
         )
+    # gguf banks: role-ordered (gate, up, down) ggml type per bank layer, persisted by
+    # the converter; absent -> None for every other format (nvfp4 loads exactly as before)
+    quant_format = reader.meta("quant_format")
+    meta_gguf_types = reader.meta("gguf_types")
+    if quant_format == "gguf" and meta_gguf_types is None:
+        reader.close()
+        raise RuntimeError(
+            f"{path!r} packs gguf expert banks but its index has no gguf_types: it was "
+            "converted by an older build; re-convert with ft checkpoint"
+        )
+    if meta_gguf_types is not None:
+        if (
+            not isinstance(meta_gguf_types, list)
+            or len(meta_gguf_types) != num_layers
+            or not all(
+                isinstance(row, (list, tuple))
+                and len(row) == 3
+                and all(isinstance(t, int) for t in row)
+                for row in meta_gguf_types
+            )
+        ):
+            reader.close()
+            raise RuntimeError(
+                f"{path!r} records malformed gguf_types meta (one (gate, up, down) int "
+                f"triple per MoE layer expected, got {meta_gguf_types!r}); the checkpoint "
+                "does not match its config"
+            )
+        meta_gguf_types = tuple(tuple(int(t) for t in row) for row in meta_gguf_types)
 
     # Alphas: unchanged, one flat HostBank per entry.
     alpha_specs = {e["name"]: (tuple(e["shape"]), _dtype_of(e["dtype"])) for e in alpha_entries}
@@ -613,9 +641,10 @@ def load_ftw_banks(
     from freetoken.moe.legacy_format import canonical_role, kind_kernel_for
     from freetoken.moe.expert_banks import ExpertBanks
 
-    # the file names the banks the legacy way; the quant_format tag names the (kind, kernel) they were packed for
+    # the file names the banks the legacy way; the quant_format tag names the
+    # (kind, kernel) they were packed for - except "gguf": those banks carry no
+    # QuantKind/kernel (raw ggml blocks) and load with kind=None
     sources = {canonical_role(name): views for name, views in sources.items()}
-    quant_format = reader.meta("quant_format")
     kind, kernel = kind_kernel_for(quant_format) if quant_format is not None else (None, None)
 
     # a failed mlock leaves a LOCKED layer pageable; the log and labels report what the banks actually settled at
@@ -655,7 +684,7 @@ def load_ftw_banks(
     alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
     return ExpertBanks(
         quant_format, sources, **alpha_kw,
-        layer_residency=applied, kind=kind, kernel=kernel,
+        layer_residency=applied, kind=kind, kernel=kernel, gguf_types=meta_gguf_types,
     )
 
 

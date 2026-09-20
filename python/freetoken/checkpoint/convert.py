@@ -238,6 +238,7 @@ def convert_checkpoint(
     # 2) offload expert banks (post-repack) + alpha scales (slow path auto-picks parallel/serial)
     quant_format = None
     num_layers = None
+    gguf_types = None
     if offload:
         # every method-packed format streams each layer to its own FTW entry as it completes (via the sink); the GGUF provider reports through ExpertBanks.streamed whether it engaged the sink or materialized the whole bank set first
         from freetoken.moe.legacy_format import legacy_bank_names, legacy_format_for
@@ -248,6 +249,7 @@ def convert_checkpoint(
             model_path, mc, method=method, device=dev, dtype=dtype, layer_sink=sink
         )
         quant_format = banks.quant_format
+        gguf_types = banks.gguf_types
         if banks.streamed:
             sink.close()
             num_layers = sink.num_layers  # however many distinct layers the sink actually saw
@@ -311,6 +313,9 @@ def convert_checkpoint(
         # read back at load (ftw.load_ftw_banks). dtype/moe_backend were dropped: each
         # tensor already carries its own dtype, and nothing reads a model-level backend.
         "quant_format": quant_format,
+        # "gguf" only: role-ordered (gate, up, down) ggml type per bank layer; the
+        # serve-side loader restores it on ExpertBanks. None for every other format.
+        "gguf_types": gguf_types,
         # The reader takes num_layers from the model config (copied into this
         # checkpoint); recording it here too gives load_ftw_banks a cross-check that
         # the banks match the config they ship with. None for non-offload checkpoints.
