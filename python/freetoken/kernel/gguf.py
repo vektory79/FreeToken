@@ -146,7 +146,7 @@ def ggml_moe_get_block_size(quant_type: int) -> int:
 
 
 def ggml_dense_get_mtile() -> int:
-    """The dense q8_0 MMQ token-tile (FREETOKEN_GGUF_DENSE_MTILE, default 4)."""
+    """The dense q8_0 MMQ token-tile (FREETOKEN_GGUF_DENSE_MTILE, default 64)."""
     return _module().ggml_dense_get_mtile()
 
 

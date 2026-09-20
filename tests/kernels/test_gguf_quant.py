@@ -793,16 +793,21 @@ def test_kda_nsplit_decode_batch_stays_mmvq(monkeypatch):
 
 @cuda
 def test_dense_mtile_env_knob(monkeypatch):
-    # FREETOKEN_GGUF_DENSE_MTILE mirrors the v3a m-tile knob's shape: default 4
-    # (the historical dense tile), strict whitelist (no trim / numeric parsing,
-    # stragglers raise), read PER CALL so flipping the env between calls flips
-    # the tile. The probe is the same single source of truth the dispatch reads.
+    # FREETOKEN_GGUF_DENSE_MTILE mirrors the v3a m-tile knob's shape: default
+    # 64 (measured +40.46% sweep, outputs bitwise identical across tiles incl.
+    # the 24-prompt arbitration battery), strict whitelist (no trim / numeric
+    # parsing, stragglers raise), read PER CALL so flipping the env between
+    # calls flips the tile. The probe is the same single source of truth the
+    # dispatch reads.
     from freetoken.kernel.gguf import ggml_dense_get_mtile, ggml_moe_get_block_size
 
     monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
-    assert ggml_dense_get_mtile() == 4
+    assert ggml_dense_get_mtile() == 64
     # "" is not a straggler: the empty value must behave exactly like unset
     monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", "")
+    assert ggml_dense_get_mtile() == 64
+    # "4" still selects the historical single [4]-tile launch structure
+    monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", "4")
     assert ggml_dense_get_mtile() == 4
     for tile in (8, 16, 32, 64):
         monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", str(tile))
@@ -813,7 +818,7 @@ def test_dense_mtile_env_knob(monkeypatch):
     assert ggml_moe_get_block_size(GGML_Q8_0) == 4
     monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
     monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "32")
-    assert ggml_dense_get_mtile() == 4
+    assert ggml_dense_get_mtile() == 64
     monkeypatch.delenv("FREETOKEN_GGUF_MOE_MTILE", raising=False)
     # strcmp whitelist: no trim or numeric parsing, so stragglers fail too
     for bad in ("12", "0", "-4", "abc", " 8", "04", "+8", "08"):

@@ -196,9 +196,11 @@ torch::Tensor ggml_mul_mat_vec_a8(
 // ---- dense q8_0 m-tile knob (FREETOKEN_GGUF_DENSE_MTILE, .tasks/dense-q80-gemm) ----
 // Single source of truth for the dense q8_0 MMQ token-tile, read PER CALL
 // (getenv is cheap and boots are separate processes; a static cache would also
-// pin tests against env flips). unset/empty/"4" -> 4 (the historical tile),
-// 8/16/32/64 -> that tile, anything else TORCH_CHECK fail-fast (no trim or
-// numeric parsing, so " 8"/"04"/"+8" stragglers raise). Scope: ONLY the
+// pin tests against env flips). unset/empty -> 64 (the default: the measured
+// sweep gives +40.46% prefill and outputs stay bitwise identical across
+// tiles, 24-prompt arbitration battery included), "4" (the historical tile)
+// and 8/16/32/64 -> that tile, anything else TORCH_CHECK fail-fast (no trim
+// or numeric parsing, so " 8"/"04"/"+8" stragglers raise). Scope: ONLY the
 // dense q8_0 dispatch in ggml_mul_mat_a8 below; the other dense formats, the
 // MMVQ vec kernels (batch <= 6) and the grouped MoE path keep their own shapes
 // (FREETOKEN_GGUF_MOE_MTILE is a separate knob with a separate meaning - do
@@ -214,7 +216,10 @@ static int ft_gguf_dense_mtile() {
   return MMQ_X_Q8_0;
 #else
   const char* v = getenv("FREETOKEN_GGUF_DENSE_MTILE");
-  if (v == nullptr || *v == '\0' || strcmp(v, "4") == 0) {
+  if (v == nullptr || *v == '\0') {
+    return 64;
+  }
+  if (strcmp(v, "4") == 0) {
     return 4;
   }
   if (strcmp(v, "8") == 0) {
