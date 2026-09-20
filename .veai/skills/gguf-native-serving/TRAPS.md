@@ -1,4 +1,4 @@
-# TRAPS.md - 52 ловушки для native GGUF serving (T01-T52, рецепты D01-D10)
+# TRAPS.md - 56 ловушек для native GGUF serving (T01-T56, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -231,8 +231,55 @@ FREETOKEN_GGUF_MOE_MTILE, winner tile 32).
   срезе трафика на tile 16 -> вес-стационарная (v3b) трафик-редукционная
   предпосылка мертва; expert battery BITWISE идентична между тайлами
   (per-element порядок редукции tile-инвариантен). Привязывай проекции
-  MoE-ядер к измеренному режиму, а не к трафик-моделям. Эвиденс:
-  .tasks/mmq-v3-stationary-moe/v3a-ab.md.
+  MoE-ядер к измеренному режиму, а не к трафик-моделям. Extension (dense
+  q8_0 кампания 2026-09-19/20): humility в ОБЕ стороны - floor-model
+  проекция может ошибиться на порядок величины, когда ядро НЕ в том
+  режиме, что она предполагает: conservative floor-model предсказала
+  +1.9..+3.6%, измерено +40.46% на tile 64 (4.03x rate при 16x срезе
+  ре-ридов - в ALU-bound режиме срез трафика освобождает issue-slots и
+  платит СВЕРХ-линейно), а класс-кластерная модель v3a (rate ~ tile)
+  подтвердилась. Решает всегда дешёвый измеренный A/B (правило самого
+  T52; валидность A/B - T44). Эвиденс:
+  .tasks/mmq-v3-stationary-moe/v3a-ab.md + .tasks/dense-q80-gemm/ab-mtile.md.
+
+## Dense q8_0 GEMM кампания 2026-09-19/20 (dense m-tile) T53-T56
+
+Ловушки кампании dense-q80-gemm (артефакты .tasks/dense-q80-gemm/;
+приёмка c464273 + 0d81cba, дефолт FREETOKEN_GGUF_DENSE_MTILE=64).
+
+- **T53** (measurement, nsys) rc=0 от nsys start/stop НИЧЕГО не доказывает:
+  profiling-сессия может молча не собираться (injection-обёртка не
+  подменена), а stop всё равно вернёт 0. После stop проверяй (1) наличие
+  отчёта в stop-cwd (stop пишет синхронно) и (2) ожидаемые количества
+  kernel activities в sqlite-экспорте; баннер "Collecting data" зависит
+  от обёртки и НЕ дискриминатор - его не было даже в гарантированно
+  инструментированных логах dense-кампании. Эвиденс:
+  .tasks/dense-q80-gemm/ (ft_nsys_dq80.sh, denseq80.nsys-rep).
+- **T54** (quality, e2e bitwise) Single-boot e2e bitwise diff НЕ quality-gate:
+  boot-to-boot недетерминизм реален и БИМОДАЛЕН (dense-арбитраж:
+  same-config пара t4a~t4b совпала только 2/24, тогда как t4b~t64b /
+  t64a~t4b / t64a~t64b были 24/24 идентичны; расхождение = mid-answer
+  greedy cascade внутри reasoning_content, первая дивергенция всегда в
+  reasoning). Quality evidence - unit-уровень (torch.equal); вопросы
+  output-agreement решать interleaved multi-boot arbitration battery
+  (same-config И cross-config пары) с per-boot census в файл. Эвиденс:
+  .tasks/dense-q80-gemm/arbitration-battery.md + arbitration-results.json.
+- **T55** (process, watchdog) FAILPAT-watchdog обязан разоружаться на
+  teardown: штатная строка graceful shutdown "backend worker
+  freetoken-detokenizer-0 exited" матчится паттерном backend-death, и
+  живой watchdog SIGKILL'ит посреди graceful shutdown (утечка sem.mp-
+  8->12, aborted run: attempt-1 арбитража умер именно так). Разоружать
+  до teardown; watchdog держать, только пока прогон жив. Фикс в
+  arbitration_run.py.
+- **T56** (analysis, projection) Проекционный артефакт - absurdity check ДО
+  использования: проекция НИЖЕ собственного измеренного floor = сломанный
+  анализ (dense step0: смешение per-chunk/per-launch метрик с
+  инвертированным восстановлением дало tile8 "best" 608.8 tok/s с
+  dense-членом 4.518 с под собственным floor 5.48 с). Floors/totals
+  выводить из измеренных per-op сумм, никогда из хардкоженных констант.
+  Эвиденс: .tasks/dense-q80-gemm/step0-projection-table.md +
+  triage-step0.md (сломанный скрипт сохранён как
+  step0_analyze_superseded.py).
 
 ## Debugging
 

@@ -145,6 +145,12 @@ step is the START of the closing procedure, never the end of the phase.
    task-02 (fusion ordering), task-04 (kernel dispatch), task-05 (banks and
    pinning), task-06 (measurement validity), task-07 (kernels/budget/pools).
    Doc-only phases may use ONE focused review - justify in the wave log.
+   Narrow explicit exception for measurement waves: when the wave's
+   decisive fact is a sha-equality check on recorded artifacts, the wave
+   may close with a single-stage orchestrator verification that reads the
+   artifact directly instead of the full Review x2, provided the waiver
+   rationale is recorded in the campaign triage file (precedent: the
+   dense campaign's arbitration battery).
 4. Triage: every finding classified TP / FP / Need more data, grounded in code,
    contract or the reference implementation. Need more data -> extra Ask-wave
    or the user. Never start a fix-wave without confirmed TP.
@@ -280,7 +286,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T52 + recipes D01-D10; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T56 + recipes D01-D10; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),

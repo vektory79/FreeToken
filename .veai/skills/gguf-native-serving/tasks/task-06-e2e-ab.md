@@ -40,6 +40,14 @@ run the quality battery, and deliver the honest verdict.
 - Decode steady: 13.5-14.7 tok/s class.
 - Boot fallback ladder under desktop VRAM pressure: 0.89 -> 0.90 -> 0.85+mr1
   for 8191 (8191@0.90 OOMs in the first-chunk triton do_bench, T28/T50).
+- Post dense-q80-gemm campaign (2026-09-20, production defaults
+  FREETOKEN_GGUF_DENSE_MTILE=64 + FREETOKEN_GGUF_MOE_MTILE=32 +
+  FREETOKEN_GGUF_KDA_NSPLIT=2): prefill @8128 ~792-808 tok/s instrumented
+  (T43 exclusions apply; CUPTI overhead ~1.2% symmetric - plain boots sit
+  ~1.2% higher; T44 band applies vs the 792.08 anchor); decode 13.2-15.0
+  tok/s (bs=1 MMVQ graph, CUPTI framing). The e2e bitwise output gate is
+  NOT usable (T54: boot-to-boot bimodal nondeterminism); the arbitration
+  battery is the reference methodology for output-agreement questions.
 
 ## Debugging an IMA or OOM
 
