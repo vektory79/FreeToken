@@ -48,6 +48,13 @@ run the quality battery, and deliver the honest verdict.
   tok/s (bs=1 MMVQ graph, CUPTI framing). The e2e bitwise output gate is
   NOT usable (T54: boot-to-boot bimodal nondeterminism); the arbitration
   battery is the reference methodology for output-agreement questions.
+- GGUF->FTW fast path is now the RECOMMENDED way to serve large gguf
+  checkpoints (boot 52.1 s vs 94-132 s bare serial; 8568807/e9ad38d/ef14efb/2e9fcf1).
+- FTW classes: convert 147.5 GB bare gguf -> 134.24 GiB FTW in 268 s
+  (`ft checkpoint --model <gguf> --out <dir> --moe-backend offload`, NO
+  --quant-backend for gguf - repack defeats raw streaming); boot 52.1 s
+  (banks 125G @ 4.12 GB/s, 30 s in-boot); prefill @8128 790.7 tok/s;
+  decode @65k 14.8-15.5 tok/s, radix HIT 65536.
 
 ## Debugging an IMA or OOM
 

@@ -1,4 +1,4 @@
-# TRAPS.md - 56 ловушек для native GGUF serving (T01-T56, рецепты D01-D10)
+# TRAPS.md - 58 ловушек для native GGUF serving (T01-T58, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -158,6 +158,10 @@
 - **T44** (Phase 6, A/B validity) BEFORE-стадия обязана воспроизвести
   историческую кампанийную базу (в пределах run-variance ~3%) - только после
   этого дельта AFTER доверийна; иначе результат неинтерпретируем.
+  Extension (FTW fastpath 2026-09-20, stale-anchor): измеренные якоря в
+  таск-брифах РОТ - бриф называл ~293 tok/s префилла, а актуальная bare-база
+  792-808 @8128 после dense-q80/m-tile кампаний; всегда ре-якорить ожидаемые
+  числа против АКТУАЛЬНЫХ кампанийных баз на момент исполнения, не против брифа.
 - **T45** (Phase 6, A/B mechanics) Same-session A/B без stash: per-call env kill
   switch (os.environ.get в forward-пути) + два бута с env-флипом; JIT disk-cache
   компилирует один раз и обслуживает оба бута (python-only правки вообще не дают
@@ -280,6 +284,27 @@ FREETOKEN_GGUF_MOE_MTILE, winner tile 32).
   Эвиденс: .tasks/dense-q80-gemm/step0-projection-table.md +
   triage-step0.md (сломанный скрипт сохранён как
   step0_analyze_superseded.py).
+
+## FTW gguf fastpath кампания 2026-09-20 (checkpoint/FTW) T57-T58
+
+Ловушки кампании FTW gguf fastpath (артефакты .tasks/ftw-gguf-fastpath/;
+коммиты 8568807 + e9ad38d + ef14efb + 2e9fcf1).
+
+- **T57** (checkpoint, data model) moe/legacy_format.py держит ДВЕ мапы:
+  LEGACY_FORMAT - ОБРАТНАЯ (kind,kernel)->tag; tag-keyed вход для
+  kind_kernel_for кладётся в _KIND_KERNEL. Запись "gguf" в LEGACY_FORMAT всё
+  равно даёт KeyError в kind_kernel_for("gguf") (первый прогон тестов упал
+  ровно так; фикс 8568807 с регрессией tests/moe/test_legacy_format.py,
+  fails-before доказан).
+- **T58** (capability, banks) Bare-.gguf header scanners - ДЕФОЛТНЫЙ источник
+  capability: любой НОВЫЙ персистентный источник банков (FTW index) обязан
+  добавить фолбэки во ВСЕ: floor-gate сигнатурных групп
+  (gguf_ftw_signature_groups), hybrid capability (gguf_expert_bank_types ->
+  _gguf_hybrid_rejection), cpu-executor viability (_cpu_moe_executor_viable);
+  обе ревью пометили hybrid как Major. Группу/slot-математику держать в одном
+  shared-хелпере (single source of truth, ef14efb). FTW gguf-директории от
+  старых сборок (нет gguf_types meta) фейл-фастят в load_ftw_banks с
+  сообщением о ре-конверсии вместо смерти на serve init.
 
 ## Debugging
 

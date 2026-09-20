@@ -250,6 +250,11 @@ concurrent microbenches both leaked and invalidated their own numbers).
   entries staged (parallel orchestrator sessions churn it); re-run the fast
   test waves immediately before committing; the commit body carries the
   measured results (the why the diff does not show).
+- Bisect-green series where ONE test file spans multiple commits: stage it in
+  dependency-ordered slices (commit-2 subset green, full file restored at
+  commit 3); extract fails-before regression tests to their proper home
+  (tests/moe/test_legacy_format.py). Tests touching convert_checkpoint need a
+  CUDA skipif (it hard-inits a CUDA context; fixture-level skip preferred).
 - The skill files themselves (`.veai/skills/gguf-native-serving/`) are committed
   (6e673ab); further skill edits stay uncommitted until the user asks.
 
@@ -286,7 +291,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T56 + recipes D01-D10; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T58 + recipes D01-D10; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),
