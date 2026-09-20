@@ -35,12 +35,18 @@ LEGACY_FORMAT = {
     (QuantKind.MXFP4, "triton_gptoss"): "mxfp4_triton",
     (QuantKind.MXFP4, "triton"): "ds_fp4",
 }
-_KIND_KERNEL = {fmt: kk for kk, fmt in LEGACY_FORMAT.items()}
+_KIND_KERNEL: dict[str, tuple[QuantKind | None, str | None]] = {
+    fmt: kk for kk, fmt in LEGACY_FORMAT.items()
+}
+# "gguf" is the one kind=None tag: ggml banks are raw packed blocks loaded verbatim,
+# with no QuantKind/kernel behind the tag - and no legacy_format_for inverse.
+_KIND_KERNEL["gguf"] = (None, None)
 
 
 def legacy_format_for(kind: QuantKind, kernel: str) -> str:
     return LEGACY_FORMAT[(kind, kernel)]
 
 
-def kind_kernel_for(legacy_format: str) -> tuple[QuantKind, str]:
+def kind_kernel_for(legacy_format: str) -> tuple[QuantKind | None, str | None]:
+    """The (kind, kernel) a quant_format tag was packed for; "gguf" maps to (None, None)."""
     return _KIND_KERNEL[legacy_format]
