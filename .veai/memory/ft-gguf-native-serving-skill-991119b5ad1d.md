@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-native-serving-skill"
-description: "gguf-native-serving skill: T01-T52 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978"
+description: "gguf-native-serving skill: T01-T56 + D01-D10 after dense-q80 self-update; committed e277d4b"
 type: project
-lastUpdated: 2026-09-19T14:39
-lastRecall: 2026-09-19T18:25
+lastUpdated: 2026-09-20T12:37
+lastRecall: 2026-09-20T12:22
 ---
 
 # GGUF native serving skill: reusable methodology for any model family
@@ -29,3 +29,8 @@ At the END of every session that produced reusable knowledge (root causes with c
 - Committed through 055b978 "docs(skill): add mmq/radix campaign knowledge and session-end self-update rule" (parent 5b72aba; 6 files 211+/5-; Assisted-by: Veai per §8; zero .veai/memory staged; no push). On-disk TRAPS.md has since gained T51/T52 from the v3a campaign (see Structure correction above).
 - Reviews: review-3 (A-G pass) and review-4 (A-F pass; 4 non-blocking nits incl. "blocking_status" term not defined in §11 text - future session-end pass candidate). Artifacts: .tasks/skill-review-gguf-native-serving/review-1..4.md.
 - Usage: run task-00 discovery (asks the reference-sources question), then 01-07 in order with the quality loop; TRAPS.md is the pre-close checklist. glm5next is the cited worked example (hybrid 16.67 tok/s vs offload 12.97 after the port).
+
+## 2026-09-20 dense-q80-gemm session-end self-update (UNCOMMITTED on vektory79 @ 0d81cba)
+TRAPS.md extended: T52 extension (floor-model humility: +1.9..3.6% predicted vs +40.46% measured at tile 64, 4.03x rate for the 16x re-read cut; the class-cluster model was the right predictor) + new traps T53-T56 (nsys silent no-collection; single-boot e2e bitwise gate is dead - bimodal boot nondeterminism, torch.equal units are the evidence; FAILPAT watchdog must disarm at teardown - the normal "backend worker ... exited" line matches the death pattern; projection absurdity check - a projection below its own measured floor = broken analysis). Final count T01-T56 + D01-D10; counters synced at all three sites (TRAPS H1 / SKILL.md:146 / ORCHESTRATION §10; pre-edit audit found all consistent at 52). ORCHESTRATION §4 review exception added: measurement waves whose decisive fact is a sha-equality check on recorded artifacts may close with single-stage orchestrator verification, waiver rationale recorded in the campaign triage file. task-06 expected classes: post-campaign GGUF glm5next @8128 = ~792-808 tok/s instrumented (defaults DENSE_MTILE=64 + MOE_MTILE=32 + NSPLIT=2; T44 band vs 792.08), decode 13.2-15.0, arbitration battery = reference methodology for output-agreement questions. 4 files +66/-5 modified-unstaged on vektory79 - commit user-gated.
+
+COMMITTED (2026-09-20): the self-update landed as e277d4b "docs(skill): add dense-q80-gemm campaign knowledge (T53-T56, expected classes)" - the 4 files (+66/-5) are no longer uncommitted; HEAD chain 8e2e4c7 -> e277d4b -> 0d81cba. Not pushed.

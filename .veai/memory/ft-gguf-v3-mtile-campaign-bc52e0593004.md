@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-v3-mtile-campaign"
-description: "v3 m-tile campaign: grouped MoE tile sweep +67.2%, committed 1706aae; MoE tile32 = 4.37 s, 1.8 s estimate refuted"
+description: "v3 m-tile campaign: grouped MoE tile sweep +67.2% (1706aae); production default MOE_MTILE=32 via 8e2e4c7"
 type: project
-lastUpdated: 2026-09-19T16:03
-lastRecall: 2026-09-19T18:13
+lastUpdated: 2026-09-20T12:37
+lastRecall: 2026-09-20T12:22
 ---
 
 # v3 m-tile campaign (grouped GGUF MoE prefill): Step 0 verified, v3a implemented
@@ -43,3 +43,5 @@ Winner flags, port 18801: --moe-cache-auto --kv-reserve-tokens 500000 --kv-cache
 ## CORRECTION (2026-09-19, Step 0 of dense-q80-gemm)
 
 Grouped MoE at tile 32 measured 4.37 s/chunk by direct nsys (dense-q80-gemm step0, denseq80.sqlite) of a 14.87 s chunk = 29.4%. The "~1.8 s e2e fit" estimate and the "~78-88% rest" claim in v3a-ab.md assumed tile-invariant rest and are REFUTED (non-MoE share = 70.6%, not ~80%). v3b no-fire and the ALU/LDS-floor finding are UNAFFECTED (they derive from the tile-16 nsys cross-check 12.62->5.01 s + CTA/liveness data, not the tile-32 subtraction). Corrections applied to v3a-ab.md (CORRECTION section at file end) and dense-q80-gemm/TASK.md; review-b-step0.md B4 CONFIRMED. Same wave context: the dense campaign's Step 0 verdict is ALU/issue-bound ~22 TF/s (NOT BW-bound) - details in .tasks/dense-q80-gemm/.
+
+DEFAULT FLIPPED (2026-09-20): MOE_MTILE=32 via 8e2e4c7; combined defaults ~792-808 tok/s @8128.

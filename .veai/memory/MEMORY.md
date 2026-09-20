@@ -27,8 +27,6 @@
 - [ft-gguf-moe-mtile-kernel-traps](ft-gguf-moe-mtile-kernel-traps-c8b1b2a09ff4.md) — moe.cuh m-tile traps: x=weights y=activations naming, ds-fill garbage rows, block_size single source of truth
 - [ft-gate-baseline-nan-flake](ft-gate-baseline-nan-flake-438a2a9c30e0.md) — Cap-test NaN flake root-caused to torch.empty x and FIXED in v3a (zeros); gate scale 2135 tests; classification method
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-28c5cc0c6fd3.md) — GLM-5.3 NVFP4 post-iommu baseline: 1M/512k budget recipes, chunk-size prefill lever; 09-14 fail-fast transient
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-aff684844ef6.md) — gguf-native-serving skill: T01-T52 + D01-D10, ORCHESTRATION §11 self-update; committed through 055b978
-- [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-00890797b80b.md) — v3 m-tile campaign: grouped MoE tile sweep +67.2%, committed 1706aae; MoE tile32 = 4.37 s, 1.8 s estimate refuted
 - [cuda-debug-tool-strategy](cuda-debug-tool-strategy-f47c9e16cbc5.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu ERR_NVGPUCTRPERM blocked
 - [ft-gate-nodeid-collection-drift](ft-gate-nodeid-collection-drift-ed9c69f3e41e.md) — Full-gate nodeid counts drift across runs: test_quant_config.py collection-time glob parametrization; key on failure set
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-08f4f089d42d.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
@@ -36,4 +34,6 @@
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-ed33892b6a6b.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; old ~4 GB/s likely IOMMU tax
 - [nsys-silent-no-collection-trap](nsys-silent-no-collection-trap-561ecdc4872d.md) — nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe
-- [ft-dense-q80-gemm-campaign](ft-dense-q80-gemm-campaign-f6b4fef59b69.md) — dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61% e2e (92.8% recovery); commit+flip pending; Candidate A next
+- [ft-dense-q80-gemm-campaign](ft-dense-q80-gemm-campaign-8b567bc03197.md) — dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61%; dense tile64 +40.46%; all committed (HEAD 8e2e4c7)
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-991119b5ad1d.md) — gguf-native-serving skill: T01-T56 + D01-D10 after dense-q80 self-update; committed e277d4b
+- [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-bc52e0593004.md) — v3 m-tile campaign: grouped MoE tile sweep +67.2% (1706aae); production default MOE_MTILE=32 via 8e2e4c7
