@@ -20,6 +20,7 @@ import json
 import os
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -28,7 +29,11 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "models"))
 
 # reuse the proven writer/metadata and the triple-signature gate fixtures
-from test_gguf_expert_banks import _TRIPLE_SIGS  # noqa: E402
+from test_gguf_expert_banks import (  # noqa: E402
+    _TRIPLE_GROUP_SLOT_BYTES,
+    _TRIPLE_SIGS,
+    _gate_engine_and_config,
+)
 from test_glm5_next_gguf import _ITER_METADATA, _write_iter_gguf  # noqa: E402
 
 _FT_BLOCK_COUNT = 9  # 8 trunk layers (all MoE) + blk.8 as the skipped MTP block
@@ -137,6 +142,7 @@ def test_ftw_without_gguf_meta_keeps_legacy_semantics(tmp_path):
     # and the quant_format tag still resolves kind/kernel through LEGACY_FORMAT
     from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
     from freetoken.layers.quantization import QuantKind
+    from freetoken.moe.expert_banks import gguf_ftw_signature_groups
 
     out = tmp_path / "ckpt"
     w = FTWWriter(str(out))
@@ -151,6 +157,50 @@ def test_ftw_without_gguf_meta_keeps_legacy_semantics(tmp_path):
     assert banks.kind is QuantKind.NONE and banks.kernel == "fused"
     assert banks.gguf_types is None
     assert sorted(banks.sources) == ["down", "gate_up"]
+    # and the FTW floor-gate scan stays silent for a non-gguf quant_format
+    assert gguf_ftw_signature_groups(str(out), SimpleNamespace(num_experts=4, num_moe_layers=2)) is None
+
+
+def test_ftw_scan_matches_loaded_bank_grouping(ftw_gguf_ckpt):
+    # exactness bridge: the index-only scan's grouping and per-group slot widths
+    # equal what _group_bank_layers / expert_bytes_per_slot see on the loaded banks
+    from freetoken.checkpoint.ftw import load_ftw_banks
+    from freetoken.engine.cache_budget import expert_bytes_per_slot
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.expert_banks import gguf_ftw_signature_groups
+
+    _, out = ftw_gguf_ckpt
+    banks = load_ftw_banks(out, num_layers=8)
+    scan_groups, scan_slots = gguf_ftw_signature_groups(
+        out, SimpleNamespace(num_experts=_FT_E, num_moe_layers=8)
+    )
+    ns = SimpleNamespace(sources=banks.sources)
+    groups = Engine._group_bank_layers(ns, 8)
+    assert scan_groups == groups == [[0, 1, 2, 3, 4], [5], [6, 7]]
+    assert scan_slots == [
+        expert_bytes_per_slot({n: [banks.sources[n][l] for l in m] for n in banks.sources})
+        for m in groups
+    ]
+    assert scan_slots == _TRIPLE_GROUP_SLOT_BYTES
+
+
+def test_ftw_early_floor_gate_rejects_before_bank_load(ftw_gguf_ckpt, monkeypatch):
+    # pins the FTW branch of the gate's position inside _init_offload_moe_cache:
+    # an unfundable plan must raise off the index alone, before load_expert_banks
+    import freetoken.engine.engine as engine_mod
+
+    _, out = ftw_gguf_ckpt
+    engine, config = _gate_engine_and_config(out, kv_reserve_tokens=14_080)  # envelope 14 < need 15
+    engine.model = object()
+    engine._host_tables_bytes = 0
+
+    def _sentinel(*args, **kwargs):
+        raise AssertionError("load_expert_banks ran before the floor gate")
+
+    monkeypatch.setattr(engine_mod, "shared_offload_method", lambda model: None)
+    monkeypatch.setattr(engine_mod, "load_expert_banks", _sentinel)
+    with pytest.raises(ValueError, match="byte-weighted minimum of 15"):
+        engine._init_offload_moe_cache(config)
 
 
 @pytest.mark.parametrize(
@@ -180,3 +230,15 @@ def test_ftw_gguf_types_meta_rejected(tmp_path, meta, why):
     with pytest.raises(RuntimeError, match="gguf_types"):
         load_ftw_banks(str(out), num_layers=2)
 
+
+def test_ftw_persisted_types_feed_capability_gates(ftw_gguf_ckpt):
+    # the hybrid gate + --moe-cpu-layers auto consult gguf_expert_bank_types, which is
+    # bare-.gguf-only: on an FTW dir it must fall back to the persisted index meta
+    # (the fix that unblocks --moe-strategy hybrid for converted checkpoints)
+    from freetoken.moe.expert_banks import gguf_expert_bank_types
+
+    _, out = ftw_gguf_ckpt
+    types = gguf_expert_bank_types(out, SimpleNamespace(num_moe_layers=8))
+    assert types == {i: tuple(s) for i, s in enumerate(_TRIPLE_SIGS)}
+    # and the FTW floor-gate scan stays silent over the same index-less formats
+    assert gguf_expert_bank_types("/nonexistent-dir", SimpleNamespace(num_moe_layers=8)) is None

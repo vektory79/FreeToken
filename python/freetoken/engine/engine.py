@@ -806,16 +806,21 @@ class Engine:
     @staticmethod
     def _gguf_auto_floor_gate(config: EngineConfig, method, resolve_auto) -> None:
         """Pre-load fail-fast for --moe-cache-auto on multi-signature gguf files: the
-        header-only scan proves the signature groups cheaply, so the same floor math
-        as _split_moe_cache_budget (the late check, kept as the safety net for layouts
-        the scan cannot prove) rejects an unfundable plan before the multi-minute
-        bank load instead of after it."""
+        header-only scan proves the signature groups cheaply - from the bare .gguf
+        tensor table, or from the FTW index the converter wrote - so the same floor
+        math as _split_moe_cache_budget (the late check, kept as the safety net for
+        layouts the scan cannot prove) rejects an unfundable plan before the
+        multi-minute bank load instead of after it."""
         if not config.moe_cache_auto or config.use_dummy_weight or method is not None:
             return
         from freetoken.engine.cache_budget import check_partition_floors
         from freetoken.moe.expert_banks import gguf_signature_groups
 
         scan = gguf_signature_groups(config.model_path, config.model_config)
+        if scan is None:
+            from freetoken.moe.expert_banks import gguf_ftw_signature_groups
+
+            scan = gguf_ftw_signature_groups(config.model_path, config.model_config)
         if scan is None:
             return
         groups, per_group_slots = scan
@@ -1824,6 +1829,8 @@ def _adjust_ftw_quant_backend(model_path: str, quant_backend: QuantBackend) -> Q
     try:
         kind, kernel = kind_kernel_for(fmt)
     except KeyError:
+        return quant_backend
+    if kind is None:  # "gguf" banks carry no packed kernel; the flag table stays automatic
         return quant_backend
     requested = quant_backend.select(LayerKind.MOE, kind)
     if requested == kernel:

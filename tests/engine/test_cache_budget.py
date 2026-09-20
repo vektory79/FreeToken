@@ -745,6 +745,65 @@ def test_cpu_moe_executor_viable_reads_gguf_types(tmp_path):
     assert _cpu_moe_executor_viable(flat) is True
 
 
+def _write_ftw_gguf_types_dir(path, rows, *, quant_format="gguf", include_types=True) -> str:
+    # meta-only FTW dir (no banks needed): the capability gates read the index json alone
+    from freetoken.checkpoint.ftw import FTWWriter
+
+    w = FTWWriter(str(path))
+    w.add_tensor("token_embd.weight", torch.zeros(4, dtype=torch.bfloat16))
+    meta = {"quant_format": quant_format}
+    if include_types:
+        meta["gguf_types"] = [list(r) for r in rows]
+    w.finalize(meta)
+    return str(path)
+
+
+def test_adjust_config_accepts_gguf_hybrid_for_ftw_types(tmp_path):
+    # the FTW analog of the capable-types gate: the persisted index meta answers the
+    # same capability question for an FTW dir, where the bare-gguf scan cannot look
+    from freetoken.engine.engine import _adjust_config
+
+    path = _write_ftw_gguf_types_dir(tmp_path / "ckpt", [(18, 18, 23), (18, 18, 14)])
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=path)
+    _adjust_config(cfg)  # must not raise
+    assert cfg.moe_strategy == "hybrid"
+
+
+def test_adjust_config_rejects_gguf_hybrid_for_ftw_without_types(tmp_path):
+    # an old-converter FTW dir carries no gguf_types meta: hybrid stays rejected at
+    # config time (fail-safe), offload keeps working
+    from freetoken.engine.engine import _adjust_config
+
+    path = _write_ftw_gguf_types_dir(tmp_path / "ckpt", [], include_types=False)
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=path)
+    with pytest.raises(ValueError, match="cannot be verified from the file header"):
+        _adjust_config(cfg)
+
+
+@pytest.mark.skipif(not _HAVE_CPU_MOE_EXT, reason="compiled _cpu_moe extension missing")
+def test_cpu_moe_executor_viable_reads_ftw_types(tmp_path):
+    # --moe-cpu-layers auto must see an FTW gguf checkpoint's persisted types too:
+    # capable types make it viable where the bare-gguf-only scan said "not viable"
+    from freetoken.engine.engine import _cpu_moe_executor_viable
+
+    def model_config(num_layers):
+        return SimpleNamespace(
+            single_stream_only=False,
+            is_moe=True,
+            expert_quant="none",
+            moe_weight_format="gguf",
+            hidden_act="silu",
+            has_swa_attention=False,
+            has_linear_attention=False,
+            num_moe_layers=num_layers,
+        )
+
+    capable = _write_ftw_gguf_types_dir(tmp_path / "capable", [(18, 18, 23), (23, 23, 14)])
+    assert _cpu_moe_executor_viable(model_config(2), capable) is True
+    incapable = _write_ftw_gguf_types_dir(tmp_path / "incapable", [(8, 8, 8)])
+    assert _cpu_moe_executor_viable(model_config(1), incapable) is False
+
+
 # ---- Task 07: offload + explicit --moe-cpu-layers on gguf (engine-stage failures) ----
 
 

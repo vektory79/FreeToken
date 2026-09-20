@@ -370,7 +370,9 @@ def _gguf_bank_bytes(model_path, model_config) -> int | None:
 def gguf_expert_bank_types(model_path, model_config) -> dict[int, tuple[int, int, int]] | None:
     """Role-ordered (gate, up, down) gguf type id of every routed-expert bank layer of a
     bare .gguf file, from its tensor table alone (the _gguf_bank_bytes header-only scan;
-    role order comes from the suffix map, never the file's tensor order).
+    role order comes from the suffix map, never the file's tensor order). For an FTW
+    checkpoint dir the bare scan cannot answer, so the converter-persisted index meta
+    ``gguf_types`` is read instead (same silently-None contract).
 
     The engine's hybrid gate consults this at config time, before any bank is loaded.
     ``None`` when the scan cannot prove a complete bank set - unverifiable types must
@@ -378,11 +380,50 @@ def gguf_expert_bank_types(model_path, model_config) -> dict[int, tuple[int, int
     """
     per_layer = _gguf_bank_role_stacks(model_path, model_config, lambda t: int(t.ggml_type))
     if per_layer is None:
-        return None
+        return _ftw_gguf_types_by_layer(
+            model_path, int(getattr(model_config, "num_moe_layers", 0) or 0)
+        )
     return {
         layer: (stacks["gate"], stacks["up"], stacks["down"])
         for layer, stacks in per_layer.items()
     }
+
+
+def _ftw_gguf_index_meta(path):
+    """(quant_format, gguf_types) of an FTW dir, header-only (one small json read).
+    ``(None, None)`` on any unreadable or ill-formed index: FTW scans follow the bare
+    scan's silently-None contract - they must never fail a boot the real banks would fund."""
+    import json
+
+    from freetoken.checkpoint.ftw import INDEX_NAME
+
+    try:
+        with open(os.path.join(path, INDEX_NAME), encoding="utf-8") as f:
+            index = json.load(f)
+        if not isinstance(index, dict):
+            return None, None
+        return index.get("quant_format"), index.get("gguf_types")
+    except Exception:
+        return None, None
+
+
+def _ftw_gguf_types_by_layer(path, num_moe) -> dict[int, tuple[int, int, int]] | None:
+    """``{bank_layer: (gate, up, down)}`` from an FTW dir's persisted gguf_types meta -
+    the FTW analog of the bare-.gguf header scan for the engine's capability gates.
+    Capability itself stays the executor's own set; this only proves what the file
+    packs. ``None`` when the meta is absent, malformed, or does not span exactly
+    ``num_moe`` layers (an unprovable layout must never pass a capability gate)."""
+    quant_format, rows = _ftw_gguf_index_meta(path)
+    if quant_format != "gguf" or not isinstance(rows, list) or len(rows) != num_moe:
+        return None
+    if not all(
+        isinstance(row, (list, tuple))
+        and len(row) == 3
+        and all(isinstance(t, int) for t in row)
+        for row in rows
+    ):
+        return None
+    return {i: (int(r[0]), int(r[1]), int(r[2])) for i, r in enumerate(rows)}
 
 
 def gguf_signature_groups(model_path, model_config) -> tuple[list[list[int]], list[int]] | None:
@@ -415,12 +456,73 @@ def gguf_signature_groups(model_path, model_config) -> tuple[list[list[int]], li
         return None
     roles = ("gate", "up", "down")
     keys = {layer: tuple(per_layer[layer][r] for r in roles) for layer in range(num_moe)}
+    return _signature_groups_and_slots(keys)
+
+
+def _signature_groups_and_slots(
+    keys: dict[int, tuple],
+) -> tuple[list[list[int]], list[int]]:
+    """Group bank layers by per-role (rows, row_bytes) key (bank order preserved) and
+    size one slot: one expert's packed rows across the three banks. Shared by the
+    bare-gguf and FTW signature scans; group 0 holds bank layer 0, the width the
+    --moe-cache-auto envelope is denominated in."""
     groups: dict[tuple, list[int]] = {}
-    for layer in range(num_moe):
-        groups.setdefault(keys[layer], []).append(layer)
-    # per-slot bytes = one expert's packed rows across the three banks; group 0 holds
-    # bank layer 0, the width the --moe-cache-auto envelope is denominated in
+    for layer, key in keys.items():
+        groups.setdefault(key, []).append(layer)
     return list(groups.values()), [sum(r * b for r, b in k) for k in groups]
+
+
+def gguf_ftw_signature_groups(path, model_config) -> tuple[list[list[int]], list[int]] | None:
+    """(signature groups, per-group slot bytes) of an FTW gguf checkpoint, from its
+    index alone (one small json read, no bank IO) - the FTW analog of
+    :func:`gguf_signature_groups` for the engine's pre-load floor gate.
+
+    The converter streams each bank layer as its own uint8 FTW entry shaped
+    ``[num_experts, output_rows, row_bytes]`` (name ``{role}#L{id:05d}``), so the
+    per-role (rows, row_bytes) pairs and the group/slot math are exactly what
+    ``Engine._group_bank_layers`` computes on the loaded banks. ``None`` keeps the
+    late split check as the only gate: anything the index cannot prove (not an FTW
+    dir, a flat-region layout, a non-gguf quant_format, an incomplete bank set, an
+    entry that is not the streamed [E, rows, row_bytes] shape) must never reject a
+    boot the real banks would fund.
+    """
+    num_experts = int(getattr(model_config, "num_experts", 0) or 0)
+    num_moe = int(getattr(model_config, "num_moe_layers", 0) or 0)
+    if num_experts <= 0 or num_moe <= 0:
+        return None
+    import json
+
+    from freetoken.checkpoint.ftw import INDEX_NAME, _LAYER_ENTRY_RE
+    from freetoken.moe.legacy_format import canonical_role
+
+    try:
+        with open(os.path.join(path, INDEX_NAME), encoding="utf-8") as f:
+            index = json.load(f)
+        if not isinstance(index, dict) or index.get("quant_format") != "gguf":
+            return None
+        per_layer: dict[int, dict[str, tuple[int, int]]] = {}
+        for t in index.get("tensors", []):
+            if t.get("kind") != "experts_bank":
+                continue
+            m = _LAYER_ENTRY_RE.match(t["name"])
+            if m is None:  # alphas or a flat-region entry: nothing per-layer to prove
+                continue
+            role = canonical_role(m.group("base"))
+            if role not in ("gate", "up", "down"):
+                continue
+            shape = t.get("shape") or ()
+            if len(shape) != 3 or int(shape[0]) != num_experts:
+                return None
+            per_layer.setdefault(int(m.group("layer")), {})[role] = (int(shape[1]), int(shape[2]))
+    except Exception:
+        # same silently-None contract as the bare-gguf scan: an unprovable index keeps
+        # the late split check as the only gate instead of crashing the pre-load gate
+        return None
+    roles = ("gate", "up", "down")
+    if set(per_layer) != set(range(num_moe)) or any(set(s) != set(roles) for s in per_layer.values()):
+        return None
+    keys = {b: tuple(per_layer[b][r] for r in roles) for b in range(num_moe)}
+    return _signature_groups_and_slots(keys)
 
 
 def bank_bytes_estimate(model_config, method=None, model_path=None) -> int | None:
