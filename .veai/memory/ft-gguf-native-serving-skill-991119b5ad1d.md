@@ -3,7 +3,7 @@ name: "ft-gguf-native-serving-skill"
 description: "gguf-native-serving skill: T01-T56 + D01-D10 after dense-q80 self-update; committed e277d4b"
 type: project
 lastUpdated: 2026-09-20T12:37
-lastRecall: 2026-09-20T17:28
+lastRecall: 2026-09-20T18:20
 ---
 
 # GGUF native serving skill: reusable methodology for any model family

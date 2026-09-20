@@ -2,7 +2,7 @@
 name: "ft-serve-gguf-tuning-campaign-2026-09"
 description: "GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs"
 type: project
-lastUpdated: 2026-09-20T18:02
+lastUpdated: 2026-09-20T18:20
 lastRecall: 2026-09-20T17:40
 ---
 
@@ -46,9 +46,7 @@ S (FTW fast path) and/or fix-1 (radix L persistence) implementation; optional 0.
 
 ## 2026-09-17 follow-ups
 - User ordered task briefs for fresh-session execution (composed same day, anchors re-verified by direct file reads): `.tasks/fix1-radix-track-seqlen/TASK.md` (fix-1; verified: prefill.py try_add_one continuation forwards ping_pong/next_track_idx/restore_src/swa_evicted_seqlen but NOT L) and `.tasks/ftw-gguf-fastpath/TASK.md` (S; verified: ftw.py:~620 kind_kernel_for(quant_format) KeyError line, ExpertBanks return ~657 without gguf_types, convert.py finalize meta ~306 lacks gguf_types, cache.py:346-362 frozen-donate conditions verbatim).
-- MMQ prefill kernel case opened by user request ("сколько даст tiled MMQ") - see memory ft-gguf-moe-prefill-mmq-gap; kernel-study fork (roofline with real GGUF-header geometry, IQ-MMQ port plan) was still running at session end.
-
-- (2026-09-18 consolidation: the MMQ prefill kernel memory was merged into ft-gguf-prefill-mmq-roofline, which now holds the measured nsys split, v0/v2 ceilings and the IQ MMQ port plan - reference that memory instead of the deleted ft-gguf-moe-prefill-mmq-gap.)
+- MMQ prefill kernel case opened by user request ("how much will tiled MMQ give") - see memory ft-gguf-prefill-mmq-roofline (2026-09-18 consolidation absorbed the old ft-gguf-moe-prefill-mmq-gap notes); kernel-study fork was still running at session end.
 
 ## fix-1 implemented (2026-09-18, vektory79, UNCOMMITTED)
 - The root-cause statement above is now HISTORICAL: python/freetoken/scheduler/prefill.py forwards mamba_last_track_seqlen across chunk transitions (+3 lines: _add_one_req param/assignment, try_add_one continuation forwarding). Tests: regression tests in tests/scheduler/test_hybrid_cache_manager.py (pre-fix FAIL verified: None==64) + triaged strengtheners; scheduler + kvcache/radix 244 passed; full gate 2135 passed / 6 baseline-Environment.
@@ -58,4 +56,4 @@ S (FTW fast path) and/or fix-1 (radix L persistence) implementation; optional 0.
 ## fix-1 COMMITTED (2026-09-18)
 - 5b72aba "fix(scheduler): carry mamba_last_track_seqlen across prefill chunk transitions" on vektory79 (parent ebf071b), single commit, 3 files (prefill.py +3; test_hybrid_cache_manager.py +160; test_abort_inflight_prefill.py +51/-5), 214+/5-. No push. The "commit pending" note above is superseded.
 
-UPDATE (2026-09, post fix-1): "Pending user decisions S" above is RESOLVED and implemented - full outcome, tests and hardware numbers live in the dedicated memory ft-ftw-gguf-fastpath-outcome (boot 52.1 s, uncommitted on vektory79, commits pending). Also: the 293 tok/s prefill anchor above is the PRE-dense-q80/m-tile number; current bare baseline is 792-808.
+UPDATE (2026-09, post fix-1): "Pending user decisions S" above is RESOLVED and implemented - full outcome, tests and hardware numbers live in the dedicated memory ft-ftw-gguf-fastpath-outcome (boot 52.1 s; committed on vektory79 as 8568807/e9ad38d/ef14efb/2e9fcf1, no push). Also: the 293 tok/s prefill anchor above is the PRE-dense-q80/m-tile number; current bare baseline is 792-808.

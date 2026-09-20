@@ -38,5 +38,5 @@
 - [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-bc52e0593004.md) — v3 m-tile campaign: grouped MoE tile sweep +67.2% (1706aae); production default MOE_MTILE=32 via 8e2e4c7
 - [measured-advice-over-paper](measured-advice-over-paper-d343b7abbdf3.md) — User rejects paper extrapolations as config advice; demands measured numbers (2026-09-20 VRAM-headroom case)
 - [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-d3612f631d60.md) — GGUF glm5next VRAM headroom: ratio 0.80 + reserve 400k = 1.96 GiB free at -0.1% prefill; ratio floor 0.80 fail-fast
-- [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-025b0955b7ed.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
-- [ft-ftw-gguf-fastpath-outcome](ft-ftw-gguf-fastpath-outcome-c0bc8880a149.md) — Task S FTW gguf fastpath: Gaps 1-3 + capability fallback done (uncommitted); tests + hardware: boot 52.1s
+- [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-479a22553522.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
+- [ft-ftw-gguf-fastpath-outcome](ft-ftw-gguf-fastpath-outcome-df7f6d230787.md) — Task S FTW gguf fastpath: Gaps 1-3 + capability fallback done and committed (8568807..2e9fcf1); boot 52.1s vs 94-132s

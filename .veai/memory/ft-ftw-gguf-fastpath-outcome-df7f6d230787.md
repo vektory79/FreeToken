@@ -1,18 +1,18 @@
 ---
 name: "ft-ftw-gguf-fastpath-outcome"
-description: "Task S FTW gguf fastpath: Gaps 1-3 + capability fallback done (uncommitted); tests + hardware: boot 52.1s"
+description: "Task S FTW gguf fastpath: Gaps 1-3 + capability fallback done and committed (8568807..2e9fcf1); boot 52.1s vs 94-132s"
 type: project
-lastUpdated: 2026-09-20T18:02
-lastRecall: 2026-09-20T18:06
+lastUpdated: 2026-09-20T18:24
+lastRecall: 2026-09-20T18:20
 ---
 
-# FTW GGUF fast path (task S): implemented + hardware-validated, UNCOMMITTED
+# FTW GGUF fast path (task S): implemented + hardware-validated, COMMITTED
 
 Task brief: .tasks/ftw-gguf-fastpath/TASK.md (status + Outcome section updated in place).
 Summary memory ft-serve-gguf-tuning-campaign-2026-09 holds the bare-GGUF tuning context
 (winner flags, radix root cause); this memory holds the task S outcome only.
 
-## What landed (worktree diff vs 315b278, +477/-16, 8 files, vektory79)
+## What landed (commits 8568807/e9ad38d/ef14efb/2e9fcf1 on vektory79, +477/-16, 8 files)
 - Gap 1: kind_kernel_for("gguf") -> (None, None) via tag-keyed _KIND_KERNEL in
   moe/legacy_format.py. TRAP: LEGACY_FORMAT is the INVERSE (kind,kernel)->tag map; the
   entry must NOT go there (first test run proved the obvious placement wrong).
@@ -33,7 +33,8 @@ Review x2 (PASS-with-nits / FAIL on the Major) -> triage: 9 findings, all fixed,
 rejected. Tests: NEW tests/checkpoint/test_ftw_gguf_banks.py (roundtrip via real
 convert_checkpoint with CUDA skipif, 3-signature non-square fixture, down-first variant,
 5 malformed-meta rejections, capability sentinel tests) + tests/engine/test_cache_budget.py
-(+59). Battery: 175 passed / 7 skipped.
+(+59) + tests/moe/test_legacy_format.py (extracted regression, fails-before proven).
+Battery: 175 passed / 7 skipped.
 
 ## Hardware (RTX 5090, winner flags --moe-strategy hybrid etc., port 18801)
 - Conversion: 147.5 GB bare gguf -> 134.24 GiB FTW in 268 s
@@ -52,7 +53,9 @@ convert_checkpoint with CUDA skipif, 3-signature non-square fixture, down-first 
   dirs from older builds now fail fast in load_ftw_banks with a re-convert message.
 
 ## Status
+Committed (bisect-green series; no push): 8568807 fix(checkpoint) gap1; e9ad38d
+feat(checkpoint) gap2; ef14efb feat(moe) gap3+capability; 2e9fcf1 fix(moe) fused-copy-plan
+bank names (no test - paths need fused-capable CUDA construction). Skill self-update
+T57/T58 + T44 extension landed in .veai/skills (uncommitted, user decides).
 Artifacts: .tasks/ftw-gguf-fastpath/ (run-convert-wave1.sh, verify-convert-wave1.py,
 run-wave2-measure.py, wave2-parity.py, run-wave2/, /tmp/ftw-convert-glm53-q3k-wave1.log).
-Commits PENDING user decision; suggested split in TASK.md "Commits". Index holds a stale
-auto-staged copy of the new test file - re-stage before committing.
