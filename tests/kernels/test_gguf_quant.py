@@ -487,17 +487,29 @@ def test_grouped_moe_ds_fill_analytic_tail_experts(mtile, monkeypatch):
 
 @cuda
 def test_moe_mtile_env_knob(monkeypatch):
-    # FREETOKEN_GGUF_MOE_MTILE: default 4, each valid value, invalid values raise
-    # out of the extension, and the python-visible get_block_size (the trio's
-    # block_size source) matches the selected tile - the single-source-of-truth
-    # regression against a kernel mmq_x / moe_align block_size divergence.
+    # FREETOKEN_GGUF_MOE_MTILE: default 32 (the v3a sweep: +67.2% grouped
+    # prefill, outputs bitwise identical across tiles, battery 24/24), each
+    # valid value, invalid values raise out of the extension, and the
+    # python-visible get_block_size (the trio's block_size source) matches the
+    # selected tile - the single-source-of-truth regression against a kernel
+    # mmq_x / moe_align block_size divergence.
     from freetoken.kernel.gguf import ggml_moe_get_block_size
 
     monkeypatch.delenv("FREETOKEN_GGUF_MOE_MTILE", raising=False)
     assert all(
+        ggml_moe_get_block_size(t) == 32 for t in (GGML_Q8_0, GGML_Q6_K, GGML_IQ3_XXS, GGML_IQ4_XS)
+    )
+    # "" is not a straggler: the empty value must behave exactly like unset
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "")
+    assert all(
+        ggml_moe_get_block_size(t) == 32 for t in (GGML_Q8_0, GGML_Q6_K, GGML_IQ3_XXS, GGML_IQ4_XS)
+    )
+    # "4" still selects the historical single [4]-tile launch structure
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "4")
+    assert all(
         ggml_moe_get_block_size(t) == 4 for t in (GGML_Q8_0, GGML_Q6_K, GGML_IQ3_XXS, GGML_IQ4_XS)
     )
-    for tile in (4, 8, 16, 32):
+    for tile in (8, 16, 32):
         monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", str(tile))
         assert ggml_moe_get_block_size(GGML_Q8_0) == tile
         assert ggml_moe_get_block_size(GGML_Q6_K) == tile
@@ -815,7 +827,7 @@ def test_dense_mtile_env_knob(monkeypatch):
     # knob scope: the grouped MoE knob keeps its own meaning (and vice versa)
     monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", "32")
     monkeypatch.delenv("FREETOKEN_GGUF_MOE_MTILE", raising=False)
-    assert ggml_moe_get_block_size(GGML_Q8_0) == 4
+    assert ggml_moe_get_block_size(GGML_Q8_0) == 32
     monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
     monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "32")
     assert ggml_dense_get_mtile() == 64

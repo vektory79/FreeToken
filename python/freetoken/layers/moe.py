@@ -507,7 +507,7 @@ class OffloadMoELayer(MoELayer):
         so the gate/up calls (top_k) and the down call (top_k=1 over the M*top_k
         interleaved rows) walk the SAME sorted buffer. Gate/up/down may be
         different ggml types; the grouped m-tile is ONE global knob
-        (FREETOKEN_GGUF_MOE_MTILE, default 4) read PER CALL, so every served
+        (FREETOKEN_GGUF_MOE_MTILE, default 32) read PER CALL, so every served
         type reports the same block size, one trio serves all three, and the
         per-size cache below only re-aligns when sizes actually differ. Dense
         projections have a separate m-tile knob (FREETOKEN_GGUF_DENSE_MTILE,

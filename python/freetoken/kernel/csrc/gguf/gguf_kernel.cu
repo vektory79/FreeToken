@@ -439,6 +439,12 @@ torch::Tensor ggml_mul_mat_a8(
 // block_size diverging from the kernel mmq_x consumes expert bins cross-expert
 // and silently corrupts pairs. Read per call (getenv is cheap and boots are
 // separate processes; a static cache would also pin tests against env flips).
+// unset/empty -> 32 (the default: the v3a sweep gives +67.2% grouped prefill
+// and outputs stay bitwise identical across tiles, battery 24/24), "4" (the
+// historical tile) and 8/16/32 -> that tile, anything else TORCH_CHECK
+// fail-fast (no trim or numeric parsing, so " 8"/"04"/"+8" stragglers raise).
+// Do not flip after boot: the trio block_size and the kernel tile are read at
+// different moments, so a mid-boot flip would mispair buffers with kernels.
 static int ft_gguf_moe_mtile() {
 #if defined(USE_ROCM)
   // m-tile variants are CUDA-only (tile 4 would make token_offs zero-length
@@ -452,7 +458,10 @@ static int ft_gguf_moe_mtile() {
   return MOE_X_Q8_0;
 #else
   const char* v = getenv("FREETOKEN_GGUF_MOE_MTILE");
-  if (v == nullptr || *v == '\0' || strcmp(v, "4") == 0) {
+  if (v == nullptr || *v == '\0') {
+    return 32;
+  }
+  if (strcmp(v, "4") == 0) {
     return 4;
   }
   if (strcmp(v, "8") == 0) {
