@@ -3,7 +3,7 @@ name: "ft-gate-nodeid-collection-drift"
 description: "Full-gate nodeid counts drift across runs: test_quant_config.py collection-time glob parametrization; key on failure set"
 type: project
 lastUpdated: 2026-09-19T18:12
-lastRecall: 2026-09-20T01:28
+lastRecall: 2026-09-20T14:22
 ---
 
 # Full-gate collected-nodeid drift: test_quant_config.py collection-time glob parametrization

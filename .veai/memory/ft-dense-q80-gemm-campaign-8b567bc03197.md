@@ -3,7 +3,7 @@ name: "ft-dense-q80-gemm-campaign"
 description: "dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61%; dense tile64 +40.46%; all committed (HEAD 8e2e4c7)"
 type: project
 lastUpdated: 2026-09-20T12:37
-lastRecall: 2026-09-20T12:22
+lastRecall: 2026-09-20T14:22
 ---
 
 # dense-q80-gemm campaign: dense q8_0 ALU-bound; N-split +2.61% committed; Candidate A tile64 +40.46%

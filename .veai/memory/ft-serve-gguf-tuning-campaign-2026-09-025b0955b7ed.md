@@ -2,8 +2,8 @@
 name: "ft-serve-gguf-tuning-campaign-2026-09"
 description: "GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs"
 type: project
-lastUpdated: 2026-09-18T23:49
-lastRecall: 2026-09-19T19:22
+lastUpdated: 2026-09-20T18:02
+lastRecall: 2026-09-20T17:40
 ---
 
 # ft serve GGUF GLM-5.3-Flash: tuning campaign 2026-09-16/17 (RTX 5090)
@@ -57,3 +57,5 @@ S (FTW fast path) and/or fix-1 (radix L persistence) implementation; optional 0.
 
 ## fix-1 COMMITTED (2026-09-18)
 - 5b72aba "fix(scheduler): carry mamba_last_track_seqlen across prefill chunk transitions" on vektory79 (parent ebf071b), single commit, 3 files (prefill.py +3; test_hybrid_cache_manager.py +160; test_abort_inflight_prefill.py +51/-5), 214+/5-. No push. The "commit pending" note above is superseded.
+
+UPDATE (2026-09, post fix-1): "Pending user decisions S" above is RESOLVED and implemented - full outcome, tests and hardware numbers live in the dedicated memory ft-ftw-gguf-fastpath-outcome (boot 52.1 s, uncommitted on vektory79, commits pending). Also: the 293 tok/s prefill anchor above is the PRE-dense-q80/m-tile number; current bare baseline is 792-808.

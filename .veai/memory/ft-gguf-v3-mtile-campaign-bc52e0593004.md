@@ -3,7 +3,7 @@ name: "ft-gguf-v3-mtile-campaign"
 description: "v3 m-tile campaign: grouped MoE tile sweep +67.2% (1706aae); production default MOE_MTILE=32 via 8e2e4c7"
 type: project
 lastUpdated: 2026-09-20T12:37
-lastRecall: 2026-09-20T12:22
+lastRecall: 2026-09-20T14:22
 ---
 
 # v3 m-tile campaign (grouped GGUF MoE prefill): Step 0 verified, v3a implemented

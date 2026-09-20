@@ -21,7 +21,6 @@
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
 - [ft-bare-logger-liveness-trap](ft-bare-logger-liveness-trap-6399769cb81b.md) — Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)
-- [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-b855848b830d.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
 - [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-540a37c5ed9f.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 hypothesis now verified
 - [ft-gguf-test-fixture-crafting](ft-gguf-test-fixture-crafting-512a3fc6e85f.md) — gguf test methodology: _FP16_SCALE_FIELDS, analytic fixtures, seeded tolerance bounds (unseeded = latent flakes)
 - [ft-gguf-moe-mtile-kernel-traps](ft-gguf-moe-mtile-kernel-traps-c8b1b2a09ff4.md) — moe.cuh m-tile traps: x=weights y=activations naming, ds-fill garbage rows, block_size single source of truth
@@ -37,3 +36,7 @@
 - [ft-dense-q80-gemm-campaign](ft-dense-q80-gemm-campaign-8b567bc03197.md) — dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61%; dense tile64 +40.46%; all committed (HEAD 8e2e4c7)
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-991119b5ad1d.md) — gguf-native-serving skill: T01-T56 + D01-D10 after dense-q80 self-update; committed e277d4b
 - [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-bc52e0593004.md) — v3 m-tile campaign: grouped MoE tile sweep +67.2% (1706aae); production default MOE_MTILE=32 via 8e2e4c7
+- [measured-advice-over-paper](measured-advice-over-paper-d343b7abbdf3.md) — User rejects paper extrapolations as config advice; demands measured numbers (2026-09-20 VRAM-headroom case)
+- [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-d3612f631d60.md) — GGUF glm5next VRAM headroom: ratio 0.80 + reserve 400k = 1.96 GiB free at -0.1% prefill; ratio floor 0.80 fail-fast
+- [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-025b0955b7ed.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
+- [ft-ftw-gguf-fastpath-outcome](ft-ftw-gguf-fastpath-outcome-c0bc8880a149.md) — Task S FTW gguf fastpath: Gaps 1-3 + capability fallback done (uncommitted); tests + hardware: boot 52.1s

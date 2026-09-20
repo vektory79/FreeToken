@@ -3,7 +3,7 @@ name: "cuda-debug-tool-strategy"
 description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu ERR_NVGPUCTRPERM blocked"
 type: project
 lastUpdated: 2026-09-19T17:59
-lastRecall: 2026-09-19T18:14
+lastRecall: 2026-09-20T14:22
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation

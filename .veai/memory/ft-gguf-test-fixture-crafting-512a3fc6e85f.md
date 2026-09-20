@@ -3,7 +3,7 @@ name: "ft-gguf-test-fixture-crafting"
 description: "gguf test methodology: _FP16_SCALE_FIELDS, analytic fixtures, seeded tolerance bounds (unseeded = latent flakes)"
 type: project
 lastUpdated: 2026-09-19T02:54
-lastRecall: 2026-09-19T18:14
+lastRecall: 2026-09-20T16:44
 ---
 
 # Crafting synthetic gguf quant tensors in FreeToken tests
