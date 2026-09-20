@@ -425,7 +425,8 @@ class OffloadMoeCache:
 
         dst_ptrs, feats = [], []
         layer_src_ptrs = [[] for _ in range(self.num_layers)]
-        for per_layer, cache in self.banks:
+        # name every bank in the construction-time rejections below (schema order == self.banks order)
+        for name, (per_layer, cache) in zip(self.bank_schema, self.banks):
             feat = math.prod(per_layer[0].shape[1:]) * per_layer[0].element_size()
             if feat % 16 != 0 or cache.data_ptr() % 16 != 0:
                 return  # leave fused disabled; copy_missing uses the per-bank path
