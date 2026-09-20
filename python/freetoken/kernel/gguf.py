@@ -145,6 +145,11 @@ def ggml_moe_get_block_size(quant_type: int) -> int:
     return _module().ggml_moe_get_block_size(quant_type)
 
 
+def ggml_dense_get_mtile() -> int:
+    """The dense q8_0 MMQ token-tile (FREETOKEN_GGUF_DENSE_MTILE, default 4)."""
+    return _module().ggml_dense_get_mtile()
+
+
 __all__ = [
     "ggml_dequantize",
     "ggml_mul_mat_vec_a8",
@@ -152,4 +157,5 @@ __all__ = [
     "ggml_moe_a8",
     "ggml_moe_a8_vec",
     "ggml_moe_get_block_size",
+    "ggml_dense_get_mtile",
 ]

@@ -440,7 +440,9 @@ static void ggml_mul_mat_q5_1_q8_1_cuda(
 #define NWARPS_Q8_0 4
 #endif
 
-template <typename scalar_t, bool need_check>
+// The m-tile is a template param (dense-q80-gemm): CUDA picks it per call via
+// FREETOKEN_GGUF_DENSE_MTILE; ROCm keeps its single in-tree tile.
+template <typename scalar_t, bool need_check, int mmq_x>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
@@ -454,9 +456,12 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
         const int ncols_y,
         const int nrows_y,
         const int nrows_dst) {
-  const int mmq_x = MMQ_X_Q8_0;
   const int mmq_y = MMQ_Y_Q8_0;
   const int nwarps = NWARPS_Q8_0;
+  // sum[][] and the j += nwarps loops degenerate to zero-length strips when a
+  // tile does not cover whole warps (ROCm's nwarps=8 would zero-length a 4-wide tile).
+  static_assert(mmq_x >= nwarps, "dense m-tile below the warp count");
+  static_assert(mmq_x % nwarps == 0, "dense m-tile must cover whole per-warp strips");
 
   mul_mat_q<
       scalar_t,
@@ -474,7 +479,7 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
       vec_dot_q8_0_q8_1_mul_mat>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int mmq_x>
 static void ggml_mul_mat_q8_0_q8_1_cuda(
     const void* vx,
     const void* vy,
@@ -485,7 +490,6 @@ static void ggml_mul_mat_q8_0_q8_1_cuda(
     const int nrows_y,
     const int nrows_dst,
     cudaStream_t stream) {
-  const int mmq_x = MMQ_X_Q8_0;
   const int mmq_y = MMQ_Y_Q8_0;
   const int nwarps = NWARPS_Q8_0;
 
@@ -495,12 +499,12 @@ static void ggml_mul_mat_q8_0_q8_1_cuda(
   const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
   if (nrows_x % mmq_y == 0) {
-    const bool need_check = false;
-    mul_mat_q8_0<scalar_t, need_check>
+    constexpr bool need_check = false;
+    mul_mat_q8_0<scalar_t, need_check, mmq_x>
         <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
   } else {
-    const bool need_check = true;
-    mul_mat_q8_0<scalar_t, need_check>
+    constexpr bool need_check = true;
+    mul_mat_q8_0<scalar_t, need_check, mmq_x>
         <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
   }
 }

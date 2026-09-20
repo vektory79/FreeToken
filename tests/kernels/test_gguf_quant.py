@@ -786,6 +786,114 @@ def test_kda_nsplit_decode_batch_stays_mmvq(monkeypatch):
     assert torch.equal(got, fused_mul_mat_gguf(x, lin.qweight, GGML_Q8_0))
 
 
+# ---- dense q8_0 m-tile knob (FREETOKEN_GGUF_DENSE_MTILE, Candidate A of
+# .tasks/dense-q80-gemm): mul_mat_q8_0 is templated on the token tile and the
+# knob picks the instantiation per call; the payoff is measured in a later wave.
+
+
+@cuda
+def test_dense_mtile_env_knob(monkeypatch):
+    # FREETOKEN_GGUF_DENSE_MTILE mirrors the v3a m-tile knob's shape: default 4
+    # (the historical dense tile), strict whitelist (no trim / numeric parsing,
+    # stragglers raise), read PER CALL so flipping the env between calls flips
+    # the tile. The probe is the same single source of truth the dispatch reads.
+    from freetoken.kernel.gguf import ggml_dense_get_mtile, ggml_moe_get_block_size
+
+    monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
+    assert ggml_dense_get_mtile() == 4
+    # "" is not a straggler: the empty value must behave exactly like unset
+    monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", "")
+    assert ggml_dense_get_mtile() == 4
+    for tile in (8, 16, 32, 64):
+        monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", str(tile))
+        assert ggml_dense_get_mtile() == tile
+    # knob scope: the grouped MoE knob keeps its own meaning (and vice versa)
+    monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", "32")
+    monkeypatch.delenv("FREETOKEN_GGUF_MOE_MTILE", raising=False)
+    assert ggml_moe_get_block_size(GGML_Q8_0) == 4
+    monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "32")
+    assert ggml_dense_get_mtile() == 4
+    monkeypatch.delenv("FREETOKEN_GGUF_MOE_MTILE", raising=False)
+    # strcmp whitelist: no trim or numeric parsing, so stragglers fail too
+    for bad in ("12", "0", "-4", "abc", " 8", "04", "+8", "08"):
+        monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", bad)
+        with pytest.raises(RuntimeError, match="FREETOKEN_GGUF_DENSE_MTILE"):
+            ggml_dense_get_mtile()
+
+
+@cuda
+def test_dense_mtile_scope_mmvq_and_moe_untouched(monkeypatch):
+    # batch <= 6 keeps riding the MMVQ vec kernels even with the tile widened;
+    # the batch > 6 MMQ route stays the only dense knob consumer (mirror of the
+    # decode-scope pin of the N-split wave).
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+
+    rng = np.random.default_rng(23)
+    k, out_dim = 128, 96
+    raw, _ = _finite_fp16_chain_reference(rng, out_dim, row_bytes(k, GGML_Q8_0), GGML_Q8_0)
+    qw = torch.from_numpy(raw.copy()).cuda()
+    monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", "32")
+    monkeypatch.setenv("FREETOKEN_GGUF_MOE_MTILE", "32")
+
+    mmq, vec = _spy_kda_a8(monkeypatch)
+    fused_mul_mat_gguf(torch.randn((4, k), device="cuda", dtype=torch.bfloat16), qw, GGML_Q8_0)
+    fused_mul_mat_gguf(torch.randn((7, k), device="cuda", dtype=torch.bfloat16), qw, GGML_Q8_0)
+    assert vec == [96] and mmq == [96]
+
+
+@cuda
+def test_dense_q80_mtile_bitwise_invariance(monkeypatch):
+    # per-element reduction order is tile-invariant (k-only accumulation in the
+    # same order per output element), so every tile must give BITWISE identical
+    # outputs (torch.equal, no tolerance - the v3a precedent). Shapes cover both
+    # need_check branches (keyed on N % 32) and M tails at every tile:
+    # (K=128, N=96, M=27) the noncontig-test geometry, M=27 < 32/64;
+    # (K=4096, N=24896, M=256) the production in_proj geometry, all divisible;
+    # (K=128, N=100, M=13) N % 32 != 0 -> need_check=1, plus an M tail.
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+
+    shapes = ((128, 96, 27), (4096, 24896, 256), (128, 100, 13))
+    for si, (k, out_dim, batch) in enumerate(shapes):
+        rng = np.random.default_rng(31 + si)
+        raw, _ = _finite_fp16_chain_reference(rng, out_dim, row_bytes(k, GGML_Q8_0), GGML_Q8_0)
+        qw = torch.from_numpy(raw.copy()).cuda()
+        x = torch.randn((batch, k), device="cuda", dtype=torch.bfloat16) * 0.25
+
+        monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
+        base = fused_mul_mat_gguf(x, qw, GGML_Q8_0)
+        for tile in (8, 16, 32, 64):
+            monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", str(tile))
+            got = fused_mul_mat_gguf(x, qw, GGML_Q8_0)
+            assert got.shape == base.shape and got.dtype == base.dtype
+            assert torch.equal(got, base), f"tile {tile} diverged on shape {shapes[si]}"
+        monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
+
+
+@cuda
+def test_dense_mtile_nsplit_composition(monkeypatch):
+    # the two knobs must compose: NSPLIT halves the in_proj GEMM along N and
+    # each half is itself a dense q8_0 MMQ dispatch, so DENSE_MTILE widens BOTH
+    # halves. The split output with tile 32 stays BITWISE equal to the
+    # default-tile split output and the launch structure stays [12448, 12448].
+    from freetoken.layers.gguf import kda_in_proj_forward
+
+    lin = _kda_nsplit_layer(np.random.default_rng(29), 4096, 24896)
+    x = torch.randn((256, 4096), device="cuda", dtype=torch.bfloat16) * 0.25
+
+    mmq, _ = _spy_kda_a8(monkeypatch)
+    monkeypatch.setenv("FREETOKEN_GGUF_KDA_NSPLIT", "2")
+    monkeypatch.delenv("FREETOKEN_GGUF_DENSE_MTILE", raising=False)
+    base = kda_in_proj_forward(lin, x)
+    assert mmq == [12448, 12448]
+
+    mmq.clear()
+    monkeypatch.setenv("FREETOKEN_GGUF_DENSE_MTILE", "32")
+    wide = kda_in_proj_forward(lin, x)
+    assert mmq == [12448, 12448]
+    assert torch.equal(base, wide)
+
+
 # ---- the JIT module load must not leak CC/CXX into the process env ----
 
 # A nonexistent absolute path: resolution must fall through to the raw override.

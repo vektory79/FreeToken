@@ -193,6 +193,83 @@ torch::Tensor ggml_mul_mat_vec_a8(
   return Y;
 }
 
+// ---- dense q8_0 m-tile knob (FREETOKEN_GGUF_DENSE_MTILE, .tasks/dense-q80-gemm) ----
+// Single source of truth for the dense q8_0 MMQ token-tile, read PER CALL
+// (getenv is cheap and boots are separate processes; a static cache would also
+// pin tests against env flips). unset/empty/"4" -> 4 (the historical tile),
+// 8/16/32/64 -> that tile, anything else TORCH_CHECK fail-fast (no trim or
+// numeric parsing, so " 8"/"04"/"+8" stragglers raise). Scope: ONLY the
+// dense q8_0 dispatch in ggml_mul_mat_a8 below; the other dense formats, the
+// MMVQ vec kernels (batch <= 6) and the grouped MoE path keep their own shapes
+// (FREETOKEN_GGUF_MOE_MTILE is a separate knob with a separate meaning - do
+// not overload). Do not flip after boot: decode CUDA graphs capture dense MMQ
+// launches for capture batches > 6, so the knob changes graph contents;
+// boot-time selection is the supported pattern.
+static int ft_gguf_dense_mtile() {
+#if defined(USE_ROCM)
+  // m-tile variants are CUDA-only; ROCm keeps its single in-tree tile for the
+  // dense types. Pin the shape so a future ROCm MMQ_X_Q8_0 change cannot
+  // silently desync this knob from the kernel template's static_asserts.
+  static_assert(MMQ_X_Q8_0 == 64, "ROCm dense q8_0 tile shape changed");
+  return MMQ_X_Q8_0;
+#else
+  const char* v = getenv("FREETOKEN_GGUF_DENSE_MTILE");
+  if (v == nullptr || *v == '\0' || strcmp(v, "4") == 0) {
+    return 4;
+  }
+  if (strcmp(v, "8") == 0) {
+    return 8;
+  }
+  if (strcmp(v, "16") == 0) {
+    return 16;
+  }
+  if (strcmp(v, "32") == 0) {
+    return 32;
+  }
+  if (strcmp(v, "64") == 0) {
+    return 64;
+  }
+  TORCH_CHECK(false, "FREETOKEN_GGUF_DENSE_MTILE must be one of 4, 8, 16, 32, 64, got '", v, "'");
+  return 4;  // unreachable: TORCH_CHECK throws
+#endif
+}
+
+// Shared 9-arg list of the dense q8_0 launcher call (bodies are byte-identical
+// across tile cases; only the tile template differs).
+#define FT_DENSE_MMQ_ARGS                                                    \
+  (void*)W.data_ptr(), (void*)quant_X.data_ptr(), (scalar_t*)Y.data_ptr(), \
+      col, row, batch, padded, row, stream
+
+#if defined(USE_ROCM)
+#define FT_DENSE_TILE_SWITCH()                                                \
+  do {                                                                        \
+    ggml_mul_mat_q8_0_q8_1_cuda<scalar_t, MMQ_X_Q8_0>(FT_DENSE_MMQ_ARGS);     \
+  } while (0)
+#else
+#define FT_DENSE_TILE_SWITCH()                                                \
+  do {                                                                        \
+    switch (ft_gguf_dense_mtile()) {                                          \
+      case 4:                                                                 \
+        ggml_mul_mat_q8_0_q8_1_cuda<scalar_t, 4>(FT_DENSE_MMQ_ARGS);          \
+        break;                                                                \
+      case 8:                                                                 \
+        ggml_mul_mat_q8_0_q8_1_cuda<scalar_t, 8>(FT_DENSE_MMQ_ARGS);          \
+        break;                                                                \
+      case 16:                                                                \
+        ggml_mul_mat_q8_0_q8_1_cuda<scalar_t, 16>(FT_DENSE_MMQ_ARGS);         \
+        break;                                                                \
+      case 32:                                                                \
+        ggml_mul_mat_q8_0_q8_1_cuda<scalar_t, 32>(FT_DENSE_MMQ_ARGS);         \
+        break;                                                                \
+      case 64:                                                                \
+        ggml_mul_mat_q8_0_q8_1_cuda<scalar_t, 64>(FT_DENSE_MMQ_ARGS);         \
+        break;                                                                \
+      default:                                                                \
+        TORCH_CHECK(false, "unsupported dense m-tile");                       \
+    }                                                                         \
+  } while (0)
+#endif
+
 torch::Tensor ggml_mul_mat_a8(
     torch::Tensor W,  // quant weight
     torch::Tensor X,  // input
@@ -260,16 +337,7 @@ torch::Tensor ggml_mul_mat_a8(
             stream);
         break;
       case 8:
-        ggml_mul_mat_q8_0_q8_1_cuda(
-            (void*)W.data_ptr(),
-            (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(),
-            col,
-            row,
-            batch,
-            padded,
-            row,
-            stream);
+        FT_DENSE_TILE_SWITCH();
         break;
       case 10:
         ggml_mul_mat_q2_K_q8_1_cuda(
@@ -893,6 +961,11 @@ torch::Tensor ggml_moe_a8_vec(
   return Y;
 }
 
+int64_t ggml_dense_get_mtile() {
+  // test probe: the same single source of truth the dense q8_0 dispatch reads
+  return ft_gguf_dense_mtile();
+}
+
 int64_t ggml_moe_get_block_size(int64_t type) {
   switch (type) {
     case 2:
@@ -932,4 +1005,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ggml_moe_a8", &ggml_moe_a8, "");
   m.def("ggml_moe_a8_vec", &ggml_moe_a8_vec, "");
   m.def("ggml_moe_get_block_size", &ggml_moe_get_block_size, "");
+  m.def("ggml_dense_get_mtile", &ggml_dense_get_mtile, "");
 }
