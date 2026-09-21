@@ -1,0 +1,16 @@
+{
+ "idx": 7,
+ "kind": "en",
+ "prompt": "Summarize how vaccines train the immune system, for a general reader.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "The user wants me to explain how vaccines train the immune system in a way that's accessible to a general reader. Let me break this down into clear, understandable concepts without getting too technical.",
+ "content": "# How Vaccines Train Your Immune System\n\nThink of your immune system as a security team that learns to recognize threats. Vaccines work by giving that team a \"wanted poster\" — a safe preview of a dangerous germ — so it can respond quickly if the real threat ever shows up.\n\n## The Basic Process\n\n1. **Introduction** — A vaccine delivers a harmless piece or weakened version of a pathogen (like a protein from a virus's surface, or an inactivated virus).\n\n2. **Recognition** — Immune cells encounter this material and identify it as foreign.\n\n3. **",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 27,
+  "completion_tokens": 159,
+  "total_tokens": 186
+ },
+ "wall_s": 15.15
+}

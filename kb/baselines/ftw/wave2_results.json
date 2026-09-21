@@ -1,0 +1,240 @@
+{
+ "cmd": "ft serve --model-path /media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-FTW (winner flags, port 18801)",
+ "boot": {
+  "ready": true,
+  "ready_s": 52.1,
+  "why": "ok"
+ },
+ "gpu_after_boot_mib": 28061,
+ "sanity": {
+  "Loading expert banks \\(FTW\\)": [
+   "Loading expert banks (FTW):  55%|█████▍    | 68.7G/125G [00:17<00:12, 4.72GB/s]",
+   "Loading expert banks (FTW):  56%|█████▋    | 70.4G/125G [00:17<00:10, 5.67GB/s]",
+   "Loading expert banks (FTW):  57%|█████▋    | 71.3G/125G [00:18<00:15, 3.73GB/s]",
+   "Loading expert banks (FTW):  58%|█████▊    | 72.2G/125G [00:18<00:19, 2.99GB/s]",
+   "Loading expert banks (FTW):  58%|█████▊    | 73.0G/125G [00:19<00:21, 2.57GB/s]",
+   "Loading expert banks (FTW):  59%|█████▉    | 74.2G/125G [00:19<00:20, 2.70GB/s]",
+   "Loading expert banks (FTW):  61%|██████    | 76.6G/125G [00:19<00:12, 4.10GB/s]",
+   "Loading expert banks (FTW):  62%|██████▏   | 77.8G/125G [00:20<00:12, 4.06GB/s]",
+   "Loading expert banks (FTW):  63%|██████▎   | 79.0G/125G [00:20<00:11, 4.28GB/s]",
+   "Loading expert banks (FTW):  64%|██████▍   | 80.2G/125G [00:20<00:10, 4.83GB/s]",
+   "Loading expert banks (FTW):  65%|██████▌   | 81.4G/125G [00:20<00:11, 4.10GB/s]",
+   "Loading expert banks (FTW):  66%|██████▌   | 82.6G/125G [00:21<00:10, 4.39GB/s]",
+   "Loading expert banks (FTW):  67%|██████▋   | 83.8G/125G [00:21<00:12, 3.67GB/s]",
+   "Loading expert banks (FTW):  68%|██████▊   | 85.0G/125G [00:21<00:10, 4.03GB/s]",
+   "Loading expert banks (FTW):  70%|██████▉   | 87.4G/125G [00:22<00:07, 5.71GB/s]",
+   "Loading expert banks (FTW):  72%|███████▏  | 89.8G/125G [00:22<00:05, 6.97GB/s]",
+   "Loading expert banks (FTW):  73%|███████▎  | 90.9G/125G [00:22<00:07, 4.79GB/s]",
+   "Loading expert banks (FTW):  75%|███████▌  | 94.0G/125G [00:23<00:07, 4.68GB/s]",
+   "Loading expert banks (FTW):  76%|███████▌  | 95.2G/125G [00:23<00:06, 5.27GB/s]",
+   "Loading expert banks (FTW):  77%|███████▋  | 96.4G/125G [00:24<00:05, 5.25GB/s]",
+   "Loading expert banks (FTW):  78%|███████▊  | 97.6G/125G [00:24<00:07, 3.79GB/s]",
+   "Loading expert banks (FTW):  79%|███████▉  | 98.8G/125G [00:24<00:07, 3.97GB/s]",
+   "Loading expert banks (FTW):  80%|███████▉  | 100G/125G [00:25<00:05, 4.59GB/s]",
+   "Loading expert banks (FTW):  82%|████████▏ | 102G/125G [00:25<00:04, 5.23GB/s]",
+   "Loading expert banks (FTW):  83%|████████▎ | 104G/125G [00:26<00:08, 2.65GB/s]",
+   "Loading expert banks (FTW):  86%|████████▌ | 107G/125G [00:26<00:04, 4.71GB/s]",
+   "Loading expert banks (FTW):  89%|████████▉ | 111G/125G [00:27<00:01, 8.86GB/s]",
+   "Loading expert banks (FTW):  89%|████████▉ | 111G/125G [00:27<00:01, 8.86GB/s]",
+   "Loading expert banks (FTW):  89%|████████▉ | 111G/125G [00:27<00:01, 8.86GB/s]",
+   "Loading expert banks (FTW):  90%|████████▉ | 113G/125G [00:27<00:01, 7.03GB/s]",
+   "Loading expert banks (FTW):  92%|█████████▏| 115G/125G [00:28<00:02, 5.47GB/s]",
+   "Loading expert banks (FTW):  93%|█████████▎| 116G/125G [00:28<00:02, 4.11GB/s]",
+   "Loading expert banks (FTW):  94%|█████████▍| 117G/125G [00:28<00:02, 4.04GB/s]",
+   "Loading expert banks (FTW):  94%|█████████▍| 117G/125G [00:28<00:02, 4.04GB/s]",
+   "Loading expert banks (FTW):  95%|█████████▍| 119G/125G [00:28<00:01, 3.82GB/s]",
+   "Loading expert banks (FTW):  97%|█████████▋| 121G/125G [00:29<00:00, 4.85GB/s]",
+   "Loading expert banks (FTW):  97%|█████████▋| 121G/125G [00:29<00:00, 4.85GB/s]",
+   "Loading expert banks (FTW):  98%|█████████▊| 122G/125G [00:29<00:00, 3.69GB/s]",
+   "Loading expert banks (FTW):  99%|█████████▊| 123G/125G [00:30<00:00, 3.24GB/s]",
+   "Loading expert banks (FTW): 100%|██████████| 125G/125G [00:30<00:00, 4.12GB/s]"
+  ],
+  "gguf expert bank ggml types": [],
+  "moe_cache_size=\\d+|num_pages=\\d+|Allocating .*tokens for KV": [
+   "ServerArgs(model_path='/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-FTW', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, attention_backend='auto', moe_strategy='hybrid', quant_backend=None, ple_backend='disk', expert_load='auto', moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=500000, moe_cache_policy='lru', moe_prefill_overlap=True, moe_prefill_hit_d2d=False, moe_collect_stats=False, moe_cpu_threads=16, moe_cpu_layers=None, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, kv_quant='fp8', memory_ratio=0.85, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=None, num_page_override=None, num_token_override=None, mm=MultimodalConfig(disabled_encoders=frozenset(), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8191, cache_type='radix', offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=503177', server_host='127.0.0.1', server_port=18801, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='GLM-5.3-Flash-UD-Q3_K_XL-FTW', tool_call_parser='glm47', reasoning_parser='glm', sampling_defaults='model', max_output_tokens=None, enable_cache_report=False, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', gpu=(), gpu_assigned=None)",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-cache-auto resolved moe_cache_size=1159 num_pages=7816 (prefill_overlap=True)",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Allocating 500224 tokens for KV cache, K + V = 2.97 GiB"
+  ],
+  "Free memory (before|after)": [
+   "\u001b[1m[2026-09-20|17:46:17|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Free memory before loading model: 29.45 GiB",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Free memory after initialization: 4.06 GiB"
+  ],
+  "fetching .*PCIe|fetch fraction": [
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-hybrid-max-fetch auto: fetching 30.7% of each decode step's expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-hybrid-max-fetch auto: fetching 30.7% of each decode step's expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-hybrid-max-fetch auto: fetching 30.7% of each decode step's expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU"
+  ],
+  "CPU MoE executor ready": [
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m CPU MoE executor ready [pool 1/3: gguf (18, 18, 23) x39 layers]: threads=15 (pinned to cores 0..22) isa=avx2+gguf(iq/qk)+avx2-w4a8k fmt=iq3_xxs (up=iq3_xxs, down=iq4_xs) H=4096 I=2048 experts=288 layers=39 top_k=8 act=swiglu_clamp max_tokens=1",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m CPU MoE executor ready [pool 2/3: gguf (23, 23, 14) x1 layers]: threads=1 (pinned to cores 23..23) isa=avx2+gguf(iq/qk)+avx2-w4a8k fmt=iq4_xs (up=iq4_xs, down=q6_k) H=4096 I=2048 experts=288 layers=1 top_k=8 act=swiglu_clamp max_tokens=1",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m CPU MoE executor ready [pool 3/3: gguf (18, 18, 14) x2 layers]: threads=1 (pinned to cores 24..24) isa=avx2+gguf(iq/qk)+avx2-w4a8k fmt=iq3_xxs (up=iq3_xxs, down=q6_k) H=4096 I=2048 experts=288 layers=2 top_k=8 act=swiglu_clamp max_tokens=1"
+  ],
+  "MoE signature group": [
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m MoE signature group (layers [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]) got 388 slots < 2*288: prefill overlap disabled for this partition (synchronous materialized prefill instead)",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m MoE signature group (layers [8]) got 288 slots < 2*288: prefill overlap disabled for this partition (synchronous materialized prefill instead)",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m MoE signature group (layers [9, 41]) got 288 slots < 2*288: prefill overlap disabled for this partition (synchronous materialized prefill instead)"
+  ],
+  "torch intra-op threads": [
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m torch intra-op threads: 20 -> 4 (cores reserved for the pinned CPU MoE pool)"
+  ],
+  "Resolved config|Auto-selected attention": [
+   "\u001b[1m[2026-09-20|17:46:17|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Auto-selected attention backend: dsa",
+   "\u001b[1m[2026-09-20|17:46:17|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Resolved config: moe_strategy='hybrid', attention_backend='dsa', cache_type='hybrid_radix', page_size=64"
+  ],
+  "floor|fail-fast|cannot fund": [],
+  "Started server process|Uvicorn running": [
+   "INFO:     Started server process [503177]",
+   "INFO:     Uvicorn running on http://127.0.0.1:18801 (Press CTRL+C to quit)"
+  ],
+  "expert banks: slow path|expert banks": [
+   "Loading expert banks (FTW):  56%|█████▋    | 70.4G/125G [00:17<00:10, 5.67GB/s]",
+   "Loading expert banks (FTW):  57%|█████▋    | 71.3G/125G [00:18<00:15, 3.73GB/s]",
+   "Loading expert banks (FTW):  58%|█████▊    | 72.2G/125G [00:18<00:19, 2.99GB/s]",
+   "Loading expert banks (FTW):  58%|█████▊    | 73.0G/125G [00:19<00:21, 2.57GB/s]",
+   "Loading expert banks (FTW):  59%|█████▉    | 74.2G/125G [00:19<00:20, 2.70GB/s]",
+   "Loading expert banks (FTW):  61%|██████    | 76.6G/125G [00:19<00:12, 4.10GB/s]",
+   "Loading expert banks (FTW):  62%|██████▏   | 77.8G/125G [00:20<00:12, 4.06GB/s]",
+   "Loading expert banks (FTW):  63%|██████▎   | 79.0G/125G [00:20<00:11, 4.28GB/s]",
+   "Loading expert banks (FTW):  64%|██████▍   | 80.2G/125G [00:20<00:10, 4.83GB/s]",
+   "Loading expert banks (FTW):  65%|██████▌   | 81.4G/125G [00:20<00:11, 4.10GB/s]",
+   "Loading expert banks (FTW):  66%|██████▌   | 82.6G/125G [00:21<00:10, 4.39GB/s]",
+   "Loading expert banks (FTW):  67%|██████▋   | 83.8G/125G [00:21<00:12, 3.67GB/s]",
+   "Loading expert banks (FTW):  68%|██████▊   | 85.0G/125G [00:21<00:10, 4.03GB/s]",
+   "Loading expert banks (FTW):  70%|██████▉   | 87.4G/125G [00:22<00:07, 5.71GB/s]",
+   "Loading expert banks (FTW):  72%|███████▏  | 89.8G/125G [00:22<00:05, 6.97GB/s]",
+   "Loading expert banks (FTW):  73%|███████▎  | 90.9G/125G [00:22<00:07, 4.79GB/s]",
+   "Loading expert banks (FTW):  75%|███████▌  | 94.0G/125G [00:23<00:07, 4.68GB/s]",
+   "Loading expert banks (FTW):  76%|███████▌  | 95.2G/125G [00:23<00:06, 5.27GB/s]",
+   "Loading expert banks (FTW):  77%|███████▋  | 96.4G/125G [00:24<00:05, 5.25GB/s]",
+   "Loading expert banks (FTW):  78%|███████▊  | 97.6G/125G [00:24<00:07, 3.79GB/s]",
+   "Loading expert banks (FTW):  79%|███████▉  | 98.8G/125G [00:24<00:07, 3.97GB/s]",
+   "Loading expert banks (FTW):  80%|███████▉  | 100G/125G [00:25<00:05, 4.59GB/s]",
+   "Loading expert banks (FTW):  82%|████████▏ | 102G/125G [00:25<00:04, 5.23GB/s]",
+   "Loading expert banks (FTW):  83%|████████▎ | 104G/125G [00:26<00:08, 2.65GB/s]",
+   "Loading expert banks (FTW):  86%|████████▌ | 107G/125G [00:26<00:04, 4.71GB/s]",
+   "Loading expert banks (FTW):  89%|████████▉ | 111G/125G [00:27<00:01, 8.86GB/s]",
+   "Loading expert banks (FTW):  89%|████████▉ | 111G/125G [00:27<00:01, 8.86GB/s]",
+   "Loading expert banks (FTW):  89%|████████▉ | 111G/125G [00:27<00:01, 8.86GB/s]",
+   "Loading expert banks (FTW):  90%|████████▉ | 113G/125G [00:27<00:01, 7.03GB/s]",
+   "Loading expert banks (FTW):  92%|█████████▏| 115G/125G [00:28<00:02, 5.47GB/s]",
+   "Loading expert banks (FTW):  93%|█████████▎| 116G/125G [00:28<00:02, 4.11GB/s]",
+   "Loading expert banks (FTW):  94%|█████████▍| 117G/125G [00:28<00:02, 4.04GB/s]",
+   "Loading expert banks (FTW):  94%|█████████▍| 117G/125G [00:28<00:02, 4.04GB/s]",
+   "Loading expert banks (FTW):  95%|█████████▍| 119G/125G [00:28<00:01, 3.82GB/s]",
+   "Loading expert banks (FTW):  97%|█████████▋| 121G/125G [00:29<00:00, 4.85GB/s]",
+   "Loading expert banks (FTW):  97%|█████████▋| 121G/125G [00:29<00:00, 4.85GB/s]",
+   "Loading expert banks (FTW):  98%|█████████▊| 122G/125G [00:29<00:00, 3.69GB/s]",
+   "Loading expert banks (FTW):  99%|█████████▊| 123G/125G [00:30<00:00, 3.24GB/s]",
+   "Loading expert banks (FTW): 100%|██████████| 125G/125G [00:30<00:00, 4.12GB/s]",
+   "\u001b[1m[2026-09-20|17:46:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m expert banks: FTW fast path (FTW checkpoint /media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-FTW)"
+  ]
+ },
+ "served_model": "GLM-5.3-Flash-UD-Q3_K_XL-FTW",
+ "prefill": {
+  "wall_s": 99.35,
+  "error": null,
+  "usage": {
+   "prompt_tokens": 65585,
+   "completion_tokens": 3,
+   "total_tokens": 65588
+  },
+  "chunks": [
+   {
+    "new_token": 8128,
+    "tok_s": 221.06
+   },
+   {
+    "new_token": 8128,
+    "tok_s": 795.41
+   },
+   {
+    "new_token": 8128,
+    "tok_s": 791.43
+   },
+   {
+    "new_token": 8128,
+    "tok_s": 789.94
+   },
+   {
+    "new_token": 8128,
+    "tok_s": 791.61
+   },
+   {
+    "new_token": 8128,
+    "tok_s": 789.16
+   },
+   {
+    "new_token": 8128,
+    "tok_s": 785.83
+   },
+   {
+    "new_token": 8128,
+    "tok_s": 2323.06
+   },
+   {
+    "new_token": 561,
+    "tok_s": 663.05
+   }
+  ],
+  "median_full_excl_last": 790.7,
+  "new_token": 561,
+  "cached_token": 0,
+  "watch_in_req": false
+ },
+ "decode": [
+  {
+   "wall_s": 7.68,
+   "error": null,
+   "completion_tokens": 63,
+   "steady_tok_s": 14.78,
+   "p50_tok_s": 14.84,
+   "min_inst_tok_s": 10.95,
+   "new_token": 49,
+   "cached_token": 65536,
+   "watch_in_req": false
+  },
+  {
+   "wall_s": 7.49,
+   "error": null,
+   "completion_tokens": 63,
+   "steady_tok_s": 15.52,
+   "p50_tok_s": 15.41,
+   "min_inst_tok_s": 12.86,
+   "new_token": 49,
+   "cached_token": 65536,
+   "watch_in_req": false
+  },
+  {
+   "wall_s": 7.62,
+   "error": null,
+   "completion_tokens": 63,
+   "steady_tok_s": 15.02,
+   "p50_tok_s": 15.13,
+   "min_inst_tok_s": 10.46,
+   "new_token": 49,
+   "cached_token": 65536,
+   "watch_in_req": false
+  }
+ ],
+ "battery": {
+  "ok": 24,
+  "failed": 0,
+  "aborted_at": null,
+  "wall_s": 310.0,
+  "model": "GLM-5.3-Flash-UD-Q3_K_XL-FTW"
+ },
+ "teardown": {
+  "grace_expired": false,
+  "rc": 143,
+  "leftovers": [],
+  "gpu_mib": 1420
+ },
+ "post_census": {
+  "ts": "2026-09-20T14:54:23Z",
+  "tag": "postflight",
+  "procs": [],
+  "gpu_vram": "1420 MiB, 30730 MiB",
+  "gpu_compute_apps": "784032, hoptodesk, 302 MiB\n832729, /app/bin/hoptodesk, 126 MiB",
+  "sem_mp": "18"
+ }
+}

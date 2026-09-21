@@ -1,0 +1,18 @@
+{
+ "idx": 19,
+ "kind": "code",
+ "prompt": "Write a Python class Stack with push, pop and peek, with type hints and a short docstring.",
+ "max_tokens": 192,
+ "greedy_mode": "temp0_topk1",
+ "wall_s": 16.58,
+ "error": null,
+ "reasoning": "The user wants a Python Stack class with:\n1. push, pop, and peek methods\n2. Type hints\n3. A short docstring\n\nLet me write a clean, well-typed Stack class. I should consider:\n- Using generics (TypeVar) so the stack can hold any type, or I could just make it generic with `Generic[T]`\n- Type hints on all methods\n- A short docstring for the class and possibly for methods\n- Handling edge cases: pop/peek on empty stack should raise an error (IndexError is conventional)\n\nLet me write it:\n\n```python\nfrom typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Stack(Generic[T]):\n    \"\"\"A simple LIFO (last-in, first-out) stack.\"\"\"\n\n    def __init__(self) -> None:\n        self._items: list[T] = []\n\n    def push(self, item: T) -> None",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 33,
+  "completion_tokens": 191,
+  "total_tokens": 224
+ },
+ "sha256": "f7fbbcd9d03c6282d007832efe95c8900004710126c6236e386087a19fe13d0c"
+}

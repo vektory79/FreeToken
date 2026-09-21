@@ -1,0 +1,36 @@
+   795	    explicit llama_model_base(const llama_model_params & params);
+   796	    virtual ~llama_model_base() = default;
+   797	
+   798	    ggml_tensor * create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
+   799	
+   800	    // convenience overload of create_tensor that doesn't require llama_model_loader
+   801	    ggml_tensor * create_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
+   802	
+   803	    // helper: try merged gate_up_exps first, fall back to separate gate and up
+   804	    void create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_,
+   805	                int64_t n_ff_, int64_t n_expert_, int flags);
+   806	
+   807	    // helper: try to load merged qkv first, fall back to separate q, k, v
+   808	    void create_tensor_qkv(llama_layer & layer, int bid,
+   809	                int64_t n_embd_, int64_t n_embd_q_, int64_t n_embd_k_, int64_t n_embd_v_,
+   810	                int flags);
+   811	
+   812	    void load_stats  (llama_model_loader & ml) override;
+   813	    void load_hparams(llama_model_loader & ml) override;
+   814	    void load_vocab  (llama_model_loader & ml) override;
+   815	    bool load_tensors(llama_model_loader & ml) override;
+   816	
+   817	    // model must define these
+   818	    void load_arch_hparams(llama_model_loader & ml) override = 0;
+   819	    void load_arch_tensors(llama_model_loader & ml) override = 0;
+   820	    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override = 0;
+   821	};
+   822	
+   823	const char * llm_type_name(llm_type type);
+   824	
+   825	// convenience macro for loading local variables for load_tensors() in llama_model_base
+   826	// note: cast to int64_t since we will use these for the tensor dimensions
+   827	#define LLAMA_LOAD_LOCALS \
+   828	    const int     n_layer        = hparams.n_layer();        GGML_UNUSED(n_layer); \
+   829	    const int     n_layer_all    = hparams.n_layer_all;      GGML_UNUSED(n_layer_all); \
+   830	    const int     n_layer_nextn  = hparams.n_layer_nextn;    GGML_UNUSED(n_layer_nextn); \

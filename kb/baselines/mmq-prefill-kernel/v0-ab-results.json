@@ -1,0 +1,90 @@
+{
+  "date": "2026-09-17",
+  "branch": "vektory79",
+  "head": "1a444e4e59afe8fb898d18a0a4f14a41e4fee9f8",
+  "gpu": "RTX 5090 (single, same-session A/B)",
+  "config": "winner flags: --moe-cache-auto --kv-reserve-tokens 500000 --kv-cache-dtype fp8 --memory-ratio 0.85 --max-prefill-length 8191 --moe-strategy hybrid --moe-cpu-threads 16 --max-running-requests 1 (port 18801)",
+  "harness": ".tasks/ft-gguf-serve-tuning/measure.py mode=full, prompt 65585 tok = 8x8128 + 561, decode 63 tok @ cached prefix",
+  "prefill_metric": "median of 6 full 8128-token chunks, excluding chunk 1 (triton warmup) and the last full chunk (tail-report artifact ~1568-1598 tok/s)",
+  "before": {
+    "source": "HEAD 1a444e4 (v0 diff pathspec-stashed)",
+    "boot_ready_s": 146.6,
+    "jit": "recompiled (HEAD-hash cache miss, 2 clang++ lines)",
+    "prefill_throughput_lines_in_order": [108.20, 289.64, 290.29, 289.70, 288.44, 289.45, 288.94, 1585.78, 534.13, 10.57],
+    "prefill_steady_full_chunks": [289.64, 290.29, 289.70, 288.44, 289.45, 288.94],
+    "prefill_median_tok_s": 289.54,
+    "decode_steady_tok_s": 14.92,
+    "decode_p50_tok_s": 15.23,
+    "decode_wall_s": 8.69,
+    "decode_radix": {"new_token": 49, "cached_token": 65536},
+    "free_after_init_gib": 4.07,
+    "peak_vram_mib": 32078,
+    "liveness_marker_in_boot_log": false,
+    "teardown_leftover": []
+  },
+  "after": {
+    "source": "v0 diff restored (git stash pop, clean; pytest sanity 29 passed)",
+    "boot_ready_s": 124.3,
+    "jit": "cache hit (built by the sanity pytest run)",
+    "prefill_throughput_lines_in_order": [110.87, 292.22, 292.29, 291.44, 291.08, 290.77, 290.70, 1568.70, 600.68],
+    "prefill_steady_full_chunks": [292.22, 292.29, 291.44, 291.08, 290.77, 290.70],
+    "prefill_median_tok_s": 291.26,
+    "decode_steady_tok_s": 15.23,
+    "decode_p50_tok_s": 15.32,
+    "decode_wall_s": 8.53,
+    "decode_radix": {"new_token": 49, "cached_token": 65536},
+    "free_after_init_gib": 4.07,
+    "peak_vram_mib": 32078,
+    "liveness_marker_in_boot_log": false,
+    "teardown_leftover": []
+  },
+  "liveness": {
+    "protocol_result": "marker ABSENT in both A/B boot logs",
+    "instrument_verdict": "defective: layers/moe.py:29 bare stdlib logger has no handler (freetoken init_logger never wires it; root unconfigured) so logging.lastResort drops the INFO record - the line can never appear in a boot log",
+    "probe": {
+      "method": "extra boot, same winner flags, PYTHONPATH=probe_sitecustomize (logging.basicConfig root handler, harness-side only), 4371-token prefill",
+      "marker_found": true,
+      "marker_line": "INFO:freetoken.layers.moe:gguf moe prefill: expert-sorted pair order active",
+      "boot_ready_s": 122.3,
+      "conclusion": "sorted prefill path IS ACTIVE at runtime"
+    }
+  },
+  "deltas": {
+    "prefill_median_pct": 0.6,
+    "decode_steady_pct": 2.1,
+    "boot_ready_s_delta": -22.3,
+    "boot_delta_cause": "JIT cache state (BEFORE recompiled), not code",
+    "verdict": "prefill NO GAIN (+0.6% within ~3% run variance); decode unchanged (noise, sort is prefill-only)"
+  },
+  "campaign_reference": {
+    "source": ".tasks/ft-gguf-serve-tuning/logs/win_p_8191_r085.log (same median method)",
+    "prefill_median_tok_s": 292.3,
+    "decode_steady_tok_s": 13.58,
+    "boot_ready_s": 99.1,
+    "note": "this-session prefill within ~1% of campaign; this-session decode ~+10% (daytime-variance class, shared by both stages)"
+  },
+  "quality_battery": "SKIPPED - no reusable 24-prompt parity tooling exists in .tasks/ft-gguf-serve-tuning (grep over py/md/json: no matches); not fabricated",
+  "hygiene": {
+    "preflight_census": "no ft serve, 1430 MiB GPU, 6 sem.mp- semaphores, llama-swap inactive",
+    "watchdog": "AssertionError|OutOfMemoryError|Backend worker is gone (+CUDA error|Traceback) - never fired",
+    "serialization": "serial runs, reaped, timeout 1800/900, SIGTERM->SIGKILL escalation in harness",
+    "final_census": "no ft serve, 1430 MiB, 6 semaphores - clean",
+    "working_tree_end_state": "only the 6 v0 files modified; no stash; nothing committed"
+  },
+  "deviations": [
+    "quality battery skipped (no tooling)",
+    "boot-log liveness unpassable by design; recovered via PYTHONPATH probe (third boot, excluded from stats)",
+    "BEFORE boot JIT recompile inflates its boot time",
+    "memory-ratio 0.90 fallback not needed (0.85 passed the floor gate both stages)"
+  ],
+  "artifacts": [
+    ".tasks/mmq-prefill-kernel/v0-ab.md",
+    ".tasks/mmq-prefill-kernel/v0ab_stage.sh",
+    ".tasks/mmq-prefill-kernel/v0ab_analyze.py",
+    ".tasks/mmq-prefill-kernel/v0ab_probe.py",
+    ".tasks/mmq-prefill-kernel/probe_sitecustomize/sitecustomize.py",
+    ".tasks/ft-gguf-serve-tuning/logs/ab_v0_before",
+    ".tasks/ft-gguf-serve-tuning/logs/ab_v0_after",
+    ".tasks/ft-gguf-serve-tuning/logs/ab_v0_probe"
+  ]
+}

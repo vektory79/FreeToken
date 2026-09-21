@@ -1,0 +1,16 @@
+{
+ "reasoning": "The user is asking a simple arithmetic question: 2+2.\n\nThis is a basic math question. The answer is 4.\n\nThis is a very simple question that deserves a simple, direct answer. No need for lengthy explanations, headers, bullet points, or anything elaborate. Just answer the question directly.\n\nFormat: Should be very short - just the answer, possibly with a tiny bit of context if helpful, but honestly just \"4\" or \"2+2 = 4\" is perfect here.",
+ "content": "2 + 2 = **4**",
+ "finish_reason": "stop",
+ "usage": {
+  "prompt_tokens": 19,
+  "completion_tokens": 112,
+  "total_tokens": 131
+ },
+ "wall_s": 11.11,
+ "idx": "plus2",
+ "kind": "digit-battery",
+ "prompt": "What is 2+2?",
+ "max_tokens": 128,
+ "greedy_mode": "temp0_topk1"
+}

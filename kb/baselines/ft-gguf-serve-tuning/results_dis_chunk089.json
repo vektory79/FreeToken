@@ -1,0 +1,12 @@
+{
+ "name": "dis_chunk089",
+ "config": "mr1 + max-prefill-length 8191 + memory-ratio 0.89 (fp8, 500k, hybrid)",
+ "date": "2026-09-17",
+ "ready": false,
+ "outcome": "CUDA OOM during first prefill (triton do_bench 256 MiB vs 220.5 MiB free); backend worker died",
+ "free_before_load_gib": 29.38,
+ "free_after_init_gib": 2.88,
+ "evidence": "logs/dis_chunk089.log: torch.OutOfMemoryError line 132; FrontendAPI 'Backend worker is gone' 11:36:59",
+ "decode": null,
+ "note": "measure.py was SIGTERMed after backend death (it hung in urlopen); no JSON printed - record reconstructed from server log. Consistent with campaign p_8191 (same OOM at 0.89)."
+}

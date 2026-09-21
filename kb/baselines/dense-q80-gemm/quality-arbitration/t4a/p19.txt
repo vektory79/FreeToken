@@ -1,0 +1,26 @@
+### reasoning
+The user wants a Python Stack class with:
+1. push, pop, and peek methods
+2. Type hints
+3. A short docstring
+
+Let me write a clean, well-typed Stack class. I should consider:
+- Using generics (TypeVar or Generic) so the stack can hold any type — this is a nice touch for type hints
+- push: add item to top
+- pop: remove and return top item (should raise an error if empty — IndexError is conventional)
+- peek: return top item without removing (also raise if empty)
+- Type hints: `list[T]` for internal storage (Python 3.9+ style) or `List[T]` for older versions
+- Docstring: short class docstring, maybe brief method docstrings too
+
+Let me write it:
+
+```python
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+
+class Stack(Generic[T]):
+
+### content
+

@@ -1,0 +1,16 @@
+{
+ "idx": 14,
+ "kind": "ru",
+ "prompt": "Опиши, как готовят борщ, по шагам, но художественно.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "```python\n# -*- coding: utf-8 -*-\n\"\"\"\nThis script demonstrates how to use the `pydantic` library to define a data model\nfor a user, including validation, serialization, and JSON schema generation.\n\"\"\"\n\nfrom pydantic import BaseModel, EmailStr, Field, ValidationError\nfrom typing import Optional, List\nfrom datetime import datetime\n\n\n# --- 1. Define the Data Model ---\n\nclass User(BaseModel):\n    \"\"\"\n    A Pydantic model representing a user with validation rules.\n    \"\"\"\n    id: int\n    name: str = Field(..., min_length=1, max_length=50, description=\"User's full name\")\n    email: EmailStr\n    age: int = Field(..., ge=0, le=120, description",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 31,
+  "completion_tokens": 159,
+  "total_tokens": 190
+ },
+ "wall_s": 15.05
+}

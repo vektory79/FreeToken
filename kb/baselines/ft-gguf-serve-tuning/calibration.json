@@ -1,0 +1,22 @@
+{
+ "A_chars": 6108,
+ "B_chars": 50427,
+ "align": {
+  "A": {
+   "try1_prompt": 1134,
+   "try1_err": null,
+   "try2_prompt": 1152,
+   "final_prompt_tokens": 1152,
+   "aligned": true
+  },
+  "B": {
+   "try1_prompt": 9622,
+   "try1_err": null,
+   "try2_prompt": 9664,
+   "final_prompt_tokens": 9664,
+   "aligned": true
+  },
+  "A_chars": 6108,
+  "B_chars": 50427
+ }
+}

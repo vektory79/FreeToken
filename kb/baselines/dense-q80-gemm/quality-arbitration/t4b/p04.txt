@@ -1,0 +1,10 @@
+### reasoning
+The user wants a paragraph about the history of the printing press and its impact. This is a straightforward educational/informational request. Let me think about what I know about the printing press.
+
+Key facts about the printing press:
+- Johannes Gutenberg is credited with inventing the movable-type printing press in Europe around 1440-1450 in Mainz, Germany
+- His masterpiece was the Gutenberg Bible (also called the 42-line Bible), completed around 1455
+- Important note: movable type actually existed earlier in China (Bi Sheng, ~1040s CE, ceramic movable type) and Korea (metal movable type, Jikji printed ~1377), but Gutenberg's innovation was the combination of movable metal type, oil-based ink, and the screw press adapted from wine
+
+### content
+

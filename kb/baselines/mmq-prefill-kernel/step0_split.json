@@ -1,0 +1,44 @@
+{
+ "report": "/media/ai/src/FreeToken/.tasks/mmq-prefill-kernel/report1.nsys-rep",
+ "window_s": 113.89,
+ "chunks_eq": 3.958,
+ "T_full_chunks_s": [
+  76.93,
+  28.73,
+  28.72,
+  28.77,
+  28.9,
+  28.8,
+  28.87,
+  5.23
+ ],
+ "T_steady_median_s": 28.773,
+ "T_steady_min": 5.234,
+ "T_steady_max": 28.901,
+ "gemm_total_s": 71.75,
+ "gemm_moe_launches": 501,
+ "launches_per_chunk": 126.6,
+ "gemm_per_chunk_s": 18.127,
+ "copies_h2d_total_s": 0.0,
+ "copies_per_chunk_s": 0.0,
+ "all_kernel_per_chunk_s": 28.757,
+ "other_kernel_per_chunk_s": 10.63,
+ "gpu_idle_per_chunk_s": 0.015,
+ "rest_per_chunk_s": 10.646,
+ "pct": {
+  "gemm": 63.0,
+  "copies": 0.0,
+  "rest": 37.0
+ },
+ "tok_s_now": 282.5,
+ "bw_eff_GB_s": 1638.0,
+ "implied_v0": {
+  "chunk_s": 19.71,
+  "tok_s": 412.4
+ },
+ "implied_v2": {
+  "gemm_s": 0.08,
+  "chunk_s": 10.73,
+  "tok_s": 757.8
+ }
+}

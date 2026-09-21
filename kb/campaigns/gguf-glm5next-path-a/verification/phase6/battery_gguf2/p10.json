@@ -1,0 +1,16 @@
+{
+ "idx": 10,
+ "kind": "ru",
+ "prompt": "Опиши зимнее утро в деревне с помощью ярких сенсорных деталей.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "```json\n{\n  \"run_type\": \"agent\",\n  \"api_key\": \"YOUR_API_KEY\",\n  \"model\": \"gpt-4o\",\n  \"instructions\": \"You are a helpful assistant.\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Get the current weather in a given location\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"location\": {\n              \"type\": \"string\",\n              \"description\": \"The city and state, e.g. San Francisco, CA\"\n            }\n          },\n          \"required\": [\"location\"]\n        }\n      }\n    }\n  ]\n}\n```\n\nWait, I need",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 32,
+  "completion_tokens": 159,
+  "total_tokens": 191
+ },
+ "wall_s": 15.31
+}

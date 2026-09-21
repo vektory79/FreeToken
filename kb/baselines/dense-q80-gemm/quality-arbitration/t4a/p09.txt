@@ -1,0 +1,17 @@
+### reasoning
+The user is asking me to explain to a 10-year-old child why it rains. The request is in Russian, so I should respond in Russian.
+
+Let me think about how to explain rain to a 10-year-old:
+
+1. A 10-year-old can understand fairly complex concepts but needs them explained simply, with analogies to everyday life
+2. I should use simple language, maybe some fun comparisons
+3. The explanation should cover: evaporation, condensation, cloud formation, precipitation
+
+Key concepts to explain:
+- The sun heats water in oceans, rivers, lakes
+- Water evaporates (turns into invisible vapor) - like when a kettle boils or puddles dry up
+- The vapor rises up because warm air rises
+- Higher up it's colder,
+
+### content
+

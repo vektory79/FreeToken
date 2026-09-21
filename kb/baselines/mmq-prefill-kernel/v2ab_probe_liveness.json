@@ -1,0 +1,36 @@
+{
+ "report": "report3.nsys-rep (capture-from-launch, --cuda-graph-trace=node)",
+ "prefill_phase_span_s": [
+  3.01,
+  219.167
+ ],
+ "grouped_kernel_names": [
+  "moe_iq3_xxs",
+  "moe_iq4_xs",
+  "moe_q6_K"
+ ],
+ "prefill_grouped_count": 1134,
+ "prefill_grouped_expected_42layers_x3proj_x9chunks": 1134,
+ "prefill_moe_align_count": 378,
+ "prefill_align_expected_42layers_x9chunks": 378,
+ "moe_vec_instances_inside_prefill_span": 0,
+ "eager_decode_step_burst_after_last_chunk": {
+  "count": 378,
+  "window_s": [
+   219.169,
+   219.475
+  ],
+  "max_duration_ms": 0.037,
+  "note": "the prefill request itself sampled 3 tokens: 3 x 42 layers x 3 proj = 378 one-token GEMV moe_vec_q calls (max 0.037 ms) - NOT prefill MoE work"
+ },
+ "decode_request_moe_vec_count": 7938,
+ "decode_request_expected_42layers_x63steps_x3proj": 7938,
+ "decode_request_grouped_49tok_prefill_count": 126,
+ "decode_request_moe_align_count": 42,
+ "marker_line": "INFO:freetoken.layers.moe:gguf moe grouped mmq prefill active (FREETOKEN_GGUF_GROUPED_PREFILL)",
+ "liveness": {
+  "grouped_active_in_prefill_chunks": true,
+  "moe_vec_absent_from_prefill_chunks": true,
+  "moe_vec_present_in_decode_steps": true
+ }
+}

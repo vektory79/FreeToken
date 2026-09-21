@@ -1,0 +1,18 @@
+{
+ "idx": 22,
+ "kind": "reason",
+ "prompt": "I have 3 apples and buy 2 bags with 4 apples each, then give away 5. How many are left? Explain briefly.",
+ "max_tokens": 128,
+ "greedy_mode": "temp0_topk1",
+ "wall_s": 9.57,
+ "error": null,
+ "reasoning": "Simple arithmetic problem. 3 apples + 2 bags × 4 apples = 3 + 8 = 11 apples. Then give away 5: 11 − 5 = 6 apples left.",
+ "content": "**6 apples.**\n\n- Start: 3 apples\n- Buy 2 bags × 4 apples = 8 apples → 3 + 8 = 11\n- Give away 5 → 11 − 5 = **6**",
+ "finish_reason": "stop",
+ "usage": {
+  "prompt_tokens": 42,
+  "completion_tokens": 95,
+  "total_tokens": 137
+ },
+ "sha256": "be397dc3c98618d90a538cb13aac69dea58cf3e5954428135f0b6765efad4a06"
+}

@@ -1,0 +1,32 @@
+{
+  "tag": "gguf-postfix",
+  "note": "perf-client JSON had a key collision (prompt_tokens/prompt_chars of the 4k phase overwrote the 64k values). 64k values recovered from the server log (13x4096 + 3955 = 57203, all chunks #cached-token: 0) and cross-checked against client_wall_tok_s and the decode-cached #cached-token: 57152 line.",
+  "served_model": "GLM-5.3-Flash-UD-Q3_K_XL.gguf",
+  "started": "15:36:17",
+  "prefill64k_start_wallclock": "15:36:17",
+  "long_prefill_total_s": 217.55,
+  "long_prefill_prompt_tokens_from_server_log": 57203,
+  "long_prefill_prompt_chars": 297388,
+  "client_wall_tok_s": 262.9,
+  "decode_cached_start_wallclock": "15:39:55",
+  "decode_cached_256": {
+    "ttft_s": 4.397,
+    "total_s": 22.85,
+    "gen_chunks": 255,
+    "decode_tok_s": 13.82,
+    "reasoning_head": "The user has pasted a very long message that repeats the same sentence many times: \"The scheduler splits long prompts in"
+  },
+  "prefill4k_start_wallclock": "15:40:18",
+  "prefill4k_total_s": 14.32,
+  "prefill4k_prompt_tokens": 3544,
+  "prefill4k_prompt_chars": 17013,
+  "prefill4k_client_tok_s": 247.5,
+  "decode_fresh_start_wallclock": "15:40:32",
+  "decode_fresh_256": {
+    "ttft_s": 3.251,
+    "total_s": 20.61,
+    "gen_chunks": 255,
+    "decode_tok_s": 14.69,
+    "reasoning_head": "The user wants a descriptive piece about the sound of a distant train passing through a frozen valley at midnight, heard"
+  }
+}

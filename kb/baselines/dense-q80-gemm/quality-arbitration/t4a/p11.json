@@ -1,0 +1,18 @@
+{
+ "idx": 11,
+ "kind": "ru",
+ "prompt": "Расскажи, как устроен компас, и почему стрелка показывает на север.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "wall_s": 13.31,
+ "error": null,
+ "reasoning": "The user is asking in Russian about how a compass works and why the needle points north. This is a science education question. Let me think about what I know about compasses and Earth's magnetism.\n\nThe question: \"Расскажи, как устроен компас, и почему стрелка показывает на север.\" (Tell me how a compass is constructed and why the needle points north.)\n\nI should respond in Russian since the question is in Russian.\n\nLet me think about the content:\n\n**How a compass is constructed:**\n1. The main element is a magnetized needle (стрелка) — usually a thin magnetized steel needle\n2. The needle is mounted on a pivot (острие/игла) with minimal friction so it can rotate freely\n3. The",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 31,
+  "completion_tokens": 159,
+  "total_tokens": 190
+ },
+ "sha256": "88790284aae4d50dd3db93c8e7fc0a114636624f10615a6e19992799535b0e28"
+}

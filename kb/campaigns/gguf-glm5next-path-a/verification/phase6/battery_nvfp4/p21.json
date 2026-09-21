@@ -1,0 +1,16 @@
+{
+ "idx": 21,
+ "kind": "reason",
+ "prompt": "If today is Wednesday, what day of the week will it be in 100 days? Explain briefly.",
+ "max_tokens": 128,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "Today is Wednesday. I need to find what day it will be in 100 days.\n\n100 mod 7 = 100 - 98 = 2 (since 7 × 14 = 98)\n\nSo 100 days from Wednesday is 2 days later: Thursday (1 day), Friday (2 days).\n\nAnswer: Friday.",
+ "content": "**Friday.**\n\nSince a week has 7 days, only the remainder matters when dividing 100 by 7:\n\n- 100 ÷ 7 = 14 weeks with a remainder of **2**\n\nSo 100 days is exactly 14 weeks plus 2 extra days. Two",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 33,
+  "completion_tokens": 127,
+  "total_tokens": 160
+ },
+ "wall_s": 13.04
+}

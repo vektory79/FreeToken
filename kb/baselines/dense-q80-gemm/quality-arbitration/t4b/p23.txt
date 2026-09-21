@@ -1,0 +1,14 @@
+### reasoning
+The user asks which is larger: 2^10 or 10^3, with a short justification.
+
+2^10 = 1024
+10^3 = 1000
+
+So 2^10 = 1024 > 1000 = 10^3.
+
+Short justification: compute both directly. 2^10 = 2·2·2·2·2·2·2·2·2·2 = 1024. 10^3 = 1000. Since 1024 > 1000, 2^10 is larger.
+
+Alternatively, a slicker justification:
+
+### content
+

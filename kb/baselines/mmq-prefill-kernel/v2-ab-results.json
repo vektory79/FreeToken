@@ -1,0 +1,468 @@
+{
+ "note": "see v2ab_probe.json / v2-ab.md for liveness",
+ "stages": {
+  "before": {
+   "4096": {
+    "stage": "before_4096",
+    "ready": true,
+    "ready_s": 120.3,
+    "boot_env": {},
+    "gpu_after_boot_mib": 28074,
+    "peak_vram_mib": 30108,
+    "prefill_error": null,
+    "prompt_tokens": 65585,
+    "thr_vals_all": [
+     84.84,
+     263.14,
+     262.91,
+     252.81,
+     264.2,
+     264.67,
+     264.35,
+     264.5,
+     264.35,
+     264.18,
+     262.5,
+     263.72,
+     263.92,
+     263.29,
+     263.48,
+     881.59,
+     60.01
+    ],
+    "full_chunks": [
+     84.84,
+     263.14,
+     262.91,
+     252.81,
+     264.2,
+     264.67,
+     264.35,
+     264.5,
+     264.35,
+     264.18,
+     262.5,
+     263.72,
+     263.92,
+     263.29,
+     263.48,
+     881.59
+    ],
+    "warmup_chunk1": [
+     84.84
+    ],
+    "excluded_last_full": [
+     881.59
+    ],
+    "tail_chunks": [
+     60.01
+    ],
+    "steady_full_used": [
+     263.14,
+     262.91,
+     252.81,
+     264.2,
+     264.67,
+     264.35,
+     264.5,
+     264.35,
+     264.18,
+     262.5,
+     263.72,
+     263.92,
+     263.29,
+     263.48
+    ],
+    "prefill_median_tok_s": 263.82,
+    "decode": {
+     "steady_tok_s": null,
+     "p50_tok_s": null,
+     "wall_s": null,
+     "completion_tokens": null,
+     "new_token": null,
+     "cached_token": null,
+     "error": null
+    },
+    "teardown_leftover": []
+   },
+   "6144": {
+    "stage": "before_6144",
+    "ready": true,
+    "ready_s": 146.3,
+    "boot_env": {},
+    "gpu_after_boot_mib": 28074,
+    "peak_vram_mib": 31104,
+    "prefill_error": null,
+    "prompt_tokens": 65585,
+    "thr_vals_all": [
+     98.31,
+     281.85,
+     281.61,
+     281.69,
+     281.91,
+     281.14,
+     279.7,
+     280.9,
+     280.3,
+     401.79,
+     2084.12
+    ],
+    "full_chunks": [
+     98.31,
+     281.85,
+     281.61,
+     281.69,
+     281.91,
+     281.14,
+     279.7,
+     280.9,
+     280.3,
+     401.79
+    ],
+    "warmup_chunk1": [
+     98.31
+    ],
+    "excluded_last_full": [
+     401.79
+    ],
+    "tail_chunks": [
+     2084.12
+    ],
+    "steady_full_used": [
+     281.85,
+     281.61,
+     281.69,
+     281.91,
+     281.14,
+     279.7,
+     280.9,
+     280.3
+    ],
+    "prefill_median_tok_s": 281.38,
+    "decode": {
+     "steady_tok_s": null,
+     "p50_tok_s": null,
+     "wall_s": null,
+     "completion_tokens": null,
+     "new_token": null,
+     "cached_token": null,
+     "error": null
+    },
+    "teardown_leftover": []
+   },
+   "8128": {
+    "stage": "before_8191",
+    "ready": true,
+    "ready_s": 136.7,
+    "boot_env": {},
+    "gpu_after_boot_mib": 28074,
+    "peak_vram_mib": 32084,
+    "prefill_error": null,
+    "prompt_tokens": 65585,
+    "thr_vals_all": [
+     108.97,
+     290.61,
+     289.79,
+     290.23,
+     288.87,
+     290.05,
+     289.3,
+     1572.21,
+     535.43
+    ],
+    "full_chunks": [
+     108.97,
+     290.61,
+     289.79,
+     290.23,
+     288.87,
+     290.05,
+     289.3,
+     1572.21
+    ],
+    "warmup_chunk1": [
+     108.97
+    ],
+    "excluded_last_full": [
+     1572.21
+    ],
+    "tail_chunks": [
+     535.43
+    ],
+    "steady_full_used": [
+     290.61,
+     289.79,
+     290.23,
+     288.87,
+     290.05,
+     289.3
+    ],
+    "prefill_median_tok_s": 289.92,
+    "decode": {
+     "steady_tok_s": 13.94,
+     "p50_tok_s": 14.42,
+     "wall_s": 8.92,
+     "completion_tokens": 63,
+     "new_token": 49,
+     "cached_token": 65536,
+     "error": null
+    },
+    "teardown_leftover": []
+   }
+  },
+  "after": {
+   "4096": {
+    "stage": "after_4096",
+    "ready": true,
+    "ready_s": 130.4,
+    "boot_env": {},
+    "gpu_after_boot_mib": 28074,
+    "peak_vram_mib": 30108,
+    "prefill_error": null,
+    "prompt_tokens": 65585,
+    "thr_vals_all": [
+     93.03,
+     303.2,
+     302.54,
+     302.9,
+     302.24,
+     302.69,
+     302.75,
+     301.98,
+     301.62,
+     301.79,
+     301.01,
+     301.15,
+     301.27,
+     300.46,
+     300.74,
+     944.37,
+     59.32
+    ],
+    "full_chunks": [
+     93.03,
+     303.2,
+     302.54,
+     302.9,
+     302.24,
+     302.69,
+     302.75,
+     301.98,
+     301.62,
+     301.79,
+     301.01,
+     301.15,
+     301.27,
+     300.46,
+     300.74,
+     944.37
+    ],
+    "warmup_chunk1": [
+     93.03
+    ],
+    "excluded_last_full": [
+     944.37
+    ],
+    "tail_chunks": [
+     59.32
+    ],
+    "steady_full_used": [
+     303.2,
+     302.54,
+     302.9,
+     302.24,
+     302.69,
+     302.75,
+     301.98,
+     301.62,
+     301.79,
+     301.01,
+     301.15,
+     301.27,
+     300.46,
+     300.74
+    ],
+    "prefill_median_tok_s": 301.88,
+    "decode": {
+     "steady_tok_s": null,
+     "p50_tok_s": null,
+     "wall_s": null,
+     "completion_tokens": null,
+     "new_token": null,
+     "cached_token": null,
+     "error": null
+    },
+    "teardown_leftover": []
+   },
+   "6144": {
+    "stage": "after_6144",
+    "ready": true,
+    "ready_s": 140.4,
+    "boot_env": {},
+    "gpu_after_boot_mib": 28084,
+    "peak_vram_mib": 31114,
+    "prefill_error": null,
+    "prompt_tokens": 65585,
+    "thr_vals_all": [
+     111.06,
+     327.59,
+     325.7,
+     326.21,
+     325.41,
+     325.15,
+     323.98,
+     324.53,
+     323.6,
+     462.63,
+     2389.8
+    ],
+    "full_chunks": [
+     111.06,
+     327.59,
+     325.7,
+     326.21,
+     325.41,
+     325.15,
+     323.98,
+     324.53,
+     323.6,
+     462.63
+    ],
+    "warmup_chunk1": [
+     111.06
+    ],
+    "excluded_last_full": [
+     462.63
+    ],
+    "tail_chunks": [
+     2389.8
+    ],
+    "steady_full_used": [
+     327.59,
+     325.7,
+     326.21,
+     325.41,
+     325.15,
+     323.98,
+     324.53,
+     323.6
+    ],
+    "prefill_median_tok_s": 325.28,
+    "decode": {
+     "steady_tok_s": null,
+     "p50_tok_s": null,
+     "wall_s": null,
+     "completion_tokens": null,
+     "new_token": null,
+     "cached_token": null,
+     "error": null
+    },
+    "teardown_leftover": []
+   },
+   "8128": {
+    "stage": "after_8191",
+    "ready": true,
+    "ready_s": 128.3,
+    "boot_env": {},
+    "gpu_after_boot_mib": 28083,
+    "peak_vram_mib": 32093,
+    "prefill_error": null,
+    "prompt_tokens": 65585,
+    "thr_vals_all": [
+     123.84,
+     338.85,
+     338.57,
+     337.81,
+     337.4,
+     336.29,
+     336.16,
+     1760.31,
+     554.46
+    ],
+    "full_chunks": [
+     123.84,
+     338.85,
+     338.57,
+     337.81,
+     337.4,
+     336.29,
+     336.16,
+     1760.31
+    ],
+    "warmup_chunk1": [
+     123.84
+    ],
+    "excluded_last_full": [
+     1760.31
+    ],
+    "tail_chunks": [
+     554.46
+    ],
+    "steady_full_used": [
+     338.85,
+     338.57,
+     337.81,
+     337.4,
+     336.29,
+     336.16
+    ],
+    "prefill_median_tok_s": 337.61,
+    "decode": {
+     "steady_tok_s": 14.6,
+     "p50_tok_s": 14.64,
+     "wall_s": 8.78,
+     "completion_tokens": 63,
+     "new_token": 49,
+     "cached_token": 65536,
+     "error": null
+    },
+    "teardown_leftover": []
+   }
+  }
+ },
+ "comparison": {
+  "prefill": {
+   "4096": {
+    "before": 263.82,
+    "after": 301.88,
+    "delta_pct": 14.4,
+    "campaign_ref": 262.0
+   },
+   "6144": {
+    "before": 281.38,
+    "after": 325.28,
+    "delta_pct": 15.6,
+    "campaign_ref": 281.0
+   },
+   "8128": {
+    "before": 289.92,
+    "after": 337.61,
+    "delta_pct": 16.4,
+    "campaign_ref": 292.3
+   }
+  },
+  "decode": {
+   "before_steady": 13.94,
+   "after_steady": 14.6,
+   "delta_pct": 4.7,
+   "before_cached": 65536,
+   "after_cached": 65536,
+   "campaign_ref_class": [
+    13.58,
+    14.72
+   ]
+  },
+  "boot_ready_s": {
+   "before": {
+    "4096": 120.3,
+    "6144": 146.3,
+    "8128": 136.7
+   },
+   "after": {
+    "4096": 130.4,
+    "6144": 140.4,
+    "8128": 128.3
+   }
+  }
+ }
+}

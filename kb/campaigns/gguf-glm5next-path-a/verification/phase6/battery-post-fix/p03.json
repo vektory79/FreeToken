@@ -1,0 +1,16 @@
+{
+ "idx": 3,
+ "kind": "en",
+ "prompt": "What are the trade-offs between remote and office work? Give a balanced view.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "The user is asking about trade-offs between remote and office work, and they explicitly want a balanced view. This is a fairly common topic in workplace discussions, but it's worth thinking through carefully to give a genuinely balanced, thoughtful answer rather than just listing obvious points.\n\nLet me brainstorm the key dimensions of this question:\n\n**Remote work advantages:**\n1. **Commute elimination** - Saves time (average US commute is ~27 minutes each way, so roughly an hour a day), money (gas, transit, car wear), and reduces stress. Environmental benefits too.\n2. **Flexibility** - Ability to structure your day around personal rhythms, appointments, childcare pickups, etc.\n3. **Geographic freedom** - Can live anywhere, not tied to expensive metro areas. Access to jobs",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 29,
+  "completion_tokens": 159,
+  "total_tokens": 188
+ },
+ "wall_s": 14.21
+}

@@ -1,0 +1,78 @@
+{
+ "t4a": {
+  "boot": {
+   "ok": true,
+   "ready_s": 131.8,
+   "why": "ok"
+  },
+  "median_c2_c7": 578.42,
+  "battery_ok": 24,
+  "battery_failed": 0,
+  "teardown": {
+   "grace_expired": false,
+   "rc": -15,
+   "leftovers": [
+    "3316760 /bin/bash /media/ai/bin/llama-swap",
+    "3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config"
+   ],
+   "gpu_mib": 1326
+  }
+ },
+ "t64a": {
+  "boot": {
+   "ok": true,
+   "ready_s": 120.2,
+   "why": "ok"
+  },
+  "median_c2_c7": 808.15,
+  "battery_ok": 24,
+  "battery_failed": 0,
+  "teardown": {
+   "grace_expired": false,
+   "rc": -15,
+   "leftovers": [
+    "3316760 /bin/bash /media/ai/bin/llama-swap",
+    "3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config"
+   ],
+   "gpu_mib": 1326
+  }
+ },
+ "t4b": {
+  "boot": {
+   "ok": true,
+   "ready_s": 144.3,
+   "why": "ok"
+  },
+  "median_c2_c7": 578.83,
+  "battery_ok": 24,
+  "battery_failed": 0,
+  "teardown": {
+   "grace_expired": false,
+   "rc": -15,
+   "leftovers": [
+    "3316760 /bin/bash /media/ai/bin/llama-swap",
+    "3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config"
+   ],
+   "gpu_mib": 1326
+  }
+ },
+ "t64b": {
+  "boot": {
+   "ok": true,
+   "ready_s": 117.1,
+   "why": "ok"
+  },
+  "median_c2_c7": 808.12,
+  "battery_ok": 24,
+  "battery_failed": 0,
+  "teardown": {
+   "grace_expired": false,
+   "rc": -15,
+   "leftovers": [
+    "3316760 /bin/bash /media/ai/bin/llama-swap",
+    "3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config"
+   ],
+   "gpu_mib": 1326
+  }
+ }
+}

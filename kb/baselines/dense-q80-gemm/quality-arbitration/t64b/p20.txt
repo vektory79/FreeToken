@@ -1,0 +1,17 @@
+### reasoning
+The train travels 60 km in 45 minutes.
+
+Convert 45 minutes to hours: 45/60 = 0.75 hours.
+
+Speed = distance / time = 60 / 0.75 = 80 km/h.
+
+### content
+## Solution
+
+**Step 1: Convert time to hours.**
+
+45 minutes = 45/60 = **0.75 hours**
+
+**Step 2: Apply the speed formula.**
+
+$$\text{Speed} = \frac{\text{Distance}}{\text{Time}} = \frac{60 \text{ km}}{0.75 \text{ h}} =

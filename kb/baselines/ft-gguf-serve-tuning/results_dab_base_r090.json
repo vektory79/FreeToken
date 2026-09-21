@@ -1,0 +1,26 @@
+{
+ "name": "dab_base_r090",
+ "extra": "--memory-ratio 0.90 (server booted by dab.py after 0.89 floor-gate fail; effective ratio 0.90)",
+ "decode_samples": [
+  {
+   "tag": "base_r090_0",
+   "steady_tok_s": 13.68,
+   "p50_tok_s": 13.73,
+   "ttft_s": 0.0,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "wall_s": 256.1
+  },
+  {
+   "tag": "base_r090_1",
+   "steady_tok_s": 13.33,
+   "p50_tok_s": 13.61,
+   "ttft_s": 0.0,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "wall_s": 257.1
+  }
+ ],
+ "ready": true,
+ "ready_s": null
+}

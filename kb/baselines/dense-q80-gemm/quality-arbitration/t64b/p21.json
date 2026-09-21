@@ -1,0 +1,18 @@
+{
+ "idx": 21,
+ "kind": "reason",
+ "prompt": "If today is Wednesday, what day of the week will it be in 100 days? Explain briefly.",
+ "max_tokens": 128,
+ "greedy_mode": "temp0_topk1",
+ "wall_s": 11.83,
+ "error": null,
+ "reasoning": "Today is Wednesday. I need to find what day it will be in 100 days.\n\n100 mod 7 = 100 ÷ 7 = 14 remainder 2 (since 14 × 7 = 98, and 100 - 98 = 2).\n\nSo 100 days is 14 full weeks plus 2 extra days.\n\nWednesday + 2 days = Friday.\n\nLet me verify: Wednesday + 1 = Thursday, + 2 = Friday. Yes, Friday.",
+ "content": "**Friday.**\n\nHere's why: The days of the week repeat every 7 days, so divide 100 by 7",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 33,
+  "completion_tokens": 127,
+  "total_tokens": 160
+ },
+ "sha256": "57ac9b024bffb100b9f1d8b1bdbe361959edc6f832ffd1f86e7acc8b7a71d3dc"
+}

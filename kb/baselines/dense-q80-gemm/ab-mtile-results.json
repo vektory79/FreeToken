@@ -1,0 +1,1381 @@
+{
+ "meta": {
+  "single_variable": "FREETOKEN_GGUF_DENSE_MTILE (4/8/16/32/64; mtile4 = unset)",
+  "anchor": "FREETOKEN_GGUF_MOE_MTILE=32 all boots; NSPLIT committed default 2 (knob never set); port 18801; winner flags",
+  "fill": "65,585 tokens (8x8128 + 561), .tasks/ft-gguf-serve-tuning/filler.txt",
+  "nsys_window": "fill chunks 3..7 (start after 2nd, stop after 6th thr line)",
+  "validity_refs": {
+   "nsplit2_instrumented_class_tok_s": 561.5,
+   "plain_boot_context": [
+    546.5,
+    553.8
+   ]
+  },
+  "t46_anchor": {
+   "dense_launches_per_chunk": 356,
+   "kda_halves_per_chunk": 68,
+   "gridY_by_tile": {
+    "4": 2032,
+    "8": 1016,
+    "16": 508,
+    "32": 254,
+    "64": 127
+   }
+  }
+ },
+ "mtile4": {
+  "T_steady_s": 14.414,
+  "chunk_time_s": 14.414,
+  "window_s": 58.184,
+  "chunks_eq": 4.037,
+  "busy_s_per_chunk": 14.408,
+  "idle_s_per_chunk": 0.006,
+  "prefill": {
+   "all_lines": [
+    168.97,
+    566.38,
+    565.18,
+    564.57,
+    563.24,
+    562.85,
+    562.03,
+    2097.41,
+    558.69
+   ],
+   "steady_c2_c7": [
+    566.38,
+    565.18,
+    564.57,
+    563.24,
+    562.85,
+    562.03
+   ],
+   "median_tok_s": 563.9,
+   "chunk_s_median": 14.414
+  },
+  "dense_term": {
+   "s_per_chunk": 5.5148,
+   "launches_per_chunk": 348.8,
+   "launch_anchor": 356,
+   "launch_liveness": "CHECK",
+   "expected_gridY": 2032,
+   "gridY_mismatch_classes": {},
+   "classes": {
+    "mla_o_proj": {
+     "n_per_chunk": 11.4,
+     "med_ms": 48.619,
+     "s_per_chunk": 0.5594,
+     "med_gridX": 128,
+     "med_gridY": 2032
+    },
+    "shexp_gate_up": {
+     "n_per_chunk": 84.23,
+     "med_ms": 6.209,
+     "s_per_chunk": 0.5366,
+     "med_gridX": 64,
+     "med_gridY": 2032
+    },
+    "shexp_down": {
+     "n_per_chunk": 41.87,
+     "med_ms": 6.203,
+     "s_per_chunk": 0.2619,
+     "med_gridX": 128,
+     "med_gridY": 2032
+    },
+    "kda_in_proj_half": {
+     "n_per_chunk": 67.88,
+     "med_ms": 37.823,
+     "s_per_chunk": 2.6141,
+     "med_gridX": 389,
+     "med_gridY": 2032
+    },
+    "kda_ssm_f_b/g_b": {
+     "n_per_chunk": 67.88,
+     "med_ms": 0.801,
+     "s_per_chunk": 0.0569,
+     "med_gridX": 256,
+     "med_gridY": 2032
+    },
+    "kda_o_proj": {
+     "n_per_chunk": 34.19,
+     "med_ms": 24.913,
+     "s_per_chunk": 0.8751,
+     "med_gridX": 128,
+     "med_gridY": 2032
+    },
+    "mla_q_a": {
+     "n_per_chunk": 10.9,
+     "med_ms": 4.623,
+     "s_per_chunk": 0.0521,
+     "med_gridX": 48,
+     "med_gridY": 2032
+    },
+    "mla_q_b": {
+     "n_per_chunk": 10.9,
+     "med_ms": 18.799,
+     "s_per_chunk": 0.2086,
+     "med_gridX": 512,
+     "med_gridY": 2032
+    },
+    "mla_kv_a_mqa": {
+     "n_per_chunk": 10.9,
+     "med_ms": 1.558,
+     "s_per_chunk": 0.0171,
+     "med_gridX": 16,
+     "med_gridY": 2032
+    },
+    "dense_ffn_gate_up": {
+     "n_per_chunk": 5.95,
+     "med_ms": 37.618,
+     "s_per_chunk": 0.2284,
+     "med_gridX": 384,
+     "med_gridY": 2032
+    },
+    "dense_ffn_down": {
+     "n_per_chunk": 2.73,
+     "med_ms": 37.541,
+     "s_per_chunk": 0.1045,
+     "med_gridX": 128,
+     "med_gridY": 2032
+    }
+   }
+  },
+  "kda_in_proj": {
+   "mode": "split",
+   "launches_per_chunk": 67.88,
+   "expected_launches_per_chunk": 68,
+   "liveness_count": "PASS",
+   "per_half_launch_med_ms": 37.823,
+   "tflop_per_s_per_half": 21.91,
+   "s_per_chunk_kernels": 2.6141,
+   "med_gridX": 389,
+   "med_gridY": 2032
+  },
+  "kda_share_s_per_chunk": 2.6141,
+  "grouped_moe": {
+   "per_name": {
+    "moe_iq3_xxs": {
+     "n_per_chunk": 81.75,
+     "s_per_chunk": 2.7456
+    },
+    "moe_iq4_xs": {
+     "n_per_chunk": 40.88,
+     "s_per_chunk": 1.5299
+    },
+    "moe_q6_K": {
+     "n_per_chunk": 2.97,
+     "s_per_chunk": 0.088
+    }
+   },
+   "total_s_per_chunk": 4.3635,
+   "align": {
+    "n_per_chunk": 42.11,
+    "s_per_chunk": 0.00109
+   }
+  },
+  "fetch_copies_s_per_chunk": 3.09,
+  "rest_s_per_chunk": 1.4396,
+  "decode": {
+   "wall_s": 8.99,
+   "error": null,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "steady_tok_s": 13.79,
+   "p50_tok_s": 14.15,
+   "avg_tok_s": 7.01,
+   "min_inst_tok_s": 8.33,
+   "new_token": 49,
+   "cached_token": 65536
+  },
+  "prompts": [
+   {
+    "i": 0,
+    "prompt": "What is 17 * 23? Answer with just the number.",
+    "output_sha256": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+    "error": null,
+    "completion_tokens": 44,
+    "cached_token": 0,
+    "wall_s": 6.63
+   },
+   {
+    "i": 1,
+    "prompt": "Name the capital of France and one famous landmark there. One sentence.",
+    "output_sha256": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.86
+   },
+   {
+    "i": 2,
+    "prompt": "Write a haiku about rain on a tin roof.",
+    "output_sha256": "e8d515592919ab7b47442a32a789bd3736b7cf43f0f744c1c13c6cfb9f60d677",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.74
+   },
+   {
+    "i": 3,
+    "prompt": "Explain in two sentences why the sky is blue.",
+    "output_sha256": "71df405b9e30abf321b7b5c1a0ab63b12c6caf34730a736f6280e2e1d808c6b1",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.73
+   },
+   {
+    "i": 4,
+    "prompt": "Translate 'good morning' into German, French, and Spanish.",
+    "output_sha256": "75875a1723e4be74c814be26933836b2d7f117f1355e6cc5074d46aa96a3bebf",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 10.06
+   },
+   {
+    "i": 5,
+    "prompt": "Count from 1 to 20, comma separated.",
+    "output_sha256": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.54
+   }
+  ],
+  "server_env_pins": {
+   "FREETOKEN_GGUF_MOE_MTILE": "32",
+   "NSYS_SESSION": "mtile4cap"
+  },
+  "graph_capture_lines": [
+   "\u001b[1m[2026-09-19|22:25:51|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Start capturing CUDA graphs with sizes: [1]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.10 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]ninja: no work to do.",
+   "Capturing graphs: bs = 1   | avail_mem = 4.10 GiB: 100%|██████████| 1/1 [00:02<00:00,  2.85s/batch]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.10 GiB: 100%|██████████| 1/1 [00:02<00:00,  2.85s/batch]"
+  ],
+  "capture": {
+   "started": true,
+   "stopped": true,
+   "failed": null,
+   "n_thr": 6,
+   "t_start": 1789846019.4133644,
+   "t_stop": 1789846081.5375028,
+   "start_rc": 0,
+   "start_err": "",
+   "stop_rc": 0,
+   "stop_err": "                    ] report1.nsys-rep\n[1/1] [====27%                     ] report1.nsys-rep\n[1/1] [=====32%                    ] report1.nsys-rep\n[1/1] [=======36%                  ] report1.nsys-rep\n[1/1] [========40%                 ] report1.nsys-rep\n[1/1] [=========44%                ] report1.nsys-rep\n[1/1] [==========48%               ] report1.nsys-rep\n[1/1] [===========51%              ] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\nGenerated:\n\t/media/ai/src/FreeToken/.tasks/dense-q80-gemm/report1.nsys-rep\n"
+  },
+  "teardown": {
+   "leftover": [],
+   "gpu_mib": 1463
+  }
+ },
+ "mtile8": {
+  "T_steady_s": 12.344,
+  "chunk_time_s": 12.344,
+  "window_s": 47.683,
+  "chunks_eq": 3.863,
+  "busy_s_per_chunk": 12.338,
+  "idle_s_per_chunk": 0.006,
+  "prefill": {
+   "all_lines": [
+    183.42,
+    660.28,
+    659.95,
+    661.67,
+    656.94,
+    656.27,
+    655.26,
+    2214.67,
+    565.03
+   ],
+   "steady_c2_c7": [
+    660.28,
+    659.95,
+    661.67,
+    656.94,
+    656.27,
+    655.26
+   ],
+   "median_tok_s": 658.45,
+   "chunk_s_median": 12.344
+  },
+  "dense_term": {
+   "s_per_chunk": 3.3714,
+   "launches_per_chunk": 346.38,
+   "launch_anchor": 356,
+   "launch_liveness": "CHECK",
+   "expected_gridY": 1016,
+   "gridY_mismatch_classes": {},
+   "classes": {
+    "kda_o_proj": {
+     "n_per_chunk": 46.6,
+     "med_ms": 15.509,
+     "s_per_chunk": 0.9086,
+     "med_gridX": 128,
+     "med_gridY": 1016
+    },
+    "shexp_gate_up": {
+     "n_per_chunk": 84.91,
+     "med_ms": 3.874,
+     "s_per_chunk": 0.3341,
+     "med_gridX": 64,
+     "med_gridY": 1016
+    },
+    "shexp_down": {
+     "n_per_chunk": 42.46,
+     "med_ms": 3.894,
+     "s_per_chunk": 0.1681,
+     "med_gridX": 128,
+     "med_gridY": 1016
+    },
+    "kda_in_proj_half": {
+     "n_per_chunk": 67.31,
+     "med_ms": 23.549,
+     "s_per_chunk": 1.6197,
+     "med_gridX": 389,
+     "med_gridY": 1016
+    },
+    "kda_ssm_f_b/g_b": {
+     "n_per_chunk": 67.31,
+     "med_ms": 0.507,
+     "s_per_chunk": 0.0361,
+     "med_gridX": 256,
+     "med_gridY": 1016
+    },
+    "mla_q_a": {
+     "n_per_chunk": 10.87,
+     "med_ms": 2.883,
+     "s_per_chunk": 0.0325,
+     "med_gridX": 48,
+     "med_gridY": 1016
+    },
+    "mla_q_b": {
+     "n_per_chunk": 10.87,
+     "med_ms": 11.571,
+     "s_per_chunk": 0.1301,
+     "med_gridX": 512,
+     "med_gridY": 1016
+    },
+    "mla_kv_a_mqa": {
+     "n_per_chunk": 10.87,
+     "med_ms": 0.975,
+     "s_per_chunk": 0.011,
+     "med_gridX": 16,
+     "med_gridY": 1016
+    },
+    "dense_ffn_down": {
+     "n_per_chunk": 0.52,
+     "med_ms": 35.051,
+     "s_per_chunk": 0.0181,
+     "med_gridX": 128,
+     "med_gridY": 1016
+    },
+    "dense_ffn_gate_up": {
+     "n_per_chunk": 4.66,
+     "med_ms": 23.463,
+     "s_per_chunk": 0.1131,
+     "med_gridX": 384,
+     "med_gridY": 1016
+    }
+   }
+  },
+  "kda_in_proj": {
+   "mode": "split",
+   "launches_per_chunk": 67.31,
+   "expected_launches_per_chunk": 68,
+   "liveness_count": "PASS",
+   "per_half_launch_med_ms": 23.549,
+   "tflop_per_s_per_half": 35.2,
+   "s_per_chunk_kernels": 1.6197,
+   "med_gridX": 389,
+   "med_gridY": 1016
+  },
+  "kda_share_s_per_chunk": 1.6197,
+  "grouped_moe": {
+   "per_name": {
+    "moe_iq3_xxs": {
+     "n_per_chunk": 82.58,
+     "s_per_chunk": 2.7723
+    },
+    "moe_iq4_xs": {
+     "n_per_chunk": 41.42,
+     "s_per_chunk": 1.5462
+    },
+    "moe_q6_K": {
+     "n_per_chunk": 2.85,
+     "s_per_chunk": 0.0833
+    }
+   },
+   "total_s_per_chunk": 4.4018,
+   "align": {
+    "n_per_chunk": 42.46,
+    "s_per_chunk": 0.0011
+   }
+  },
+  "fetch_copies_s_per_chunk": 3.1339,
+  "rest_s_per_chunk": 1.4312,
+  "decode": {
+   "wall_s": 8.77,
+   "error": null,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "steady_tok_s": 14.36,
+   "p50_tok_s": 14.47,
+   "avg_tok_s": 7.19,
+   "min_inst_tok_s": 10.01,
+   "new_token": 49,
+   "cached_token": 65536
+  },
+  "prompts": [
+   {
+    "i": 0,
+    "prompt": "What is 17 * 23? Answer with just the number.",
+    "output_sha256": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+    "error": null,
+    "completion_tokens": 44,
+    "cached_token": 0,
+    "wall_s": 6.19
+   },
+   {
+    "i": 1,
+    "prompt": "Name the capital of France and one famous landmark there. One sentence.",
+    "output_sha256": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.28
+   },
+   {
+    "i": 2,
+    "prompt": "Write a haiku about rain on a tin roof.",
+    "output_sha256": "9ca67157cd05f77d4f67995904b9fc11fdb78441805a3fcfe67960a31a0e723e",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 8.92
+   },
+   {
+    "i": 3,
+    "prompt": "Explain in two sentences why the sky is blue.",
+    "output_sha256": "6f83e337e8534bf32b9a0b09bded846debc1ec24bf07b6792282cdfc52c8962b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.16
+   },
+   {
+    "i": 4,
+    "prompt": "Translate 'good morning' into German, French, and Spanish.",
+    "output_sha256": "dcc22a84ea9a7c4ab9dcdbf8ea1d7eb14bccdd5c1c1bc5d9ca4a7f0417950414",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.11
+   },
+   {
+    "i": 5,
+    "prompt": "Count from 1 to 20, comma separated.",
+    "output_sha256": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.13
+   }
+  ],
+  "server_env_pins": {
+   "FREETOKEN_GGUF_MOE_MTILE": "32",
+   "FREETOKEN_GGUF_DENSE_MTILE": "8",
+   "NSYS_SESSION": "mtile8cap"
+  },
+  "graph_capture_lines": [
+   "\u001b[1m[2026-09-19|22:36:53|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Start capturing CUDA graphs with sizes: [1]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.05 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]ninja: no work to do.",
+   "Capturing graphs: bs = 1   | avail_mem = 4.05 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.34s/batch]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.05 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.34s/batch]"
+  ],
+  "capture": {
+   "started": true,
+   "stopped": true,
+   "failed": null,
+   "n_thr": 6,
+   "t_start": 1789846676.960427,
+   "t_stop": 1789846729.0659502,
+   "start_rc": 0,
+   "start_err": "",
+   "stop_rc": 0,
+   "stop_err": "                    ] report1.nsys-rep\n[1/1] [===24%                      ] report1.nsys-rep\n[1/1] [=====29%                    ] report1.nsys-rep\n[1/1] [======33%                   ] report1.nsys-rep\n[1/1] [=======37%                  ] report1.nsys-rep\n[1/1] [========42%                 ] report1.nsys-rep\n[1/1] [=========46%                ] report1.nsys-rep\n[1/1] [===========51%              ] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\nGenerated:\n\t/media/ai/src/FreeToken/.tasks/dense-q80-gemm/report1.nsys-rep\n"
+  },
+  "teardown": {
+   "leftover": [],
+   "gpu_mib": 1463
+  }
+ },
+ "mtile16": {
+  "T_steady_s": 11.19,
+  "chunk_time_s": 11.19,
+  "window_s": 41.324,
+  "chunks_eq": 3.693,
+  "busy_s_per_chunk": 11.184,
+  "idle_s_per_chunk": 0.006,
+  "prefill": {
+   "all_lines": [
+    100.59,
+    733.2,
+    729.29,
+    726.93,
+    725.6,
+    725.81,
+    722.25,
+    2277.74,
+    244.57
+   ],
+   "steady_c2_c7": [
+    733.2,
+    729.29,
+    726.93,
+    725.6,
+    725.81,
+    722.25
+   ],
+   "median_tok_s": 726.37,
+   "chunk_s_median": 11.19
+  },
+  "dense_term": {
+   "s_per_chunk": 2.223,
+   "launches_per_chunk": 346.06,
+   "launch_anchor": 356,
+   "launch_liveness": "CHECK",
+   "expected_gridY": 508,
+   "gridY_mismatch_classes": {},
+   "classes": {
+    "kda_o_proj": {
+     "n_per_chunk": 45.49,
+     "med_ms": 10.264,
+     "s_per_chunk": 0.5999,
+     "med_gridX": 128,
+     "med_gridY": 508
+    },
+    "shexp_gate_up": {
+     "n_per_chunk": 84.49,
+     "med_ms": 2.551,
+     "s_per_chunk": 0.2201,
+     "med_gridX": 64,
+     "med_gridY": 508
+    },
+    "shexp_down": {
+     "n_per_chunk": 43.87,
+     "med_ms": 2.551,
+     "s_per_chunk": 0.1264,
+     "med_gridX": 128,
+     "med_gridY": 508
+    },
+    "kda_in_proj_half": {
+     "n_per_chunk": 67.7,
+     "med_ms": 15.453,
+     "s_per_chunk": 1.0673,
+     "med_gridX": 389,
+     "med_gridY": 508
+    },
+    "kda_ssm_f_b/g_b": {
+     "n_per_chunk": 67.15,
+     "med_ms": 0.322,
+     "s_per_chunk": 0.0221,
+     "med_gridX": 256,
+     "med_gridY": 508
+    },
+    "mla_q_a": {
+     "n_per_chunk": 10.83,
+     "med_ms": 1.896,
+     "s_per_chunk": 0.0213,
+     "med_gridX": 48,
+     "med_gridY": 508
+    },
+    "mla_q_b": {
+     "n_per_chunk": 10.83,
+     "med_ms": 7.549,
+     "s_per_chunk": 0.0842,
+     "med_gridX": 512,
+     "med_gridY": 508
+    },
+    "mla_kv_a_mqa": {
+     "n_per_chunk": 10.83,
+     "med_ms": 0.64,
+     "s_per_chunk": 0.0071,
+     "med_gridX": 16,
+     "med_gridY": 508
+    },
+    "dense_ffn_gate_up": {
+     "n_per_chunk": 4.87,
+     "med_ms": 15.356,
+     "s_per_chunk": 0.0747,
+     "med_gridX": 384,
+     "med_gridY": 508
+    }
+   }
+  },
+  "kda_in_proj": {
+   "mode": "split",
+   "launches_per_chunk": 67.7,
+   "expected_launches_per_chunk": 68,
+   "liveness_count": "PASS",
+   "per_half_launch_med_ms": 15.453,
+   "tflop_per_s_per_half": 53.64,
+   "s_per_chunk_kernels": 1.0673,
+   "med_gridX": 389,
+   "med_gridY": 508
+  },
+  "kda_share_s_per_chunk": 1.0673,
+  "grouped_moe": {
+   "per_name": {
+    "moe_iq3_xxs": {
+     "n_per_chunk": 82.86,
+     "s_per_chunk": 2.7736
+    },
+    "moe_iq4_xs": {
+     "n_per_chunk": 41.16,
+     "s_per_chunk": 1.5378
+    },
+    "moe_q6_K": {
+     "n_per_chunk": 2.71,
+     "s_per_chunk": 0.0794
+    }
+   },
+   "total_s_per_chunk": 4.3908,
+   "align": {
+    "n_per_chunk": 42.24,
+    "s_per_chunk": 0.00109
+   }
+  },
+  "fetch_copies_s_per_chunk": 3.135,
+  "rest_s_per_chunk": 1.4352,
+  "decode": {
+   "wall_s": 8.91,
+   "error": null,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "steady_tok_s": 13.21,
+   "p50_tok_s": 13.66,
+   "avg_tok_s": 7.07,
+   "min_inst_tok_s": 5.44,
+   "new_token": 49,
+   "cached_token": 65536
+  },
+  "prompts": [
+   {
+    "i": 0,
+    "prompt": "What is 17 * 23? Answer with just the number.",
+    "output_sha256": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+    "error": null,
+    "completion_tokens": 44,
+    "cached_token": 0,
+    "wall_s": 6.96
+   },
+   {
+    "i": 1,
+    "prompt": "Name the capital of France and one famous landmark there. One sentence.",
+    "output_sha256": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 10.47
+   },
+   {
+    "i": 2,
+    "prompt": "Write a haiku about rain on a tin roof.",
+    "output_sha256": "e8d515592919ab7b47442a32a789bd3736b7cf43f0f744c1c13c6cfb9f60d677",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.76
+   },
+   {
+    "i": 3,
+    "prompt": "Explain in two sentences why the sky is blue.",
+    "output_sha256": "2c14b554b0fc89089a86ab85669ce4abc03c38801201256b8573a48acb106386",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 10.32
+   },
+   {
+    "i": 4,
+    "prompt": "Translate 'good morning' into German, French, and Spanish.",
+    "output_sha256": "d6a3cb517685e70f2a74b4260894016290aef8c4ee79a5aa9adc3d6aa57d77b0",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.7
+   },
+   {
+    "i": 5,
+    "prompt": "Count from 1 to 20, comma separated.",
+    "output_sha256": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.12
+   }
+  ],
+  "server_env_pins": {
+   "FREETOKEN_GGUF_MOE_MTILE": "32",
+   "FREETOKEN_GGUF_DENSE_MTILE": "16",
+   "NSYS_SESSION": "mtile16cap"
+  },
+  "graph_capture_lines": [
+   "\u001b[1m[2026-09-20|01:29:11|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Start capturing CUDA graphs with sizes: [1]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.03 GiB:   0%|          | 0/1 [00:00<?, ?batch/s][1/2] /usr/local/cuda/bin/nvcc -MD -MF gguf_kernel.cuda.o.d -ccbin /usr/bin/clang -DTORCH_EXTENSION_NAME=freetoken_gguf_kernels -DTORCH_API_INCLUDE_EXTENSION_H -I/media/ai/src/FreeToken/python/freetoken/kernel/csrc/gguf -isystem /media/ai/src/FreeToken/.venv/lib/python3.14/site-packages/torch/include -isystem /media/ai/src/FreeToken/.venv/lib/python3.14/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /home/linuxbrew/.linuxbrew/opt/python@3.14/include/python3.14 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_120,code=compute_120 -gencode=arch=compute_120,code=sm_120 --compiler-options '-fPIC' -O3 --expt-relaxed-constexpr -ccbin /usr/bin/clang++ -std=c++17 -c /media/ai/src/FreeToken/python/freetoken/kernel/csrc/gguf/gguf_kernel.cu -o gguf_kernel.cuda.o",
+   "Capturing graphs: bs = 1   | avail_mem = 4.03 GiB: 100%|██████████| 1/1 [00:58<00:00, 58.30s/batch]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.03 GiB: 100%|██████████| 1/1 [00:58<00:00, 58.30s/batch]"
+  ],
+  "capture": {
+   "started": true,
+   "stopped": true,
+   "failed": null,
+   "n_thr": 6,
+   "t_start": 1789857106.8978734,
+   "t_stop": 1789857152.9919932,
+   "start_rc": 0,
+   "start_err": "",
+   "stop_rc": 0,
+   "stop_err": "                    ] report1.nsys-rep\n[1/1] [====25%                     ] report1.nsys-rep\n[1/1] [=====29%                    ] report1.nsys-rep\n[1/1] [======34%                   ] report1.nsys-rep\n[1/1] [=======39%                  ] report1.nsys-rep\n[1/1] [=========43%                ] report1.nsys-rep\n[1/1] [==========48%               ] report1.nsys-rep\n[1/1] [===========51%              ] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\nGenerated:\n\t/media/ai/src/FreeToken/.tasks/dense-q80-gemm/report1.nsys-rep\n"
+  },
+  "teardown": {
+   "leftover": [],
+   "gpu_mib": 1635
+  }
+ },
+ "mtile32": {
+  "T_steady_s": 10.557,
+  "chunk_time_s": 10.556,
+  "window_s": 41.428,
+  "chunks_eq": 3.924,
+  "busy_s_per_chunk": 10.55,
+  "idle_s_per_chunk": 0.006,
+  "prefill": {
+   "all_lines": [
+    202.46,
+    773.14,
+    771.58,
+    771.56,
+    768.35,
+    768.07,
+    766.96,
+    2303.54,
+    588.3
+   ],
+   "steady_c2_c7": [
+    773.14,
+    771.58,
+    771.56,
+    768.35,
+    768.07,
+    766.96
+   ],
+   "median_tok_s": 769.95,
+   "chunk_s_median": 10.556
+  },
+  "dense_term": {
+   "s_per_chunk": 1.6402,
+   "launches_per_chunk": 348.84,
+   "launch_anchor": 356,
+   "launch_liveness": "CHECK",
+   "expected_gridY": 254,
+   "gridY_mismatch_classes": {},
+   "classes": {
+    "kda_o_proj": {
+     "n_per_chunk": 14.78,
+     "med_ms": 14.321,
+     "s_per_chunk": 0.2056,
+     "med_gridX": 128,
+     "med_gridY": 254
+    },
+    "shexp_gate_up": {
+     "n_per_chunk": 84.09,
+     "med_ms": 1.842,
+     "s_per_chunk": 0.1574,
+     "med_gridX": 64,
+     "med_gridY": 254
+    },
+    "shexp_down": {
+     "n_per_chunk": 75.43,
+     "med_ms": 1.871,
+     "s_per_chunk": 0.3285,
+     "med_gridX": 128,
+     "med_gridY": 254
+    },
+    "kda_in_proj_half": {
+     "n_per_chunk": 67.78,
+     "med_ms": 11.163,
+     "s_per_chunk": 0.7809,
+     "med_gridX": 389,
+     "med_gridY": 254
+    },
+    "kda_ssm_f_b/g_b": {
+     "n_per_chunk": 67.78,
+     "med_ms": 0.241,
+     "s_per_chunk": 0.017,
+     "med_gridX": 256,
+     "med_gridY": 254
+    },
+    "mla_q_a": {
+     "n_per_chunk": 10.96,
+     "med_ms": 1.371,
+     "s_per_chunk": 0.0154,
+     "med_gridX": 48,
+     "med_gridY": 254
+    },
+    "mla_q_b": {
+     "n_per_chunk": 10.96,
+     "med_ms": 5.497,
+     "s_per_chunk": 0.0618,
+     "med_gridX": 512,
+     "med_gridY": 254
+    },
+    "mla_kv_a_mqa": {
+     "n_per_chunk": 10.96,
+     "med_ms": 0.47,
+     "s_per_chunk": 0.0051,
+     "med_gridX": 16,
+     "med_gridY": 254
+    },
+    "dense_ffn_gate_up": {
+     "n_per_chunk": 6.12,
+     "med_ms": 11.031,
+     "s_per_chunk": 0.0685,
+     "med_gridX": 384,
+     "med_gridY": 254
+    }
+   }
+  },
+  "kda_in_proj": {
+   "mode": "split",
+   "launches_per_chunk": 67.78,
+   "expected_launches_per_chunk": 68,
+   "liveness_count": "PASS",
+   "per_half_launch_med_ms": 11.163,
+   "tflop_per_s_per_half": 74.25,
+   "s_per_chunk_kernels": 0.7809,
+   "med_gridX": 389,
+   "med_gridY": 254
+  },
+  "kda_share_s_per_chunk": 0.7809,
+  "grouped_moe": {
+   "per_name": {
+    "moe_iq3_xxs": {
+     "n_per_chunk": 81.54,
+     "s_per_chunk": 2.7401
+    },
+    "moe_iq4_xs": {
+     "n_per_chunk": 40.77,
+     "s_per_chunk": 1.5239
+    },
+    "moe_q6_K": {
+     "n_per_chunk": 3.06,
+     "s_per_chunk": 0.0878
+    }
+   },
+   "total_s_per_chunk": 4.3518,
+   "align": {
+    "n_per_chunk": 42.04,
+    "s_per_chunk": 0.00109
+   }
+  },
+  "fetch_copies_s_per_chunk": 3.1113,
+  "rest_s_per_chunk": 1.4468,
+  "decode": {
+   "wall_s": 8.49,
+   "error": null,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "steady_tok_s": 14.62,
+   "p50_tok_s": 14.42,
+   "avg_tok_s": 7.42,
+   "min_inst_tok_s": 9.84,
+   "new_token": 49,
+   "cached_token": 65536
+  },
+  "prompts": [
+   {
+    "i": 0,
+    "prompt": "What is 17 * 23? Answer with just the number.",
+    "output_sha256": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+    "error": null,
+    "completion_tokens": 44,
+    "cached_token": 0,
+    "wall_s": 6.31
+   },
+   {
+    "i": 1,
+    "prompt": "Name the capital of France and one famous landmark there. One sentence.",
+    "output_sha256": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 10.14
+   },
+   {
+    "i": 2,
+    "prompt": "Write a haiku about rain on a tin roof.",
+    "output_sha256": "80c32ad5cc726929b787562bf8036751b338bcba84555b878e0dbab990000c68",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.57
+   },
+   {
+    "i": 3,
+    "prompt": "Explain in two sentences why the sky is blue.",
+    "output_sha256": "630eb3558fd12ccc22c7eb24934a63ebaff749de4fa0a0c4098e331ece0b5a3c",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.46
+   },
+   {
+    "i": 4,
+    "prompt": "Translate 'good morning' into German, French, and Spanish.",
+    "output_sha256": "bffd00bd179b4e21da522a70ca23638a27088544266a4c086ac8b91621d8a148",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.94
+   },
+   {
+    "i": 5,
+    "prompt": "Count from 1 to 20, comma separated.",
+    "output_sha256": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.88
+   }
+  ],
+  "server_env_pins": {
+   "FREETOKEN_GGUF_MOE_MTILE": "32",
+   "FREETOKEN_GGUF_DENSE_MTILE": "32",
+   "NSYS_SESSION": "mtile32cap"
+  },
+  "graph_capture_lines": [
+   "\u001b[1m[2026-09-20|01:38:02|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Start capturing CUDA graphs with sizes: [1]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.15 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]ninja: no work to do.",
+   "Capturing graphs: bs = 1   | avail_mem = 4.15 GiB: 100%|██████████| 1/1 [00:04<00:00,  4.08s/batch]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.15 GiB: 100%|██████████| 1/1 [00:04<00:00,  4.08s/batch]"
+  ],
+  "capture": {
+   "started": true,
+   "stopped": true,
+   "failed": null,
+   "n_thr": 6,
+   "t_start": 1789857543.4373868,
+   "t_stop": 1789857589.5931244,
+   "start_rc": 0,
+   "start_err": "",
+   "stop_rc": 0,
+   "stop_err": "                    ] report1.nsys-rep\n[1/1] [====27%                     ] report1.nsys-rep\n[1/1] [=====32%                    ] report1.nsys-rep\n[1/1] [=======36%                  ] report1.nsys-rep\n[1/1] [========40%                 ] report1.nsys-rep\n[1/1] [=========45%                ] report1.nsys-rep\n[1/1] [==========49%               ] report1.nsys-rep\n[1/1] [===========51%              ] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\nGenerated:\n\t/media/ai/src/FreeToken/.tasks/dense-q80-gemm/report1.nsys-rep\n"
+  },
+  "teardown": {
+   "leftover": [],
+   "gpu_mib": 1495
+  }
+ },
+ "mtile64": {
+  "T_steady_s": 10.262,
+  "chunk_time_s": 10.262,
+  "window_s": 39.47,
+  "chunks_eq": 3.846,
+  "busy_s_per_chunk": 10.256,
+  "idle_s_per_chunk": 0.006,
+  "prefill": {
+   "all_lines": [
+    210.66,
+    795.8,
+    791.15,
+    792.04,
+    792.14,
+    792.11,
+    786.6,
+    2339.47,
+    588.7
+   ],
+   "steady_c2_c7": [
+    795.8,
+    791.15,
+    792.04,
+    792.14,
+    792.11,
+    786.6
+   ],
+   "median_tok_s": 792.08,
+   "chunk_s_median": 10.262
+  },
+  "dense_term": {
+   "s_per_chunk": 1.3855,
+   "launches_per_chunk": 349.94,
+   "launch_anchor": 356,
+   "launch_liveness": "CHECK",
+   "expected_gridY": 127,
+   "gridY_mismatch_classes": {},
+   "classes": {
+    "kda_o_proj": {
+     "n_per_chunk": 11.96,
+     "med_ms": 12.173,
+     "s_per_chunk": 0.1476,
+     "med_gridX": 128,
+     "med_gridY": 127
+    },
+    "shexp_gate_up": {
+     "n_per_chunk": 84.23,
+     "med_ms": 1.556,
+     "s_per_chunk": 0.1342,
+     "med_gridX": 64,
+     "med_gridY": 127
+    },
+    "shexp_down": {
+     "n_per_chunk": 78.52,
+     "med_ms": 1.682,
+     "s_per_chunk": 0.3059,
+     "med_gridX": 128,
+     "med_gridY": 127
+    },
+    "kda_in_proj_half": {
+     "n_per_chunk": 68.12,
+     "med_ms": 9.394,
+     "s_per_chunk": 0.6563,
+     "med_gridX": 389,
+     "med_gridY": 127
+    },
+    "kda_ssm_f_b/g_b": {
+     "n_per_chunk": 68.12,
+     "med_ms": 0.202,
+     "s_per_chunk": 0.0142,
+     "med_gridX": 256,
+     "med_gridY": 127
+    },
+    "mla_q_a": {
+     "n_per_chunk": 10.92,
+     "med_ms": 1.157,
+     "s_per_chunk": 0.0132,
+     "med_gridX": 48,
+     "med_gridY": 127
+    },
+    "mla_q_b": {
+     "n_per_chunk": 10.92,
+     "med_ms": 4.616,
+     "s_per_chunk": 0.0515,
+     "med_gridX": 512,
+     "med_gridY": 127
+    },
+    "mla_kv_a_mqa": {
+     "n_per_chunk": 10.92,
+     "med_ms": 0.396,
+     "s_per_chunk": 0.0044,
+     "med_gridX": 16,
+     "med_gridY": 127
+    },
+    "dense_ffn_gate_up": {
+     "n_per_chunk": 6.24,
+     "med_ms": 9.276,
+     "s_per_chunk": 0.0581,
+     "med_gridX": 384,
+     "med_gridY": 127
+    }
+   }
+  },
+  "kda_in_proj": {
+   "mode": "split",
+   "launches_per_chunk": 68.12,
+   "expected_launches_per_chunk": 68,
+   "liveness_count": "PASS",
+   "per_half_launch_med_ms": 9.394,
+   "tflop_per_s_per_half": 88.23,
+   "s_per_chunk_kernels": 0.6563,
+   "med_gridX": 389,
+   "med_gridY": 127
+  },
+  "kda_share_s_per_chunk": 0.6563,
+  "grouped_moe": {
+   "per_name": {
+    "moe_iq3_xxs": {
+     "n_per_chunk": 81.63,
+     "s_per_chunk": 2.7411
+    },
+    "moe_iq4_xs": {
+     "n_per_chunk": 40.82,
+     "s_per_chunk": 1.5259
+    },
+    "moe_q6_K": {
+     "n_per_chunk": 3.12,
+     "s_per_chunk": 0.0903
+    }
+   },
+   "total_s_per_chunk": 4.3573,
+   "align": {
+    "n_per_chunk": 41.86,
+    "s_per_chunk": 0.00108
+   }
+  },
+  "fetch_copies_s_per_chunk": 3.0742,
+  "rest_s_per_chunk": 1.4387,
+  "decode": {
+   "wall_s": 8.81,
+   "error": null,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "steady_tok_s": 13.53,
+   "p50_tok_s": 13.74,
+   "avg_tok_s": 7.15,
+   "min_inst_tok_s": 9.36,
+   "new_token": 49,
+   "cached_token": 65536
+  },
+  "prompts": [
+   {
+    "i": 0,
+    "prompt": "What is 17 * 23? Answer with just the number.",
+    "output_sha256": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+    "error": null,
+    "completion_tokens": 44,
+    "cached_token": 0,
+    "wall_s": 6.52
+   },
+   {
+    "i": 1,
+    "prompt": "Name the capital of France and one famous landmark there. One sentence.",
+    "output_sha256": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.93
+   },
+   {
+    "i": 2,
+    "prompt": "Write a haiku about rain on a tin roof.",
+    "output_sha256": "fe5fba17a6283ff0f014c5fcd53d83c2d888c8c3325c093fcc2629df41c5b94b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.81
+   },
+   {
+    "i": 3,
+    "prompt": "Explain in two sentences why the sky is blue.",
+    "output_sha256": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 10.06
+   },
+   {
+    "i": 4,
+    "prompt": "Translate 'good morning' into German, French, and Spanish.",
+    "output_sha256": "717dc9da1046ec8af635d264224996365548c6db1a2ef35cb421ab61e13bce94",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.44
+   },
+   {
+    "i": 5,
+    "prompt": "Count from 1 to 20, comma separated.",
+    "output_sha256": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.52
+   }
+  ],
+  "server_env_pins": {
+   "FREETOKEN_GGUF_MOE_MTILE": "32",
+   "FREETOKEN_GGUF_DENSE_MTILE": "64",
+   "NSYS_SESSION": "mtile64cap"
+  },
+  "graph_capture_lines": [
+   "\u001b[1m[2026-09-20|01:46:26|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Start capturing CUDA graphs with sizes: [1]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]ninja: no work to do.",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.49s/batch]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.49s/batch]"
+  ],
+  "capture": {
+   "started": true,
+   "stopped": true,
+   "failed": null,
+   "n_thr": 6,
+   "t_start": 1789858042.9489677,
+   "t_stop": 1789858087.2673047,
+   "start_rc": 0,
+   "start_err": "",
+   "stop_rc": 0,
+   "stop_err": "                    ] report1.nsys-rep\n[1/1] [====28%                     ] report1.nsys-rep\n[1/1] [=====32%                    ] report1.nsys-rep\n[1/1] [=======37%                  ] report1.nsys-rep\n[1/1] [========41%                 ] report1.nsys-rep\n[1/1] [=========45%                ] report1.nsys-rep\n[1/1] [===========50%              ] report1.nsys-rep\n[1/1] [===========51%              ] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\nGenerated:\n\t/media/ai/src/FreeToken/.tasks/dense-q80-gemm/report1.nsys-rep\n"
+  },
+  "teardown": {
+   "leftover": [],
+   "gpu_mib": 1397
+  }
+ },
+ "comparison": {
+  "sweep_table": [
+   {
+    "tile": 4,
+    "prefill_median_tok_s": 563.9,
+    "delta_pct_vs_tile4": 0.0,
+    "chunk_time_s": 14.414,
+    "dense_term_s_per_chunk": 5.5148,
+    "dense_launches_per_chunk": 348.8,
+    "kda_launches_per_chunk": 67.88,
+    "kda_per_half_ms": 37.823,
+    "expected_gridY": 2032,
+    "gridY_mismatch_classes": {},
+    "decode_steady_tok_s": 13.79
+   },
+   {
+    "tile": 8,
+    "prefill_median_tok_s": 658.45,
+    "delta_pct_vs_tile4": 16.77,
+    "chunk_time_s": 12.344,
+    "dense_term_s_per_chunk": 3.3714,
+    "dense_launches_per_chunk": 346.38,
+    "kda_launches_per_chunk": 67.31,
+    "kda_per_half_ms": 23.549,
+    "expected_gridY": 1016,
+    "gridY_mismatch_classes": {},
+    "decode_steady_tok_s": 14.36
+   },
+   {
+    "tile": 16,
+    "prefill_median_tok_s": 726.37,
+    "delta_pct_vs_tile4": 28.81,
+    "chunk_time_s": 11.19,
+    "dense_term_s_per_chunk": 2.223,
+    "dense_launches_per_chunk": 346.06,
+    "kda_launches_per_chunk": 67.7,
+    "kda_per_half_ms": 15.453,
+    "expected_gridY": 508,
+    "gridY_mismatch_classes": {},
+    "decode_steady_tok_s": 13.21
+   },
+   {
+    "tile": 32,
+    "prefill_median_tok_s": 769.95,
+    "delta_pct_vs_tile4": 36.54,
+    "chunk_time_s": 10.556,
+    "dense_term_s_per_chunk": 1.6402,
+    "dense_launches_per_chunk": 348.84,
+    "kda_launches_per_chunk": 67.78,
+    "kda_per_half_ms": 11.163,
+    "expected_gridY": 254,
+    "gridY_mismatch_classes": {},
+    "decode_steady_tok_s": 14.62
+   },
+   {
+    "tile": 64,
+    "prefill_median_tok_s": 792.08,
+    "delta_pct_vs_tile4": 40.46,
+    "chunk_time_s": 10.262,
+    "dense_term_s_per_chunk": 1.3855,
+    "dense_launches_per_chunk": 349.94,
+    "kda_launches_per_chunk": 68.12,
+    "kda_per_half_ms": 9.394,
+    "expected_gridY": 127,
+    "gridY_mismatch_classes": {},
+    "decode_steady_tok_s": 13.53
+   }
+  ],
+  "winner": "mtile64",
+  "winner_delta_pct": 40.46,
+  "validity_gate_mtile4": {
+   "tok_s": 563.9,
+   "delta_vs_class_561_50_pct": 0.43,
+   "band": "~-2..+3% same-mode",
+   "verdict": "PASS",
+   "plain_boot_context": [
+    546.5,
+    553.8
+   ]
+  },
+  "judge": "prefill median c2..c7 delta vs tile-4; report ANY direction honestly",
+  "decode_flat_check": {
+   "mtile4": {
+    "steady_tok_s": 13.79,
+    "cached_token": 65536,
+    "error": null
+   },
+   "mtile8": {
+    "steady_tok_s": 14.36,
+    "cached_token": 65536,
+    "error": null
+   },
+   "mtile16": {
+    "steady_tok_s": 13.21,
+    "cached_token": 65536,
+    "error": null
+   },
+   "mtile32": {
+    "steady_tok_s": 14.62,
+    "cached_token": 65536,
+    "error": null
+   },
+   "mtile64": {
+    "steady_tok_s": 13.53,
+    "cached_token": 65536,
+    "error": null
+   }
+  },
+  "bitwise_diff": {
+   "method": "6 greedy prompts, sha256 over the raw choices JSON, SAME-mode (all 5 boots nsys-instrumented)",
+   "baseline": "mtile4",
+   "winner": "mtile64",
+   "identical": false,
+   "per_prompt": [
+    {
+     "i": 0,
+     "equal": true,
+     "sha_mtile4": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+     "sha_winner": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+     "mtile4_error": null,
+     "winner_error": null
+    },
+    {
+     "i": 1,
+     "equal": true,
+     "sha_mtile4": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+     "sha_winner": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+     "mtile4_error": null,
+     "winner_error": null
+    },
+    {
+     "i": 2,
+     "equal": false,
+     "sha_mtile4": "e8d515592919ab7b47442a32a789bd3736b7cf43f0f744c1c13c6cfb9f60d677",
+     "sha_winner": "fe5fba17a6283ff0f014c5fcd53d83c2d888c8c3325c093fcc2629df41c5b94b",
+     "mtile4_error": null,
+     "winner_error": null
+    },
+    {
+     "i": 3,
+     "equal": false,
+     "sha_mtile4": "71df405b9e30abf321b7b5c1a0ab63b12c6caf34730a736f6280e2e1d808c6b1",
+     "sha_winner": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df",
+     "mtile4_error": null,
+     "winner_error": null
+    },
+    {
+     "i": 4,
+     "equal": false,
+     "sha_mtile4": "75875a1723e4be74c814be26933836b2d7f117f1355e6cc5074d46aa96a3bebf",
+     "sha_winner": "717dc9da1046ec8af635d264224996365548c6db1a2ef35cb421ab61e13bce94",
+     "mtile4_error": null,
+     "winner_error": null
+    },
+    {
+     "i": 5,
+     "equal": true,
+     "sha_mtile4": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+     "sha_winner": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+     "mtile4_error": null,
+     "winner_error": null
+    }
+   ]
+  }
+ }
+}

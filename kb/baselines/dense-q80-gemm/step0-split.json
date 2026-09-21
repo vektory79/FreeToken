@@ -1,0 +1,354 @@
+{
+ "meta": {
+  "report": "denseq80.nsys-rep",
+  "sqlite": "denseq80.sqlite",
+  "T_steady_median_s": 14.87,
+  "window_s": 57.519,
+  "chunks_eq": 3.868,
+  "boot_tok_s": 546.6,
+  "validity_gate_T44": "-1.8% vs the 556.43 class (546.6 tok/s = 8128/14.87; median of the per-chunk throughput lines 546.58), PASS (~-2% band)",
+  "MMQ_X_Q8_0": 4,
+  "MMQ_Y_Q8_0": 32,
+  "NWARPS": 4,
+  "moe_mtile_env": 32,
+  "L2_bytes": 100663296,
+  "L2_MiB": 96.0,
+  "device": "NVIDIA GeForce RTX 5090",
+  "device_props_source": "torch.cuda.get_device_properties(0) device query, Review-A 2026-09-19: L2_cache_size=100663296 B = 96.0 MiB, 170 SMs, 31.4 GiB",
+  "sustained_BW_GB_s": 1638,
+  "peak_BW_GB_s": 1792,
+  "generated_by": "python3 .tasks/dense-q80-gemm/final_split.py (deterministic; reads denseq80.sqlite read-only; also regenerates step0-projection-table.md)"
+ },
+ "dense_term": {
+  "kernel": "mul_mat_q8_0",
+  "launches_per_chunk_census": 322,
+  "launches_per_chunk_window_normalized": 314.1,
+  "seconds_per_chunk_median_based": 6.037,
+  "seconds_per_chunk_window_normalized": 5.988,
+  "pct_of_chunk": 40.6
+ },
+ "other_terms_per_chunk": {
+  "_provenance": "constants from the step0 nsys window sums; re-derivable from denseq80.sqlite (retained)",
+  "grouped_moe_mtile32": {
+   "moe_iq3_xxs": 2.749,
+   "moe_iq4_xs": 1.531,
+   "moe_q6_K": 0.09,
+   "total_s": 4.37,
+   "routed_moe_tflop_per_chunk_recount": 137.5,
+   "tflop_per_s_from_recount": 31.5
+  },
+  "fetch_copies_fast_index_copy_multi": 3.106,
+  "rest_attention_gdn_dsa_mhc_glue": 1.35
+ },
+ "regime": {
+  "verdict": "ALU/issue-bound at ~22 TFLOP/s per-MAC ceiling; NOT BW-bound",
+  "evidence": [
+   "measured/naive-model ratio 0.550-0.592 across classes (all classes 0.550-0.566 except ssm f_b/g_b 0.592) = the ~22 TF/s ceiling expressed in traffic units (pure-DRAM ceiling at 1638 GB/s = 12.34 TF/s for 0.1328 B/FLOP = 0.2656 B/MAC)",
+   "M-sweep on in_proj shape: time linear in M, per-MAC rate constant 18.1-19.9 TF/s from gridY=16 to 2032; naive-implied BW 2413-2660 GB/s > 1792 peak = impossible",
+   "format A/B at identical shape/MACs: q6_K (23% fewer weight bytes, heavier decode) is 6.3% SLOWER (ratio 1.063 vs traffic-model 0.772)",
+   "single exception: kda_in_proj_fused W=108.35 MB > L2 100.66 MB (96.0 MiB) -> 18.1 TF/s vs the 21.8-22.4 cluster (~ -17.5%); the deficit is a MIX, not L2 overflow alone: the same shape runs only 19.6-19.9 TF/s at small M (minimal re-read pressure), so the DRAM/L2-dependent component is ~6-9% and the rest is shape-inherent"
+  ],
+  "ncu": "blocked by ERR_NVGPUCTRPERM (user permission); software discriminators used instead"
+ },
+ "widening_projection_issue_bound": {
+  "model": "floor model: only the kda_in_proj L2 excess recovers, shrinking as (1 - 4/tile); all other classes held at measured tile-4 times; NOT a prediction - payoff UNMEASURED, decide via the T52 A/B (22 TF/s tile-invariance untested; v3a sibling family grew 13.7 -> 39.6 TF/s from tile 4 -> 32)",
+  "rate_anchor_tf_s": 22.0,
+  "excess_s4": 0.552,
+  "tile4_this_run": {
+   "dense_term_s": 6.037,
+   "in_proj_excess_recovered_s": 0.0,
+   "chunk_s": 14.87,
+   "tok_s": 546.6
+  },
+  "tile8": {
+   "dense_term_s": 5.761,
+   "in_proj_excess_recovered_s": 0.276,
+   "chunk_s": 14.59,
+   "tok_s": 556.9,
+   "e2e_vs_this_run_pct": 1.9
+  },
+  "tile16": {
+   "dense_term_s": 5.623,
+   "in_proj_excess_recovered_s": 0.414,
+   "chunk_s": 14.46,
+   "tok_s": 562.2,
+   "e2e_vs_this_run_pct": 2.9
+  },
+  "tile32": {
+   "dense_term_s": 5.554,
+   "in_proj_excess_recovered_s": 0.483,
+   "chunk_s": 14.39,
+   "tok_s": 564.9,
+   "e2e_vs_this_run_pct": 3.4
+  },
+  "tile64": {
+   "dense_term_s": 5.52,
+   "in_proj_excess_recovered_s": 0.517,
+   "chunk_s": 14.35,
+   "tok_s": 566.3,
+   "e2e_vs_this_run_pct": 3.6
+  }
+ },
+ "n_split_kda_in_proj": {
+  "at_19.6_tf_s": 0.24,
+  "at_19.9_tf_s": 0.28,
+  "upper_full_22tf_s": 0.55,
+  "note": "kda_in_proj N-split (2 x 12448 rows, each < L2, numerics-exact); conservative target = the same shape's M-sweep cap 19.6-19.9 TF/s"
+ },
+ "widening_projection_if_traffic_bound_REFUTED": {
+  "note": "1/tile dividend on the whole 6.04 s is refuted by the format A/B + M-sweep",
+  "tile32": {
+   "dense_s": 0.75,
+   "chunk_s": 9.58,
+   "tok_s": 848
+  }
+ },
+ "op_classes": {
+  "kda_in_proj_fused": {
+   "K": 4096,
+   "N": 24896,
+   "layers": 34,
+   "grid": [
+    778,
+    2032
+   ],
+   "launches_per_chunk": 34,
+   "median_ms_per_launch": 91.577,
+   "seconds_per_chunk": 3.1136,
+   "weight_MB": 108.35,
+   "W_over_L2": 1.08,
+   "naive_traffic_model_s_per_chunk": 4.5699,
+   "measured_over_naive_model": 0.681,
+   "tflop_per_s_measured": 18.1
+  },
+  "kda_o_proj": {
+   "K": 8192,
+   "N": 4096,
+   "layers": 34,
+   "grid": [
+    128,
+    2032
+   ],
+   "launches_per_chunk": 34,
+   "median_ms_per_launch": 25.02,
+   "seconds_per_chunk": 0.8507,
+   "weight_MB": 35.65,
+   "W_over_L2": 0.35,
+   "naive_traffic_model_s_per_chunk": 1.5037,
+   "measured_over_naive_model": 0.566,
+   "tflop_per_s_measured": 21.8
+  },
+  "mla_o_proj": {
+   "K": 16384,
+   "N": 4096,
+   "layers": 12,
+   "grid": [
+    128,
+    2032
+   ],
+   "launches_per_chunk": 12,
+   "median_ms_per_launch": 48.674,
+   "seconds_per_chunk": 0.5841,
+   "weight_MB": 71.3,
+   "W_over_L2": 0.71,
+   "naive_traffic_model_s_per_chunk": 1.0615,
+   "measured_over_naive_model": 0.55,
+   "tflop_per_s_measured": 22.41
+  },
+  "shexp_gate": {
+   "K": 4096,
+   "N": 2048,
+   "layers": 43,
+   "grid": [
+    64,
+    2032
+   ],
+   "launches_per_chunk": 43,
+   "median_ms_per_launch": 6.186,
+   "seconds_per_chunk": 0.266,
+   "weight_MB": 8.91,
+   "W_over_L2": 0.09,
+   "naive_traffic_model_s_per_chunk": 0.4754,
+   "measured_over_naive_model": 0.559,
+   "tflop_per_s_measured": 22.04
+  },
+  "shexp_up": {
+   "K": 4096,
+   "N": 2048,
+   "layers": 43,
+   "grid": [
+    64,
+    2032
+   ],
+   "launches_per_chunk": 43,
+   "median_ms_per_launch": 6.186,
+   "seconds_per_chunk": 0.266,
+   "weight_MB": 8.91,
+   "W_over_L2": 0.09,
+   "naive_traffic_model_s_per_chunk": 0.4754,
+   "measured_over_naive_model": 0.559,
+   "tflop_per_s_measured": 22.04
+  },
+  "shexp_down": {
+   "K": 2048,
+   "N": 4096,
+   "layers": 43,
+   "grid": [
+    128,
+    2032
+   ],
+   "launches_per_chunk": 43,
+   "median_ms_per_launch": 6.185,
+   "seconds_per_chunk": 0.2659,
+   "weight_MB": 8.91,
+   "W_over_L2": 0.09,
+   "naive_traffic_model_s_per_chunk": 0.4754,
+   "measured_over_naive_model": 0.559,
+   "tflop_per_s_measured": 22.05
+  },
+  "mla_q_b": {
+   "K": 1536,
+   "N": 16384,
+   "layers": 12,
+   "grid": [
+    512,
+    2032
+   ],
+   "launches_per_chunk": 12,
+   "median_ms_per_launch": 18.753,
+   "seconds_per_chunk": 0.225,
+   "weight_MB": 26.74,
+   "W_over_L2": 0.27,
+   "naive_traffic_model_s_per_chunk": 0.398,
+   "measured_over_naive_model": 0.565,
+   "tflop_per_s_measured": 21.82
+  },
+  "mla_q_a": {
+   "K": 4096,
+   "N": 1536,
+   "layers": 12,
+   "grid": [
+    48,
+    2032
+   ],
+   "launches_per_chunk": 12,
+   "median_ms_per_launch": 4.604,
+   "seconds_per_chunk": 0.0553,
+   "weight_MB": 6.68,
+   "W_over_L2": 0.07,
+   "naive_traffic_model_s_per_chunk": 0.0995,
+   "measured_over_naive_model": 0.555,
+   "tflop_per_s_measured": 22.21
+  },
+  "mla_kv_a_mqa": {
+   "K": 4096,
+   "N": 512,
+   "layers": 12,
+   "grid": [
+    16,
+    2032
+   ],
+   "launches_per_chunk": 12,
+   "median_ms_per_launch": 1.547,
+   "seconds_per_chunk": 0.0186,
+   "weight_MB": 2.23,
+   "W_over_L2": 0.02,
+   "naive_traffic_model_s_per_chunk": 0.0332,
+   "measured_over_naive_model": 0.56,
+   "tflop_per_s_measured": 22.03
+  },
+  "dense_ffn_gate": {
+   "K": 4096,
+   "N": 12288,
+   "layers": 3,
+   "grid": [
+    384,
+    2032
+   ],
+   "launches_per_chunk": 3,
+   "median_ms_per_launch": 37.265,
+   "seconds_per_chunk": 0.1118,
+   "weight_MB": 53.48,
+   "W_over_L2": 0.53,
+   "naive_traffic_model_s_per_chunk": 0.199,
+   "measured_over_naive_model": 0.562,
+   "tflop_per_s_measured": 21.96
+  },
+  "dense_ffn_up": {
+   "K": 4096,
+   "N": 12288,
+   "layers": 3,
+   "grid": [
+    384,
+    2032
+   ],
+   "launches_per_chunk": 3,
+   "median_ms_per_launch": 37.265,
+   "seconds_per_chunk": 0.1118,
+   "weight_MB": 53.48,
+   "W_over_L2": 0.53,
+   "naive_traffic_model_s_per_chunk": 0.199,
+   "measured_over_naive_model": 0.562,
+   "tflop_per_s_measured": 21.96
+  },
+  "dense_ffn_down": {
+   "K": 12288,
+   "N": 4096,
+   "layers": 3,
+   "grid": [
+    128,
+    2032
+   ],
+   "launches_per_chunk": 3,
+   "median_ms_per_launch": 37.453,
+   "seconds_per_chunk": 0.1124,
+   "weight_MB": 53.48,
+   "W_over_L2": 0.53,
+   "naive_traffic_model_s_per_chunk": 0.199,
+   "measured_over_naive_model": 0.565,
+   "tflop_per_s_measured": 21.85
+  },
+  "kda_ssm_f_b": {
+   "K": 128,
+   "N": 8192,
+   "layers": 34,
+   "grid": [
+    256,
+    2032
+   ],
+   "launches_per_chunk": 34,
+   "median_ms_per_launch": 0.818,
+   "seconds_per_chunk": 0.0278,
+   "weight_MB": 1.11,
+   "W_over_L2": 0.01,
+   "naive_traffic_model_s_per_chunk": 0.047,
+   "measured_over_naive_model": 0.592,
+   "tflop_per_s_measured": 20.84
+  },
+  "kda_ssm_g_b": {
+   "K": 128,
+   "N": 8192,
+   "layers": 34,
+   "grid": [
+    256,
+    2032
+   ],
+   "launches_per_chunk": 34,
+   "median_ms_per_launch": 0.818,
+   "seconds_per_chunk": 0.0278,
+   "weight_MB": 1.11,
+   "W_over_L2": 0.01,
+   "naive_traffic_model_s_per_chunk": 0.047,
+   "measured_over_naive_model": 0.592,
+   "tflop_per_s_measured": 20.84
+  }
+ },
+ "totals": {
+  "measured_s_per_chunk": 6.037,
+  "naive_model_s_per_chunk": 9.783,
+  "measured_over_model": 0.617,
+  "dense_tflop_per_chunk": 120.7,
+  "dense_tflop_per_s_avg": 20.0,
+  "dense_floor_at_22tf_s": 5.48
+ }
+}

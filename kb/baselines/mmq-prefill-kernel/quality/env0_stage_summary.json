@@ -1,0 +1,43 @@
+{
+ "stage": "env0",
+ "env": "0",
+ "cmd": [
+  "/media/ai/src/FreeToken/.venv/bin/ft",
+  "serve",
+  "--port",
+  "18801",
+  "--host",
+  "127.0.0.1",
+  "--model-path",
+  "/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL.gguf",
+  "--moe-cache-auto",
+  "--kv-reserve-tokens",
+  "500000",
+  "--kv-cache-dtype",
+  "fp8",
+  "--memory-ratio",
+  "0.85",
+  "--max-prefill-length",
+  "8191",
+  "--moe-strategy",
+  "hybrid",
+  "--moe-cpu-threads",
+  "16",
+  "--max-running-requests",
+  "1"
+ ],
+ "facts": {
+  "ready_s": 124.37250876426697,
+  "failpat": null,
+  "moe_cache": "moe_cache_size=0",
+  "kv_alloc": "Allocating 500224 tokens for KV cache, K + V = 2.97 GiB",
+  "free_mem": "Free memory after initialization: 4.04 GiB",
+  "marker": null,
+  "fetch_fraction": "fetching 30.7% of each decode step's expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU",
+  "isa": "pool 1/3: gguf (18, 18, 23) x39 layers]: threads=15 (pinned to cores 0..22) isa=avx2+gguf(iq/qk)+avx2-w4a8k fmt=iq3_xxs (up=iq3_xxs, down=iq4_xs) H=4096 I=2048 "
+ },
+ "battery": {
+  "rc": 0,
+  "wall_s": 375.3
+ }
+}

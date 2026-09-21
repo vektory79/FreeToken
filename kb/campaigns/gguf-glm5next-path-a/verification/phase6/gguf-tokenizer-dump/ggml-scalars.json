@@ -1,0 +1,10 @@
+{
+ "tokenizer.ggml.bos_token_id": 154822,
+ "tokenizer.ggml.eom_token_id": 154829,
+ "tokenizer.ggml.eos_token_id": 154820,
+ "tokenizer.ggml.eot_token_id": 154827,
+ "tokenizer.ggml.model": "gpt2",
+ "tokenizer.ggml.padding_token_id": 154820,
+ "tokenizer.ggml.pre": "glm4",
+ "tokenizer.ggml.unknown_token_id": 154820
+}

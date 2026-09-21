@@ -1,0 +1,18 @@
+{
+ "idx": 23,
+ "kind": "reason",
+ "prompt": "Which is larger: 2^10 or 10^3? Show a short justification.",
+ "max_tokens": 128,
+ "greedy_mode": "temp0_topk1",
+ "wall_s": 11.92,
+ "error": null,
+ "reasoning": "The user asks which is larger: 2^10 or 10^3, with a short justification.\n\n2^10 = 1024\n10^3 = 1000\n\nSo 2^10 = 1024 > 1000 = 10^3.\n\nShort justification: compute both directly. 2^10 = 2·2·2·2·2·2·2·2·2·2 = 1024. 10^3 = 1000. Since 1024 > 1000, 2^10 is larger.\n\nAlternatively, a slicker justification:",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 31,
+  "completion_tokens": 127,
+  "total_tokens": 158
+ },
+ "sha256": "b503754bbf6ed3f0e3dc0d5b38264dc38807cde2f027a0111ab61f358d686967"
+}

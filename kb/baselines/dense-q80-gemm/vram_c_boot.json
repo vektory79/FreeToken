@@ -1,0 +1,88 @@
+{
+ "name": "c",
+ "ratio": "0.75",
+ "reserve": "400000",
+ "chunk": "8191",
+ "mode": "plain (no nsys, no knobs set)",
+ "csv": "/media/ai/src/FreeToken/.tasks/dense-q80-gemm/vram_c.csv",
+ "logpath": "/media/ai/src/FreeToken/.tasks/ft-gguf-serve-tuning/logs/vram_c.log",
+ "pre_census": {
+  "ts": "2026-09-20T11:19:44Z",
+  "tag": "preflight",
+  "boot": "c",
+  "procs": [],
+  "gpu_vram": "1551 MiB, 30599 MiB",
+  "gpu_compute_apps": "784032, hoptodesk, 302 MiB\n832729, /app/bin/hoptodesk, 190 MiB",
+  "sem_mp": "15"
+ },
+ "cmd": [
+  "/media/ai/src/FreeToken/.venv/bin/ft",
+  "serve",
+  "--port",
+  "18801",
+  "--host",
+  "127.0.0.1",
+  "--model-path",
+  "/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL.gguf",
+  "--moe-cache-auto",
+  "--kv-reserve-tokens",
+  "400000",
+  "--kv-cache-dtype",
+  "fp8",
+  "--memory-ratio",
+  "0.75",
+  "--max-prefill-length",
+  "8191",
+  "--moe-strategy",
+  "hybrid",
+  "--moe-cpu-threads",
+  "16",
+  "--max-running-requests",
+  "1"
+ ],
+ "ready": {
+  "ok": false,
+  "ready_s": 26.0,
+  "why": "failpat: Traceback (most recent call last)"
+ },
+ "failure_lines": [
+  "  return torch.from_numpy(self._raw)",
+  "Process freetoken-TP0-scheduler:",
+  "\u001b[1m[2026-09-20|14:20:09|FrontendAPI]\u001b[0m \u001b[31mERROR   \u001b[0m Backend supervisor: ValueError: --moe-cache-auto budget cannot fund the per-signature slot floors: 3 signature groups (39/1/2 layers; groups [[0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40], [8], [9, 41]]) each need 288 slots (one whole expert layer) at 10878976/15794176/13303808 bytes/slot, a byte-weighted minimum of 1059 layer-0-width slots vs the planned 917; lower --kv-reserve-tokens or raise --memory-ratio",
+  "Traceback (most recent call last):",
+  "Process freetoken-TP0-scheduler:",
+  "\u001b[1m[2026-09-20|14:20:09|FrontendAPI]\u001b[0m \u001b[31mERROR   \u001b[0m Backend supervisor: ValueError: --moe-cache-auto budget cannot fund the per-signature slot floors: 3 signature groups (39/1/2 layers; groups [[0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40], [8], [9, 41]]) each need 288 slots (one whole expert layer) at 10878976/15794176/13303808 bytes/slot, a byte-weighted minimum of 1059 layer-0-width slots vs the planned 917; lower --kv-reserve-tokens or raise --memory-ratio",
+  "Traceback (most recent call last):",
+  "  File \"/home/linuxbrew/.linuxbrew/opt/python@3.14/lib/python3.14/multiprocessing/process.py\", line 320, in _bootstrap",
+  "    check_partition_floors(groups, per_group_slots, config.model_config.num_experts, envelope)",
+  "    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+  "  File \"/media/ai/src/FreeToken/python/freetoken/engine/cache_budget.py\", line 77, in check_partition_floors",
+  "    raise ValueError(",
+  "    ...<5 lines>...",
+  "    )",
+  "ValueError: --moe-cache-auto budget cannot fund the per-signature slot floors: 3 signature groups (39/1/2 layers; groups [[0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40], [8], [9, 41]]) each need 288 slots (one whole expert layer) at 10878976/15794176/13303808 bytes/slot, a byte-weighted minimum of 1059 layer-0-width slots vs the planned 917; lower --kv-reserve-tokens or raise --memory-ratio"
+ ],
+ "teardown": {
+  "grace_expired": false,
+  "rc": -9,
+  "leftovers": [],
+  "gpu_mib": 1551
+ },
+ "post_census": {
+  "ts": "2026-09-20T11:20:14Z",
+  "tag": "postflight",
+  "boot": "c",
+  "procs": [],
+  "gpu_vram": "1551 MiB, 30599 MiB",
+  "gpu_compute_apps": "784032, hoptodesk, 302 MiB\n832729, /app/bin/hoptodesk, 190 MiB",
+  "sem_mp": "18"
+ },
+ "peaks_mib": {
+  "teardown": 11217
+ },
+ "peak_overall_mib": 11217,
+ "peak_free_mib": {
+  "teardown": 21390
+ },
+ "peak_free_overall_mib": 21390
+}

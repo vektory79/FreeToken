@@ -1,0 +1,45 @@
+report: /media/ai/src/FreeToken/.tasks/mmq-prefill-kernel/report3.nsys-rep
+export rc: 0 ===============================98%  ]
+[==========================================================================99% ]
+[==========================================================================100%]
+
+kernel records: 386783
+phases (gap > 1.5 s): 2
+  phase 0: kernels 157938  span   216.46 s  first elementwise_kernel_with_index
+  phase 1: kernels 228845  span     7.87 s  first elementwise_kernel_with_index
+
+=== per-phase summary ===
+{"idx": 0, "n": 157938, "span_s": 7.87, "t0_s": 3.01, "vec_count": 378, "grouped_count": 1134, "align_count": 378, "grouped_names": ["moe_iq3_xxs", "moe_iq4_xs", "moe_q6_K"]}
+   top: [('vectorized_elementwise_kernel', 50321), ('elementwise_kernel', 20641), ('elementwise_kernel_with_index', 5816), ('chunk_gla_fwd_kernel_o', 5708), ('quantize_q8_1', 5304), ('computeBlockDigitCounts', 5148), ('computeDigitCumSum', 5148), ('computeBlockwiseWithinKCounts', 5148), ('chunk_kda_scaled_dot_kkt_fwd_kernel_intra_su', 4324), ('merge_16x16_to_64x64_inverse_kernel', 3998)]
+{"idx": 1, "n": 228845, "span_s": 7.87, "t0_s": 222.66, "vec_count": 7938, "grouped_count": 126, "align_count": 42, "grouped_names": ["moe_iq3_xxs", "moe_iq4_xs", "moe_q6_K"]}
+   top: [('vectorized_elementwise_kernel', 51767), ('quantize_q8_1', 28288), ('mul_mat_vec_q', 19909), ('elementwise_kernel', 17494), ('unrolled_elementwise_kernel', 9553), ('moe_vec_q', 7938), ('CatArrayBatchedCopy_vectorized', 6976), ('kernel_cutlass_kernel_flashinfernormkernelsr', 5824), ('_mhc_stage1_kernel', 5760), ('_mhc_stage2_kernel', 5760)]
+
+{
+ "report": "/media/ai/src/FreeToken/.tasks/mmq-prefill-kernel/report3.nsys-rep",
+ "n_phases": 2,
+ "boot": {
+  "idx": 0,
+  "n": 157938,
+  "span_s": 7.87,
+  "vec_count": 378,
+  "grouped_count": 1134
+ },
+ "prefill": {
+  "idx": 1,
+  "n": 228845,
+  "span_s": 7.87,
+  "vec_count": 7938,
+  "grouped_count": 126,
+  "align_count": 42,
+  "grouped_names": [
+   "moe_iq3_xxs",
+   "moe_iq4_xs",
+   "moe_q6_K"
+  ]
+ },
+ "decode": null,
+ "grouped_kernels_present_prefill": true,
+ "moe_vec_absent_prefill_eager": false,
+ "moe_vec_present_decode": false,
+ "moe_align_present": true
+}

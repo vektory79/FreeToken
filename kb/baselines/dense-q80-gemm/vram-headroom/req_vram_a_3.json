@@ -1,0 +1,1 @@
+{"model": "GLM-5.3-Flash-UD-Q3_K_XL.gguf", "messages": [{"role": "user", "content": "Explain in two sentences why the sky is blue."}], "max_tokens": 96, "temperature": 0, "stream": false}

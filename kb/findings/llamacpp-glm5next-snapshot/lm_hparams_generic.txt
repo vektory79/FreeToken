@@ -1,0 +1,196 @@
+  1200	void llama_model_base::load_hparams(llama_model_loader & ml) {
+  1201	    const gguf_context * ctx = ml.metadata;
+  1202	
+  1203	    // get metadata as string
+  1204	    for (int i = 0; i < gguf_get_n_kv(ctx); i++) {
+  1205	        gguf_type type = gguf_get_kv_type(ctx, i);
+  1206	        if (type == GGUF_TYPE_ARRAY) {
+  1207	            continue;
+  1208	        }
+  1209	        const char * name = gguf_get_key(ctx, i);
+  1210	        const std::string value = gguf_kv_to_str(ctx, i);
+  1211	        gguf_kv.emplace(name, value);
+  1212	    }
+  1213	
+  1214	    // get general kv
+  1215	    ml.get_key(LLM_KV_GENERAL_NAME, name, false);
+  1216	
+  1217	    // everything past this point is not vocab-related
+  1218	    // for CLIP models, we only need to load tensors, no hparams
+  1219	    if (hparams.vocab_only || ml.get_arch() == LLM_ARCH_CLIP) {
+  1220	        return;
+  1221	    }
+  1222	
+  1223	    ml.get_key(LLM_KV_CONTEXT_LENGTH,          hparams.n_ctx_train);
+  1224	    ml.get_key(LLM_KV_EMBEDDING_LENGTH,        hparams.n_embd);
+  1225	    ml.get_key(LLM_KV_EMBEDDING_LENGTH_OUT,    hparams.n_embd_out_impl, false);
+  1226	    ml.get_key(LLM_KV_ATTENTION_CAUSAL,        hparams.causal_attn,     false);
+  1227	    ml.get_key(LLM_KV_POOLING_TYPE,            hparams.pooling_type,    false);
+  1228	    ml.get_key(LLM_KV_BLOCK_COUNT,             hparams.n_layer_all);
+  1229	    GGML_ASSERT(hparams.n_layer_all > 0 && hparams.n_layer_all <= LLAMA_MAX_LAYERS);
+  1230	    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS,    hparams.n_layer_nextn,   false);
+  1231	    GGML_ASSERT(hparams.n_layer_nextn <= hparams.n_layer_all);
+  1232	    ml.get_key(LLM_KV_EXPERT_COUNT,            hparams.n_expert,        false);
+  1233	    std::fill(hparams.n_expert_used_arr.begin(), hparams.n_expert_used_arr.end(), 0);
+  1234	    ml.get_key_or_arr(LLM_KV_EXPERT_USED_COUNT, hparams.n_expert_used_arr, hparams.n_layer_all, false);
+  1235	    ml.get_key(LLM_KV_EXPERT_GROUP_COUNT,      hparams.n_expert_groups, false);
+  1236	    ml.get_key(LLM_KV_EXPERT_GROUP_USED_COUNT, hparams.n_group_used,    false);
+  1237	
+  1238	    if (arch == LLM_ARCH_HUNYUAN_VL || arch == LLM_ARCH_HUNYUAN_DENSE) {
+  1239	        if (hparams.n_expert <= 1) {
+  1240	            hparams.n_expert = 0;
+  1241	            std::fill(hparams.n_expert_used_arr.begin(), hparams.n_expert_used_arr.end(), 0);
+  1242	        }
+  1243	    }
+  1244	
+  1245	    if (arch == LLM_ARCH_WAVTOKENIZER_DEC) {
+  1246	        ml.get_key(LLM_KV_FEATURES_LENGTH,  hparams.n_embd);
+  1247	        ml.get_key(LLM_KV_EMBEDDING_LENGTH, hparams.n_embd_out_impl);
+  1248	
+  1249	        ml.get_key(LLM_KV_POSNET_EMBEDDING_LENGTH, hparams.posnet.n_embd);
+  1250	        ml.get_key(LLM_KV_POSNET_BLOCK_COUNT,      hparams.posnet.n_layer);
+  1251	
+  1252	        ml.get_key(LLM_KV_CONVNEXT_EMBEDDING_LENGTH, hparams.convnext.n_embd);
+  1253	        ml.get_key(LLM_KV_CONVNEXT_BLOCK_COUNT,      hparams.convnext.n_layer);
+  1254	
+  1255	        GGML_ASSERT(hparams.posnet.n_layer   <= hparams.n_layer_all);
+  1256	        GGML_ASSERT(hparams.convnext.n_layer <= hparams.n_layer_all);
+  1257	    }
+  1258	
+  1259	    // models may route a different number of experts per layer, so validate the maximum
+  1260	    uint32_t n_expert_used_max = hparams.n_expert_used_max();
+  1261	
+  1262	    GGML_ASSERT(hparams.n_expert <= LLAMA_MAX_EXPERTS);
+  1263	    GGML_ASSERT(n_expert_used_max <= hparams.n_expert);
+  1264	    if (hparams.n_expert > 0) {
+  1265	        GGML_ASSERT(n_expert_used_max > 0);
+  1266	        GGML_ASSERT(hparams.n_expert_groups < hparams.n_expert);
+  1267	        if (hparams.n_expert_groups > 1) {
+  1268	            GGML_ASSERT(hparams.n_expert % hparams.n_expert_groups == 0);
+  1269	            GGML_ASSERT(hparams.n_group_used > 0);
+  1270	            GGML_ASSERT(hparams.n_group_used < hparams.n_expert_groups);
+  1271	        }
+  1272	    } else {
+  1273	        GGML_ASSERT(n_expert_used_max == 0);
+  1274	        GGML_ASSERT(hparams.n_expert_groups == 0);
+  1275	    }
+  1276	
+  1277	    std::fill(hparams.n_head_arr.begin(),       hparams.n_head_arr.end(),       0);
+  1278	    std::fill(hparams.n_head_kv_arr.begin(),    hparams.n_head_kv_arr.end(),    0);
+  1279	    std::fill(hparams.n_ff_arr.begin(),         hparams.n_ff_arr.end(),         0);
+  1280	    std::fill(hparams.n_ff_exp_arr.begin(),     hparams.n_ff_exp_arr.end(),     0);
+  1281	
+  1282	    std::fill(hparams.rope_sections.begin(), hparams.rope_sections.end(), 0);
+  1283	    std::fill(hparams.rope_pattern.begin(),  hparams.rope_pattern.end(), 1);
+  1284	    std::fill(hparams.is_swa_impl.begin(),   hparams.is_swa_impl.end(), 0);
+  1285	    std::fill(hparams.is_recr_impl.begin(),  hparams.is_recr_impl.end(),  llm_arch_is_recurrent(ml.get_arch()) ? 1 : 0);
+  1286	    std::fill(hparams.is_indexer_full_impl.begin(), hparams.is_indexer_full_impl.end(), 0);
+  1287	
+  1288	    std::fill(hparams.xielu_alpha_n.begin(), hparams.xielu_alpha_n.end(), 0.0f);
+  1289	    std::fill(hparams.xielu_alpha_p.begin(), hparams.xielu_alpha_p.end(), 0.0f);
+  1290	    std::fill(hparams.xielu_beta.begin(),    hparams.xielu_beta.end(), 0.0f);
+  1291	    std::fill(hparams.xielu_eps.begin(),     hparams.xielu_eps.end(), 0.0f);
+  1292	
+  1293	    std::fill(hparams.swiglu_clamp_exp.begin(),   hparams.swiglu_clamp_exp.end(),   0.0f);
+  1294	    std::fill(hparams.swiglu_clamp_shexp.begin(), hparams.swiglu_clamp_shexp.end(), 0.0f);
+  1295	
+  1296	    ml.get_key_or_arr(LLM_KV_FEED_FORWARD_LENGTH,  hparams.n_ff_arr,   hparams.n_layer_all, false);
+  1297	    ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT, hparams.n_head_arr, hparams.n_layer_all, false);
+  1298	
+  1299	    // Populate deepstack_mapping_arr - initialized to -1 (no deepstack)
+  1300	    std::fill(hparams.deepstack_mapping_arr.begin(), hparams.deepstack_mapping_arr.end(), -1);
+  1301	
+  1302	    // n_head_kv is optional, default to n_head
+  1303	    hparams.n_head_kv_arr = hparams.n_head_arr;
+  1304	
+  1305	    ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, hparams.n_head_kv_arr, hparams.n_layer_all, false);
+  1306	
+  1307	    bool rope_finetuned = false;
+  1308	    ml.get_key(LLM_KV_ROPE_SCALING_FINETUNED, rope_finetuned, false);
+  1309	    hparams.rope_finetuned = rope_finetuned;
+  1310	
+  1311	    hparams.n_ctx_orig_yarn = hparams.n_ctx_train;
+  1312	    ml.get_key(LLM_KV_ROPE_SCALING_ORIG_CTX_LEN, hparams.n_ctx_orig_yarn, false);
+  1313	
+  1314	    // rope_freq_base (optional)
+  1315	    hparams.rope_freq_base_train = 10000.0f;
+  1316	    ml.get_key(LLM_KV_ROPE_FREQ_BASE, hparams.rope_freq_base_train, false);
+  1317	
+  1318	    std::string rope_scaling("linear");
+  1319	    ml.get_key(LLM_KV_ROPE_SCALING_TYPE, rope_scaling, false);
+  1320	    hparams.rope_scaling_type_train = llama_rope_scaling_type_from_string(rope_scaling);
+  1321	    GGML_ASSERT(hparams.rope_scaling_type_train != LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED);
+  1322	
+  1323	    // TODO: Handle SWA metadata similarly when models start implementing it
+  1324	    // rope_freq_scale (inverse of the kv) is optional
+  1325	    float ropescale = 0.0f;
+  1326	    if (!ml.get_key(LLM_KV_ROPE_SCALING_FACTOR, ropescale, false)) {
+  1327	        // try the old key name
+  1328	        ml.get_key(LLM_KV_ROPE_SCALE_LINEAR, ropescale, false);
+  1329	    }
+  1330	    hparams.rope_freq_scale_train = ropescale == 0.0f ? 1.0f : 1.0f/ropescale;
+  1331	
+  1332	    ml.get_key(LLM_KV_ROPE_SCALING_ATTN_FACTOR, hparams.rope_attn_factor, false);
+  1333	    ml.get_key(LLM_KV_ROPE_SCALING_ALPHA,       hparams.rope_scaling_alpha, false);
+  1334	
+  1335	    // non-transformer models do not have attention heads
+  1336	    if (hparams.n_head() > 0) {
+  1337	        // gpt-neox n_rot = rotary_pct * (n_embd / n_head)
+  1338	        // gpt-j n_rot = rotary_dim
+  1339	
+  1340	        hparams.n_embd_head_k_full = hparams.n_embd / hparams.n_head();
+  1341	        ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH, hparams.n_embd_head_k_full, false);
+  1342	
+  1343	        hparams.n_embd_head_v_full = hparams.n_embd / hparams.n_head();
+  1344	        ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH, hparams.n_embd_head_v_full, false);
+  1345	
+  1346	        // sanity check for n_rot (optional)
+  1347	        hparams.n_rot_full = hparams.n_embd_head_k_full;
+  1348	
+  1349	        ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT, hparams.n_rot_full, false);
+  1350	
+  1351	        if (arch == LLM_ARCH_LLAMA || arch == LLM_ARCH_DECI || arch == LLM_ARCH_FALCON || arch == LLM_ARCH_LLAMA_EMBED) {
+  1352	            if (hparams.n_rot_full != hparams.n_embd_head_k_full) {
+  1353	                throw std::runtime_error(format("invalid n_rot: %u, expected %u", hparams.n_rot_full, hparams.n_embd_head_k_full));
+  1354	            }
+  1355	        }
+  1356	    } else {
+  1357	        hparams.n_rot_full = 0;
+  1358	        hparams.n_embd_head_k_full = 0;
+  1359	        hparams.n_embd_head_v_full = 0;
+  1360	    }
+  1361	
+  1362	    // head size and n_rot for SWA layers
+  1363	    {
+  1364	        hparams.n_embd_head_k_swa = hparams.n_embd_head_k_full;
+  1365	        hparams.n_embd_head_v_swa = hparams.n_embd_head_v_full;
+  1366	        ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_SWA, hparams.n_embd_head_k_swa, false);
+  1367	        ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_SWA, hparams.n_embd_head_v_swa, false);
+  1368	
+  1369	        hparams.n_rot_swa = hparams.n_rot_full;
+  1370	        ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT_SWA, hparams.n_rot_swa, false);
+  1371	    }
+  1372	
+  1373	    // for classifier models
+  1374	    ml.get_arr(LLM_KV_CLASSIFIER_OUTPUT_LABELS, classifier_labels, false);
+  1375	    if (!classifier_labels.empty()) {
+  1376	        hparams.n_cls_out = classifier_labels.size();
+  1377	    }
+  1378	
+  1379	    // per-arch hparams
+  1380	    load_arch_hparams(ml);
+  1381	
+  1382	    pimpl->n_bytes = ml.n_bytes;
+  1383	
+  1384	    pimpl->desc_str = arch_name() + " " + type_name() + " " + ml.ftype_name();
+  1385	
+  1386	    pimpl->ftype = ml.ftype;
+  1387	
+  1388	    if (hparams.f_max_alibi_bias > 0.0f) {
+  1389	        hparams.use_alibi = true;
+  1390	    }
+  1391	
+  1392	    hparams.rope_type = llama_model_rope_type(this);
+  1393	}
+  1394	
+  1395	void llama_model_base::load_vocab(llama_model_loader & ml) {

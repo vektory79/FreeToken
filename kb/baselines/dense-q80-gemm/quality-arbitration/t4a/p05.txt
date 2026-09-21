@@ -1,0 +1,14 @@
+### reasoning
+The user is asking a classic physics question about why the sky is blue and why sunsets are red. This is a well-established scientific topic with a clear, correct answer: Rayleigh scattering.
+
+Let me think through the physics carefully to make sure I get it right:
+
+**Rayleigh Scattering Basics:**
+- Sunlight appears white but contains all colors of the visible spectrum (wavelengths roughly 380-700 nm)
+- When sunlight enters Earth's atmosphere, it interacts with gas molecules (primarily nitrogen N₂ and oxygen O₂)
+- These molecules are much smaller than the wavelength of visible light
+- Rayleigh scattering describes how light scatters off particles much smaller than its wavelength
+- The intensity of Rayleigh scattering is inversely proportional to the fourth power of wavelength: I
+
+### content
+

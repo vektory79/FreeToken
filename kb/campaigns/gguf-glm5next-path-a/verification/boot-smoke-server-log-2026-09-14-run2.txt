@@ -1,0 +1,57 @@
+[1m[2026-09-14|00:30:10][0m [32mINFO    [0m Parsed arguments:
+ServerArgs(model_path='/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL.gguf', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=4, attention_backend='auto', moe_strategy='offload', quant_backend=None, ple_backend='disk', expert_load='auto', moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lru', moe_prefill_overlap=True, moe_prefill_hit_d2d=False, moe_collect_stats=False, moe_cpu_threads=0, moe_cpu_layers=None, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, kv_quant='none', memory_ratio=0.9, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=None, num_page_override=None, num_token_override=None, max_extend_tokens=8192, cache_type='radix', offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=1575266', server_host='127.0.0.1', server_port=18081, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='GLM-5.3-Flash-UD-Q3_K_XL.gguf', tool_call_parser='glm47', reasoning_parser='glm', sampling_defaults='model', max_output_tokens=None, enable_cache_report=False, cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', gpu=(), gpu_assigned=None)
+[1m[2026-09-14|00:30:10|FrontendAPI][0m [32mINFO    [0m Default sampling config (source=model): temperature=1.0, top_k=-1, top_p=0.949999988079071
+INFO:     Started server process [1575266]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18081 (Press CTRL+C to quit)
+/media/ai/src/FreeToken/python/freetoken/engine/engine.py:1305: FutureWarning: torch.cuda._set_allocator_settings is deprecated. Use torch._C._accelerator_setAllocatorSettings instead.
+  torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+[1m[2026-09-14|00:30:12|core|rank=0][0m [32mINFO    [0m Enabled expandable_segments (override via PYTORCH_ALLOC_CONF)
+[1m[2026-09-14|00:30:16|core|rank=0][0m [32mINFO    [0m Auto-selected attention backend: dsa
+[1m[2026-09-14|00:30:16|core|rank=0][0m [33mWARNING [0m Page size 1 is auto-adjusted to 64 for latent-KV attention.
+[1m[2026-09-14|00:30:16|core|rank=0][0m [32mINFO    [0m --max-prefill-length 8192 -> 8191: the ggml moe_vec grid is tokens*top_k <= 65535 (issue #186, top_k 8); clamped for the gguf expert path
+[1m[2026-09-14|00:30:16|core|rank=0][0m [32mINFO    [0m Resolved config: moe_strategy='offload', attention_backend='dsa', cache_type='hybrid_radix', page_size=64
+[1m[2026-09-14|00:30:16|core|rank=0][0m [32mINFO    [0m Free memory before loading model: 29.56 GiB
+/media/ai/src/FreeToken/python/freetoken/models/gguf/reader.py:112: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+  return torch.from_numpy(self._raw)
+[1m[2026-09-14|00:30:24|core|rank=0][0m [33mWARNING [0m no usable model.safetensors.index.json for /media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL.gguf (Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL.gguf'. Use `repo_type` argument if needed.); falling back to *.safetensors
+[1m[2026-09-14|00:30:24|core|rank=0][0m [32mINFO    [0m expert banks: slow path (serial build)
+[1m[2026-09-14|00:31:47|core|rank=0][0m [32mINFO    [0m gguf expert bank ggml types, per-layer (gate, up, down) histogram: {(18, 18, 14): 2, (18, 18, 23): 39, (23, 23, 14): 1}
+[1m[2026-09-14|00:31:47|core|rank=0][0m [32mINFO    [0m --moe-cache-auto resolved moe_cache_size=1382 num_pages=132 (prefill_overlap=True)
+[1m[2026-09-14|00:31:48|core|rank=0][0m [32mINFO    [0m MoE signature group (layers [8]) got 288 slots < 2*288: prefill overlap disabled for this partition (synchronous materialized prefill instead)
+[1m[2026-09-14|00:31:48|core|rank=0][0m [32mINFO    [0m MoE signature group (layers [9, 41]) got 288 slots < 2*288: prefill overlap disabled for this partition (synchronous materialized prefill instead)
+[1m[2026-09-14|00:31:48|core|rank=0][0m [32mINFO    [0m Allocating 8448 tokens for KV cache, K + V = 0.09 GiB
+[1m[2026-09-14|00:31:48|core|rank=0][0m [32mINFO    [0m Free memory after initialization: 2.82 GiB
+Process freetoken-TP0-scheduler:
+[1m[2026-09-14|00:31:48|FrontendAPI][0m [31mERROR   [0m Backend supervisor: NameError: name 'OffloadMoeCache' is not defined
+Traceback (most recent call last):
+  File "/home/linuxbrew/.linuxbrew/opt/python@3.14/lib/python3.14/multiprocessing/process.py", line 320, in _bootstrap
+    self.run()
+    ~~~~~~~~^^
+  File "/home/linuxbrew/.linuxbrew/opt/python@3.14/lib/python3.14/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/media/ai/src/FreeToken/python/freetoken/server/launch.py", line 91, in _run_scheduler
+    scheduler = Scheduler(args)
+  File "/media/ai/src/FreeToken/python/freetoken/scheduler/scheduler.py", line 65, in __init__
+    self.engine = Engine(config)
+                  ~~~~~~^^^^^^^^
+  File "/media/ai/src/FreeToken/python/freetoken/engine/engine.py", line 477, in __init__
+    self.graph_runner = GraphRunner(
+                        ~~~~~~~~~~~^
+        stream=self.stream,
+        ^^^^^^^^^^^^^^^^^^^
+    ...<9 lines>...
+        moe_offload_cache=self.moe_offload_caches or self.moe_offload_cache,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/media/ai/src/FreeToken/python/freetoken/engine/graph.py", line 122, in __init__
+    if isinstance(moe_offload_cache, OffloadMoeCache)
+                                     ^^^^^^^^^^^^^^^
+NameError: name 'OffloadMoeCache' is not defined
+[1m[2026-09-14|00:31:59|FrontendAPI][0m [31mERROR   [0m Backend worker is gone and cannot be restarted; stopping the API server
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+[1m[2026-09-14|00:31:59|FrontendAPI][0m [32mINFO    [0m Graceful stop: reaping 2 backend worker(s), pids=[1575393, 1575394]

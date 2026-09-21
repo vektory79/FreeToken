@@ -1,0 +1,27 @@
+### reasoning
+The user wants a Python function `is_palindrome(s)` that:
+1. Ignores case (case-insensitive comparison)
+2. Ignores non-alphanumeric characters
+3. Has a docstring
+
+Let me think about the best implementation approach.
+
+**Approach 1: Filter and compare with reversed string**
+```python
+def is_palindrome(s):
+    cleaned = ''.join(c.lower() for c in s if c.isalnum())
+    return cleaned == cleaned[::-1]
+```
+
+This is clean and Pythonic. It:
+- Filters out non-alphanumeric characters using `c.isalnum()`
+- Converts everything to lowercase with `c.lower()`
+- Compares the cleaned string with its reverse using slicing `[::-1]`
+
+**Approach 2: Two-pointer approach (more memory efficient)**
+```python
+def is_palindrome(s):
+    left, right = 0, len(s) - 1
+
+### content
+

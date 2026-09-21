@@ -1,0 +1,1 @@
+{"model": "GLM-5.3-Flash-UD-Q3_K_XL.gguf", "messages": [{"role": "user", "content": "Name the capital of France and one famous landmark there. One sentence."}], "max_tokens": 96, "temperature": 0, "stream": false}

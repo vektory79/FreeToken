@@ -1,0 +1,814 @@
+L1: #include "models.h"
+L2: 
+L3: #include "llama-memory-recurrent.h"
+L4: #include "llama-memory-hybrid.h"
+L5: #include "llama-kv-cache-kpool.h"
+L6: 
+L7: // ssm_a holds -exp(A_log) (kimi-k3), not +exp(A_log) (bailingmoe3); converter checks
+L8: 
+L9: static uint32_t glm5next_n_select(const llama_hparams & hparams) {
+L10:     GGML_ASSERT(hparams.indexer_kpool > 0);
+L11:     GGML_ASSERT(hparams.indexer_top_k >= hparams.indexer_kpool);
+L12:     GGML_ASSERT(hparams.indexer_top_k % hparams.indexer_kpool == 0);
+L13: 
+L14:     const uint32_t n_select = hparams.indexer_top_k + hparams.indexer_kpool - 1;
+L15: 
+L16:     GGML_ASSERT(n_select > hparams.indexer_top_k);
+L17:     GGML_ASSERT(n_select == (hparams.indexer_top_k/hparams.indexer_kpool + 1)*hparams.indexer_kpool - 1);
+L18: 
+L19:     return n_select;
+L20: }
+L21: 
+L22: void llama_model_glm5next::load_arch_hparams(llama_model_loader & ml) {
+L23:     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+L24:     // indexer k_norm is a LayerNorm with bias; without this key it runs at eps 0
+L25:     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS,     hparams.f_norm_eps);
+L26:     if (hparams.f_norm_eps <= 0.0f || hparams.f_norm_eps > 2e-6f) {
+L27:         LLAMA_LOG_WARN("%s: indexer k_norm eps is %g, but the reference hardcodes 1e-6. "
+L28:                 "this is invisible to every output comparison; check the converter\n",
+L29:                 __func__, (double) hparams.f_norm_eps);
+L30:     }
+L31: 
+L32:     ml.get_key(LLM_KV_ATTENTION_Q_LORA_RANK,       hparams.n_lora_q);
+L33:     ml.get_key(LLM_KV_ATTENTION_KV_LORA_RANK,      hparams.n_lora_kv);
+L34:     ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_MLA,    hparams.n_embd_head_k_mla_impl);
+L35:     ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_MLA,  hparams.n_embd_head_v_mla_impl);
+L36:     GGML_ASSERT(hparams.n_lora_q > 0 && "glm5next requires a q LoRA");
+L37:     GGML_ASSERT(hparams.n_rot() == 0 && "glm5next MLA is nope-only");
+L38: 
+L39:     ml.get_key(LLM_KV_SSM_CONV_KERNEL,      hparams.ssm_d_conv);
+L40:     ml.get_key(LLM_KV_KDA_HEAD_DIM,         hparams.n_embd_head_kda);
+L41:     GGML_ASSERT(hparams.ssm_d_conv > 1);
+L42:     GGML_ASSERT(hparams.n_embd_head_kda > 0);
+L43:     // required: absent, kimi-k3 selects the softplus branch, a different function
+L44:     ml.get_key(LLM_KV_KDA_GATE_LOWER_BOUND, hparams.kda_gate_lower_bound);
+L45:     GGML_ASSERT(hparams.kda_gate_lower_bound < 0.0f);
+L46: 
+L47:     ml.get_key(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT, hparams.indexer_n_head);
+L48:     ml.get_key(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH, hparams.indexer_head_size);
+L49:     ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K,      hparams.indexer_top_k);
+L50:     ml.get_key(LLM_KV_ATTENTION_INDEXER_KPOOL,      hparams.indexer_kpool);
+L51:     GGML_ASSERT(hparams.indexer_kpool > 0);
+L52:     GGML_ASSERT(hparams.indexer_top_k % hparams.indexer_kpool == 0);
+L53: 
+L54:     const uint32_t n_select = glm5next_n_select(hparams);
+L55:     LLAMA_LOG_INFO("%s: indexer selection width = %u cells (%u pools of %u, plus a %u-wide tail)\n",
+L56:             __func__, n_select, hparams.indexer_top_k/hparams.indexer_kpool,
+L57:             hparams.indexer_kpool, hparams.indexer_kpool - 1);
+L58: 
+L59:     ml.get_key(LLM_KV_HYPER_CONNECTION_COUNT,               hparams.dsv4_hc_mult);
+L60:     ml.get_key(LLM_KV_HYPER_CONNECTION_SINKHORN_ITERATIONS, hparams.dsv4_hc_sinkhorn_iters);
+L61:     ml.get_key(LLM_KV_HYPER_CONNECTION_EPSILON,             hparams.dsv4_hc_eps);
+L62:     GGML_ASSERT(hparams.dsv4_hc_mult > 0);
+L63: 
+L64:     // n_embd_out stays n_embd: deepseek4's hc_mult*n_embd overreads t_embd
+L65:     hparams.n_embd_out_impl = 0;
+L66: 
+L67:     ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all);
+L68:     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
+L69:     ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,               hparams.n_expert_shared);
+L70:     ml.get_key(LLM_KV_LEADING_DENSE_BLOCK_COUNT,         hparams.n_layer_dense_lead);
+L71:     ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,              hparams.expert_weights_scale);
+L72:     ml.get_key(LLM_KV_EXPERT_WEIGHTS_NORM,               hparams.expert_weights_norm);
+L73:     ml.get_key(LLM_KV_EXPERT_GATING_FUNC,                hparams.expert_gating_func);
+L74:     ml.get_key_or_arr(LLM_KV_SWIGLU_CLAMP_EXP,   hparams.swiglu_clamp_exp,   hparams.n_layer_all, false);
+L75:     ml.get_key_or_arr(LLM_KV_SWIGLU_CLAMP_SHEXP, hparams.swiglu_clamp_shexp, hparams.n_layer_all, false);
+L76: 
+L77:     if (hparams.n_ff_shexp == 0) {
+L78:         hparams.n_ff_shexp = hparams.n_ff_exp() * std::max(1u, hparams.n_expert_shared);
+L79:     }
+L80: 
+L81:     ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
+L82:     GGML_ASSERT(hparams.n_layer_nextn < hparams.n_layer_all);
+L83: 
+L84:     // n_layer_all, not n_layer(): the NextN block is an attention block the filters read
+L85:     uint32_t n_recr = 0;
+L86:     for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+L87:         hparams.is_recr_impl[il] = hparams.n_head_kv(il) == 0;
+L88:         n_recr += il < hparams.n_layer() ? hparams.is_recr_impl[il] : 0;
+L89:     }
+L90:     GGML_ASSERT(n_recr > 0 && n_recr < hparams.n_layer() && "glm5next needs a per-layer attention.head_count_kv array");
+L91: 
+L92:     for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+L93:         hparams.is_indexer_full_impl[il] = !hparams.is_recr_impl[il];
+L94:     }
+L95: 
+L96:     switch (hparams.n_layer()) {
+L97:         case 45: type = hparams.n_embd == 4096 && hparams.n_expert == 288 ? LLM_TYPE_313B_A17B : LLM_TYPE_UNKNOWN; break;
+L98:         default: type = LLM_TYPE_UNKNOWN;
+L99:     }
+L100: }
+L101: 
+L102: void llama_model_glm5next::load_arch_tensors(llama_model_loader & ml) {
+L103:     LLAMA_LOAD_LOCALS;
+L104: 
+L105:     const int64_t head_dim = hparams.n_embd_head_kda;
+L106:     const int64_t d_inner  = head_dim * n_head;
+L107:     const int64_t d_conv   = hparams.ssm_d_conv;
+L108: 
+L109:     const int64_t q_lora_rank  = hparams.n_lora_q;
+L110:     const int64_t kv_lora_rank = hparams.n_lora_kv;
+L111:     const int64_t qk_head_dim  = hparams.n_embd_head_k_mla();
+L112:     const int64_t v_head_dim   = hparams.n_embd_head_v_mla();
+L113: 
+L114:     const int64_t n_embd_indexer = hparams.indexer_head_size;
+L115:     const int64_t kpool          = hparams.indexer_kpool;
+L116: 
+L117:     const int64_t hc_dim     = (int64_t) hparams.dsv4_hc_mult * n_embd;
+L118:     const int64_t hc_mix_dim = (2 + (int64_t) hparams.dsv4_hc_mult) * hparams.dsv4_hc_mult;
+L119: 
+L120:     const bool mtp_only = (n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+L121:     const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+L122:     const bool trunk_only = (n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+L123:     const int trunk_flags = mtp_only   ? TENSOR_NOT_REQUIRED : 0;
+L124:     int       mtp_flags   = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+L125: 
+L126:     if (!ml.load_mtp) {
+L127:         mtp_flags |= TENSOR_SKIP;
+L128:     }
+L129: 
+L130:     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+L131: 
+L132:     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+L133:     output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+L134:     if (!output) {
+L135:         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+L136:     }
+L137: 
+L138:     for (int il = 0; il < n_layer_all; ++il) {
+L139:         auto & layer = layers[il];
+L140:         const int flags = il < n_layer ? trunk_flags : mtp_flags;
+L141: 
+L142:         layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", il), {n_embd}, flags);
+L143:         layer.ffn_norm  = create_tensor(tn(LLM_TENSOR_FFN_NORM,  "weight", il), {n_embd}, flags);
+L144: 
+L145:         if (il < n_layer) {
+L146:             layer.hc_attn_fn    = create_tensor(tn(LLM_TENSOR_HC_ATTN_FN,    "weight", il), {hc_dim, hc_mix_dim}, flags);
+L147:             layer.hc_attn_base  = create_tensor(tn(LLM_TENSOR_HC_ATTN_BASE,  "weight", il), {hc_mix_dim}, flags);
+L148:             layer.hc_attn_scale = create_tensor(tn(LLM_TENSOR_HC_ATTN_SCALE, "weight", il), {3}, flags);
+L149:             layer.hc_ffn_fn     = create_tensor(tn(LLM_TENSOR_HC_FFN_FN,     "weight", il), {hc_dim, hc_mix_dim}, flags);
+L150:             layer.hc_ffn_base   = create_tensor(tn(LLM_TENSOR_HC_FFN_BASE,   "weight", il), {hc_mix_dim}, flags);
+L151:             layer.hc_ffn_scale  = create_tensor(tn(LLM_TENSOR_HC_FFN_SCALE,  "weight", il), {3}, flags);
+L152:         }
+L153: 
+L154:         if (hparams.is_recr(il)) {
+L155:             create_tensor_qkv(layer, il, n_embd, d_inner, d_inner, d_inner, flags);
+L156: 
+L157:             layer.ssm_q_conv = create_tensor(tn(LLM_TENSOR_SSM_CONV1D_Q, "weight", il), {d_conv, 1, d_inner, 1}, flags);
+L158:             layer.ssm_k_conv = create_tensor(tn(LLM_TENSOR_SSM_CONV1D_K, "weight", il), {d_conv, 1, d_inner, 1}, flags);
+L159:             layer.ssm_v_conv = create_tensor(tn(LLM_TENSOR_SSM_CONV1D_V, "weight", il), {d_conv, 1, d_inner, 1}, flags);
+L160: 
+L161:             layer.ssm_f_a = create_tensor(tn(LLM_TENSOR_SSM_F_A, "weight", il), {n_embd, head_dim}, flags);
+L162:             layer.ssm_f_b = create_tensor(tn(LLM_TENSOR_SSM_F_B, "weight", il), {head_dim, d_inner}, flags);
+L163:             layer.ssm_g_a = create_tensor(tn(LLM_TENSOR_SSM_G_A, "weight", il), {n_embd, head_dim}, flags);
+L164:             layer.ssm_g_b = create_tensor(tn(LLM_TENSOR_SSM_G_B, "weight", il), {head_dim, d_inner}, flags);
+L165: 
+L166:             layer.ssm_beta = create_tensor(tn(LLM_TENSOR_SSM_BETA, "weight", il), {n_embd, n_head}, flags);
+L167:             layer.ssm_a    = create_tensor(tn(LLM_TENSOR_SSM_A,              il), {n_head}, flags);
+L168:             layer.ssm_dt_b = create_tensor(tn(LLM_TENSOR_SSM_DT,   "bias",   il), {d_inner}, flags);
+L169: 
+L170:             layer.ssm_o_norm = create_tensor(tn(LLM_TENSOR_SSM_NORM, "weight", il), {head_dim}, flags);
+L171:             layer.wo         = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), {d_inner, n_embd}, flags);
+L172:         } else {
+L173:             layer.wq_a          = create_tensor(tn(LLM_TENSOR_ATTN_Q_A,      "weight", il), {n_embd, q_lora_rank}, flags);
+L174:             layer.attn_q_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_A_NORM, "weight", il), {q_lora_rank}, flags);
+L175:             layer.wq_b          = create_tensor(tn(LLM_TENSOR_ATTN_Q_B,      "weight", il), {q_lora_rank, n_head * qk_head_dim}, flags);
+L176: 
+L177:             layer.wkv_a_mqa      = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA,  "weight", il), {n_embd, kv_lora_rank}, flags);
+L178:             layer.attn_kv_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_NORM, "weight", il), {kv_lora_rank}, flags);
+L179:             layer.wk_b           = create_tensor(tn(LLM_TENSOR_ATTN_K_B,       "weight", il), {qk_head_dim, kv_lora_rank, n_head}, flags);
+L180:             layer.wv_b           = create_tensor(tn(LLM_TENSOR_ATTN_V_B,       "weight", il), {kv_lora_rank, v_head_dim, n_head}, flags);
+L181: 
+L182:             layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), {n_head * v_head_dim, n_embd}, flags);
+L183: 
+L184:             layer.indexer_k_norm   = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "weight", il), {n_embd_indexer}, flags);
+L185:             layer.indexer_k_norm_b = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "bias",   il), {n_embd_indexer}, flags);
+L186:             layer.indexer_proj     = create_tensor(tn(LLM_TENSOR_INDEXER_PROJ,     "weight", il), {n_embd, hparams.indexer_n_head}, flags);
+L187:             layer.indexer_attn_k   = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_K,   "weight", il), {n_embd, n_embd_indexer}, flags);
+L188:             layer.indexer_attn_q_b = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_Q_B, "weight", il), {q_lora_rank, hparams.indexer_n_head * n_embd_indexer}, flags);
+L189: 
+L190:             layer.indexer_comp_wgate = create_tensor(tn(LLM_TENSOR_INDEXER_COMPRESSOR_WGATE, "weight", il), {n_embd, n_embd_indexer}, flags);
+L191:             layer.indexer_comp_ape   = create_tensor(tn(LLM_TENSOR_INDEXER_COMPRESSOR_APE,   "weight", il), {n_embd_indexer, kpool}, flags);
+L192:         }
+L193: 
+L194:         if (il < (int) hparams.n_layer_dense_lead) {
+L195:             layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd, n_ff}, flags);
+L196:             layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd, n_ff}, flags);
+L197:             layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {n_ff, n_embd}, flags);
+L198:         } else {
+L199:             layer.ffn_gate_inp    = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,    "weight", il), {n_embd, n_expert}, flags);
+L200:             layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias",   il), {n_expert}, flags);
+L201: 
+L202:             layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", il), {n_embd, hparams.n_ff_exp(), n_expert}, flags);
+L203:             layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", il), {n_embd, hparams.n_ff_exp(), n_expert}, flags);
+L204:             layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), {hparams.n_ff_exp(), n_embd, n_expert}, flags);
+L205: 
+L206:             layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", il), {n_embd, hparams.n_ff_shexp}, flags);
+L207:             layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", il), {n_embd, hparams.n_ff_shexp}, flags);
+L208:             layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", il), {hparams.n_ff_shexp, n_embd}, flags);
+L209:         }
+L210: 
+L211:         if (il >= n_layer) {
+L212:             layer.nextn.eh_proj = create_tensor(tn(LLM_TENSOR_NEXTN_EH_PROJ, "weight", il), {2 * n_embd, n_embd}, flags);
+L213:             layer.nextn.enorm   = create_tensor(tn(LLM_TENSOR_NEXTN_ENORM,   "weight", il), {n_embd}, flags);
+L214:             layer.nextn.hnorm   = create_tensor(tn(LLM_TENSOR_NEXTN_HNORM,   "weight", il), {n_embd}, flags);
+L215: 
+L216:             layer.nextn.shared_head_norm = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_NORM, "weight", il), {n_embd}, flags);
+L217:             layer.nextn.embed_tokens     = create_tensor(tn(LLM_TENSOR_NEXTN_EMBED_TOKENS,     "weight", il), {n_embd, n_vocab}, flags | TENSOR_NOT_REQUIRED);
+L218:             layer.nextn.shared_head_head = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD, "weight", il), {n_embd, n_vocab}, flags | TENSOR_NOT_REQUIRED);
+L219:         }
+L220:     }
+L221: }
+L222: 
+L223: // one conv over concatenated q|k|v: keeps the conv state one block for rollback
+L224: ggml_tensor * llama_model_glm5next::graph::build_kda_layer(
+L225:         const llama_layer & layer,
+L226:         llm_graph_input_rs * inp_rs,
+L227:         ggml_tensor * cur,
+L228:         int il) {
+L229:     const int64_t head_dim     = hparams.n_embd_head_kda;
+L230:     const int64_t d_inner      = head_dim * n_head;
+L231:     const int64_t d_conv       = hparams.ssm_d_conv;
+L232:     const int64_t n_seqs       = ubatch.n_seqs;
+L233:     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
+L234: 
+L235:     const auto * mctx_cur = inp_rs->mctx;
+L236: 
+L237:     // f, g and beta read the layer input, NOT the convolved q/k/v
+L238:     ggml_tensor * inp = cur;
+L239: 
+L240:     ggml_tensor * Qcur = ggml_mul_mat(ctx0, layer.wq, inp);
+L241:     ggml_tensor * Kcur = ggml_mul_mat(ctx0, layer.wk, inp);
+L242:     ggml_tensor * Vcur = ggml_mul_mat(ctx0, layer.wv, inp);
+L243: 
+L244:     ggml_tensor * qkv = ggml_concat(ctx0, ggml_concat(ctx0, Qcur, Kcur, 0), Vcur, 0);
+L245:     qkv = ggml_reshape_3d(ctx0, qkv, 3*d_inner, n_seq_tokens, n_seqs);
+L246:     cb(qkv, "kda_qkv", il);
+L247: 
+L248:     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
+L249:     ggml_tensor * conv_in = build_conv_state(inp_rs, conv_states_all, qkv, d_conv, 3*d_inner, il);
+L250: 
+L251:     ggml_tensor * conv_w = ggml_concat(ctx0,
+L252:             ggml_concat(ctx0,
+L253:                 ggml_reshape_2d(ctx0, layer.ssm_q_conv, d_conv, d_inner),
+L254:                 ggml_reshape_2d(ctx0, layer.ssm_k_conv, d_conv, d_inner), 1),
+L255:             ggml_reshape_2d(ctx0, layer.ssm_v_conv, d_conv, d_inner), 1);
+L256: 
+L257:     // SiLU is applied to the conv output, not to the projections
+L258:     ggml_tensor * conv_out = ggml_silu(ctx0, ggml_ssm_conv(ctx0, conv_in, conv_w));
+L259:     cb(conv_out, "kda_conv", il);
+L260: 
+L261:     const size_t nb_qkv  = ggml_row_size(conv_out->type, 3*d_inner);
+L262:     const size_t nb_head = ggml_row_size(conv_out->type, head_dim);
+L263: 
+L264:     Qcur = ggml_view_4d(ctx0, conv_out, head_dim, n_head, n_seq_tokens, n_seqs,
+L265:             nb_head, nb_qkv, nb_qkv*n_seq_tokens, 0);
+L266:     Kcur = ggml_view_4d(ctx0, conv_out, head_dim, n_head, n_seq_tokens, n_seqs,
+L267:             nb_head, nb_qkv, nb_qkv*n_seq_tokens, ggml_row_size(conv_out->type, d_inner));
+L268:     Vcur = ggml_view_4d(ctx0, conv_out, head_dim, n_head, n_seq_tokens, n_seqs,
+L269:             nb_head, nb_qkv, nb_qkv*n_seq_tokens, ggml_row_size(conv_out->type, 2*d_inner));
+L270: 
+L271:     // 1e-6 is the reference's own constant, not the model's norm eps
+L272:     Qcur = ggml_l2_norm(ctx0, Qcur, 1e-6f);
+L273:     Kcur = ggml_l2_norm(ctx0, Kcur, 1e-6f);
+L274:     cb(Qcur, "kda_q_norm", il);
+L275:     cb(Kcur, "kda_k_norm", il);
+L276: 
+L277: 
+L278:     // g = lower_bound * sigmoid(exp(A_log)*(f_b(f_a(x)) + dt_bias)); it scales, not clamps
+L279:     ggml_tensor * g = ggml_mul_mat(ctx0, layer.ssm_f_b, ggml_mul_mat(ctx0, layer.ssm_f_a, inp));
+L280:     g = ggml_add(ctx0, g, layer.ssm_dt_b);
+L281:     g = ggml_reshape_3d(ctx0, g, head_dim, n_head, n_tokens);
+L282:     g = ggml_mul(ctx0, g, ggml_reshape_3d(ctx0, layer.ssm_a, 1, n_head, 1));
+L283:     g = ggml_sigmoid(ctx0, ggml_scale(ctx0, g, -1.0f));
+L284:     g = ggml_scale(ctx0, g, hparams.kda_gate_lower_bound);
+L285:     g = ggml_reshape_4d(ctx0, g, head_dim, n_head, n_seq_tokens, n_seqs);
+L286:     cb(g, "kda_gate", il);
+L287: 
+L288:     ggml_tensor * beta = ggml_mul_mat(ctx0, layer.ssm_beta, inp);
+L289:     beta = ggml_sigmoid(ctx0, ggml_reshape_4d(ctx0, beta, 1, n_head, n_seq_tokens, n_seqs));
+L290:     cb(beta, "kda_beta", il);
+L291: 
+L292:     ggml_tensor * ssm_states_all = mctx_cur->get_s_l(il);
+L293:     ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
+L294:     state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
+L295: 
+L296:     ggml_tensor * out = build_recurrent_attn(inp_rs, ssm_states_all, Qcur, Kcur, Vcur, g, beta, state, il);
+L297: 
+L298:     ggml_tensor * o = ggml_cont_3d(ctx0, out, head_dim, n_head, n_tokens);
+L299:     cb(o, "kda_scan_out", il);
+L300: 
+L301:     ggml_tensor * gate = ggml_mul_mat(ctx0, layer.ssm_g_b, ggml_mul_mat(ctx0, layer.ssm_g_a, inp));
+L302:     gate = ggml_reshape_3d(ctx0, gate, head_dim, n_head, n_tokens);
+L303: 
+L304:     // plain sigmoid gate, not the SiLU that FusedRMSNormGated defaults to
+L305:     ggml_tensor * normed = build_norm(o, layer.ssm_o_norm, nullptr, LLM_NORM_RMS, il);
+L306:     ggml_tensor * gated  = ggml_mul(ctx0, normed, ggml_sigmoid(ctx0, gate));
+L307:     cb(gated, "kda_normed", il);
+L308: 
+L309:     cur = ggml_mul_mat(ctx0, layer.wo, ggml_cont_2d(ctx0, gated, d_inner, n_tokens));
+L310:     cb(cur, "kda_out", il);
+L311: 
+L312:     return cur;
+L313: }
+L314: 
+L315: // the store is NOT gated on the sparse path, the scoring is: gating both leaves cells
+L316: // below n_select with no indexer state
+L317: ggml_tensor * llama_model_glm5next::graph::build_indexer(
+L318:         const llama_layer & layer,
+L319:         llm_graph_input_kpool * inp_kp,
+L320:         ggml_tensor * cur,
+L321:         ggml_tensor * qr,
+L322:         bool scoring,
+L323:         int il) const {
+L324:     const int64_t d_idx   = hparams.indexer_head_size;
+L325:     const int64_t n_ihead = hparams.indexer_n_head;
+L326:     const int64_t r       = hparams.indexer_kpool;
+L327: 
+L328:     const auto * mctx_idx = inp_kp->mctx_idx;
+L329: 
+L330:     GGML_ASSERT(layer.indexer_k_norm_b != nullptr && "the indexer k_norm is a LayerNorm with bias");
+L331: 
+L332:     ggml_tensor * ik = build_norm(ggml_mul_mat(ctx0, layer.indexer_attn_k, cur),
+L333:             layer.indexer_k_norm, layer.indexer_k_norm_b, LLM_NORM, il);
+L334:     cb(ik, "indexer_k", il);
+L335: 
+L336:     // a SECOND, INDEPENDENT projection, not a reuse of the key, and cached beside it
+L337:     ggml_tensor * gate = ggml_mul_mat(ctx0, layer.indexer_comp_wgate, cur);
+L338:     cb(gate, "indexer_gate", il);
+L339: 
+L340:     ggml_tensor * packed = ggml_concat(ctx0,
+L341:             ggml_reshape_3d(ctx0, ik,   d_idx, 1, n_tokens),
+L342:             ggml_reshape_3d(ctx0, gate, d_idx, 1, n_tokens), 1);
+L343:     // the third head is the pooled key, written later from other cells; leave it alone
+L344:     ggml_build_forward_expand(gf,
+L345:             mctx_idx->cpy_k_part(ctx0, ggml_reshape_2d(ctx0, packed, 2*d_idx, n_tokens),
+L346:                 inp_kp->k_idxs, il, 2*d_idx, 0));
+L347: 
+L348:     if (!scoring) {
+L349:         return nullptr;
+L350:     }
+L351: 
+L352:     ggml_tensor * kbuf = mctx_idx->get_k(ctx0, il);
+L353: 
+L354:     const int64_t n_kv     = kbuf->ne[2];
+L355:     const int64_t n_stream = kbuf->ne[3];
+L356:     const int64_t n_tps    = n_tokens/n_stream;
+L357:     const int64_t n_pools  = inp_kp->pool_cells->ne[0]/r;
+L358: 
+L359:     GGML_ASSERT(kbuf->ne[0] == d_idx && kbuf->ne[1] == 3 &&
+L360:             "the pooled indexer cache needs a key head, a gate head and a pooled head");
+L361:     GGML_ASSERT(kbuf->nb[1] == (size_t) d_idx*kbuf->nb[0] && "key, gate and pooled must be adjacent in a cell");
+L362:     GGML_ASSERT(n_tokens == n_tps*n_stream);
+L363: 
+L364:     ggml_tensor * kg_rows = ggml_view_3d(ctx0, kbuf, 2*d_idx, n_kv, n_stream,
+L365:             kbuf->nb[2], kbuf->nb[3], 0);
+L366: 
+L367:     const int64_t n_new_max = inp_kp->new_pool_cells->ne[0]/r;
+L368: 
+L369:     ggml_tensor * members = ggml_get_rows(ctx0, kg_rows, inp_kp->new_pool_cells);
+L370:     cb(members, "indexer_pool_members", il);
+L371: 
+L372:     const size_t nb_mem = members->nb[1];
+L373: 
+L374:     ggml_tensor * mem_k = ggml_view_4d(ctx0, members, d_idx, r, n_new_max, n_stream,
+L375:             nb_mem, nb_mem*r, members->nb[2], 0);
+L376:     ggml_tensor * mem_g = ggml_view_4d(ctx0, members, d_idx, r, n_new_max, n_stream,
+L377:             nb_mem, nb_mem*r, members->nb[2], d_idx*members->nb[0]);
+L378: 
+L379:     // r-way softmaxes over the SLOT axis, so it must be dim 0; ape is added PRE-softmax
+L380:     ggml_tensor * keys_t = ggml_cont(ctx0, ggml_permute(ctx0, mem_k, 1, 0, 2, 3));
+L381:     ggml_tensor * gate_t = ggml_cont(ctx0, ggml_permute(ctx0, mem_g, 1, 0, 2, 3));
+L382: 
+L383:     ggml_tensor * ape = ggml_cont(ctx0, ggml_transpose(ctx0, layer.indexer_comp_ape));
+L384:     gate_t = ggml_add(ctx0, gate_t, ggml_reshape_4d(ctx0, ape, r, d_idx, 1, 1));
+L385: 
+L386:     ggml_tensor * probs = ggml_soft_max(ctx0, gate_t);
+L387:     cb(probs, "indexer_pool_probs", il);
+L388: 
+L389:     ggml_tensor * pool_new = ggml_sum_rows(ctx0, ggml_mul(ctx0, keys_t, probs));
+L390:     pool_new = ggml_reshape_2d(ctx0, pool_new, d_idx, n_new_max*n_stream);
+L391:     cb(pool_new, "indexer_pool_new", il);
+L392: 
+L393:     // the write is by GLOBAL row while pool_reps is stream-local, so the read must not chain
+L394:     // off the write tensor; expand first and let build order sequence them
+L395:     ggml_build_forward_expand(gf,
+L396:             mctx_idx->cpy_k_part(ctx0, pool_new, inp_kp->new_pool_reps, il, d_idx, 2*d_idx));
+L397: 
+L398:     ggml_tensor * pooled_rd = ggml_view_3d(ctx0, kbuf, d_idx, n_kv, n_stream,
+L399:             kbuf->nb[2], kbuf->nb[3], 2*d_idx*kbuf->nb[0]);
+L400: 
+L401:     ggml_tensor * pool_k = ggml_get_rows(ctx0, pooled_rd, inp_kp->pool_reps);
+L402:     pool_k = ggml_reshape_4d(ctx0, pool_k, d_idx, n_pools, 1, n_stream);
+L403:     cb(pool_k, "indexer_pool_k", il);
+L404: 
+L405:     // no rope: n_rot() is 0 for the whole text tower
+L406:     ggml_tensor * iq = ggml_mul_mat(ctx0, layer.indexer_attn_q_b, qr);
+L407:     iq = ggml_reshape_4d(ctx0, iq, d_idx, n_ihead, n_tps, n_stream);
+L408:     cb(iq, "indexer_q", il);
+L409: 
+L410:     // sign-unconstrained head weights; PREC_F32 is load-bearing, bf16 swaps near-tied pools
+L411:     ggml_tensor * w = ggml_mul_mat(ctx0, layer.indexer_proj, cur);
+L412:     ggml_mul_mat_set_prec(w, GGML_PREC_F32);
+L413:     w = ggml_reshape_4d(ctx0, w, n_ihead, n_tps, 1, n_stream);
+L414:     w = ggml_scale(ctx0, w, 1.0f/sqrtf(float(d_idx*n_ihead)));
+L415:     cb(w, "indexer_weights", il);
+L416: 
+L417:     ggml_tensor * pool_score = nullptr;
+L418: 
+L419:     if (cparams.fused_lid) {
+L420:         // pool_k stays f32 so the kernel takes its f32 path; f16 wmma would undo the prec
+L421:         ggml_tensor * pool_kf = ggml_reshape_4d(ctx0, pool_k, d_idx, 1, n_pools, n_stream);
+L422: 
+L423:         pool_score = ggml_lightning_indexer(ctx0, iq, pool_kf, w, inp_kp->pool_bias_f16);
+L424:         cb(pool_score, "indexer_pool_score", il);
+L425: 
+L426:         res->add_fused_node({LLM_FUSED_OP_LIGHTNING_INDEXER, pool_score, il});
+L427: 
+L428:         pool_score = ggml_reshape_3d(ctx0, pool_score, n_pools, n_tps, n_stream);
+L429:     } else {
+L430:         ggml_tensor * kq = ggml_mul_mat(ctx0, pool_k, ggml_permute(ctx0, iq, 0, 2, 1, 3));
+L431: 
+L432:         // the ReLU sits BETWEEN the per-head dot and the head weighting; either side differs
+L433:         kq = ggml_cont(ctx0, ggml_permute(ctx0, kq, 2, 1, 0, 3));
+L434:         ggml_tensor * score = ggml_relu(ctx0, kq);
+L435:         cb(score, "indexer_score", il);
+L436: 
+L437:         pool_score = ggml_sum_rows(ctx0, ggml_mul(ctx0, score, w));
+L438:         pool_score = ggml_cont(ctx0, ggml_permute(ctx0, pool_score, 2, 1, 0, 3));
+L439:         pool_score = ggml_reshape_3d(ctx0, pool_score, n_pools, n_tps, n_stream);
+L440: 
+L441:         pool_score = ggml_add(ctx0, pool_score, inp_kp->pool_bias);
+L442:         cb(pool_score, "indexer_pool_score", il);
+L443:     }
+L444: 
+L445:     // top-k over POOLS then expand: a cell-level top-k is wrong, relu ties span pool bounds
+L446:     const int64_t select_k = llama_kpool_select_k(n_pools, hparams.indexer_top_k, r);
+L447:     GGML_ASSERT(select_k > 0 && select_k <= n_pools);
+L448: 
+L449:     ggml_tensor * sel = ggml_cont(ctx0, ggml_top_k(ctx0, pool_score, (int) select_k));
+L450:     cb(sel, "indexer_top_k_pools", il);
+L451: 
+L452:     ggml_tensor * pc3      = ggml_reshape_3d(ctx0, inp_kp->pool_cells, r, n_pools, n_stream);
+L453:     ggml_tensor * sel_flat = ggml_reshape_2d(ctx0, sel, select_k*n_tps, n_stream);
+L454: 
+L455:     ggml_tensor * top_k = ggml_get_rows(ctx0, pc3, sel_flat);
+L456:     GGML_ASSERT(top_k->type == GGML_TYPE_I32 && "pool_cells is I32, so the gather stays I32");
+L457:     top_k = ggml_reshape_3d(ctx0, top_k, r*select_k, n_tps, n_stream);
+L458:     cb(top_k, "indexer_top_k", il);
+L459: 
+L460:     return top_k;
+L461: }
+L462: 
+L463: // absorbed form (deepseek2/glm-dsa): q_nope goes through wk_b; the naive form needs a V cache
+L464: ggml_tensor * llama_model_glm5next::graph::build_dsa_layer(
+L465:         const llama_layer & layer,
+L466:         llm_graph_input_attn_k * inp_attn,
+L467:         llm_graph_input_kpool * inp_kp,
+L468:         bool scoring,
+L469:         ggml_tensor * cur,
+L470:         int il) const {
+L471:     const int64_t qk_head_dim  = hparams.n_embd_head_k_mla();
+L472:     const int64_t kv_lora_rank = hparams.n_lora_kv;
+L473: 
+L474:     GGML_ASSERT(hparams.n_rot() == 0);
+L475: 
+L476:     // scale is over the MLA head size, as in the reference, not the absorbed width
+L477:     const float kq_scale = 1.0f/sqrtf(float(qk_head_dim));
+L478: 
+L479:     ggml_tensor * qr = ggml_mul_mat(ctx0, layer.wq_a, cur);
+L480:     qr = build_norm(qr, layer.attn_q_a_norm, nullptr, LLM_NORM_RMS, il);
+L481:     cb(qr, "dsa_q_a_norm", il);
+L482: 
+L483:     ggml_tensor * top_k = inp_kp ? build_indexer(layer, inp_kp, cur, qr, scoring, il) : nullptr;
+L484: 
+L485:     ggml_tensor * q = ggml_mul_mat(ctx0, layer.wq_b, qr);
+L486:     q = ggml_reshape_3d(ctx0, q, qk_head_dim, n_head, n_tokens);
+L487:     cb(q, "dsa_q_b", il);
+L488: 
+L489:     ggml_tensor * kv = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur);
+L490:     kv = build_norm(kv, layer.attn_kv_a_norm, nullptr, LLM_NORM_RMS, il);
+L491:     cb(kv, "dsa_kv_a_norm", il);
+L492: 
+L493:     q = ggml_permute(ctx0, q, 0, 2, 1, 3);
+L494: 
+L495:     q = ggml_mul_mat(ctx0, layer.wk_b, q);
+L496: 
+L497:     q = ggml_cont(ctx0, ggml_permute(ctx0, q, 0, 2, 1, 3));
+L498:     cb(q, "dsa_q_absorbed", il);
+L499: 
+L500:     // absorbed MLA is MQA: one head of keys, and V is the same latent row as K
+L501:     ggml_tensor * k = ggml_reshape_3d(ctx0, kv, kv_lora_rank, 1, n_tokens);
+L502:     cb(k, "dsa_kv_latent", il);
+L503: 
+L504:     if (top_k) {
+L505:         cur = build_attn_sparse(inp_attn,
+L506:                 layer.wo, nullptr, nullptr,
+L507:                 q, k, k, nullptr, nullptr, layer.wv_b,
+L508:                 top_k, inp_kp->sel_mask, inp_kp->cand_mask, kq_scale, il);
+L509:     } else {
+L510:         cur = build_attn(inp_attn,
+L511:                 layer.wo, nullptr, nullptr,
+L512:                 q, k, k, nullptr, nullptr, layer.wv_b, kq_scale, il);
+L513:     }
+L514:     cb(cur, "dsa_out", il);
+L515: 
+L516:     return cur;
+L517: }
+L518: 
+L519: ggml_tensor * llama_model_glm5next::graph::build_layer_attn(
+L520:         const llama_model & model,
+L521:         llm_graph_input_mem_hybrid_k * inp_mem,
+L522:         llm_graph_input_kpool * inp_kp,
+L523:         bool scoring,
+L524:         ggml_tensor * cur,
+L525:         int il) {
+L526:     if (hparams.is_recr(il)) {
+L527:         return build_kda_layer(model.layers[il], inp_mem->get_recr(), cur, il);
+L528:     }
+L529: 
+L530:     return build_dsa_layer(model.layers[il], inp_mem->get_attn(), inp_kp, scoring, cur, il);
+L531: }
+L532: 
+L533: ggml_tensor * llama_model_glm5next::graph::build_layer_ffn(
+L534:         const llama_model & model,
+L535:         ggml_tensor * cur,
+L536:         int il) const {
+L537:     const auto & layer = model.layers[il];
+L538: 
+L539:     if (il < (int) hparams.n_layer_dense_lead) {
+L540:         return build_ffn(cur,
+L541:                 layer.ffn_up,   nullptr, nullptr,
+L542:                 layer.ffn_gate, nullptr, nullptr,
+L543:                 layer.ffn_down, nullptr, nullptr,
+L544:                 nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
+L545:     }
+L546: 
+L547:     // noaux_tc: exp_probs_b biases top-k selection only; the weights stay unbiased
+L548:     ggml_tensor * moe_out = build_moe_ffn(cur,
+L549:             layer.ffn_gate_inp,
+L550:             layer.ffn_up_exps,
+L551:             layer.ffn_gate_exps,
+L552:             layer.ffn_down_exps,
+L553:             layer.ffn_exp_probs_b,
+L554:             n_expert, hparams.n_expert_used(),
+L555:             LLM_FFN_SILU, hparams.expert_weights_norm,
+L556:             hparams.expert_weights_scale,
+L557:             (llama_expert_gating_func_type) hparams.expert_gating_func,
+L558:             il);
+L559: 
+L560:     ggml_tensor * shexp = build_ffn(cur,
+L561:             layer.ffn_up_shexp,   nullptr, nullptr,
+L562:             layer.ffn_gate_shexp, nullptr, nullptr,
+L563:             layer.ffn_down_shexp, nullptr, nullptr,
+L564:             nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
+L565:     cb(shexp, "ffn_shexp", il);
+L566: 
+L567:     // shared expert unscaled: routed_scaling_factor applies to the routed weights only
+L568:     return ggml_add(ctx0, moe_out, shexp);
+L569: }
+L570: 
+L571: llama_model_glm5next::graph::graph(const llama_model & model, const llm_graph_params & params) :
+L572:     llama_model_deepseek4::graph(params) {
+L573:     ggml_tensor * cur;
+L574: 
+L575:     ggml_tensor * inp         = build_inp_embd(model.tok_embd);
+L576:     ggml_tensor * inp_out_ids = build_inp_out_ids();
+L577: 
+L578:     llm_graph_input_mem_hybrid_k * inp_mem = build_inp_mem_hybrid_k();
+L579: 
+L580:     // gated on n_ctx, not n_kv, which grows and would flip the graph topology mid-run
+L581:     llm_graph_input_kpool * inp_kp = nullptr;
+L582:     bool indexer_scoring = false;
+L583:     {
+L584:         const auto * mctx_hyb = static_cast<const llama_memory_hybrid_context *>(mctx);
+L585: 
+L586:         if (mctx_hyb->get_idx() != nullptr) {
+L587:             indexer_scoring = cparams.n_ctx > glm5next_n_select(hparams);
+L588: 
+L589:             inp_kp = build_inp_kpool(mctx_hyb,
+L590:                     inp_mem->get_attn()->get_kq_mask(), indexer_scoring);
+L591:         }
+L592:     }
+L593: 
+L594:     GGML_ASSERT(ubatch.n_seqs != 0);
+L595:     GGML_ASSERT(ubatch.equal_seqs());
+L596:     GGML_ASSERT(ubatch.n_tokens == ubatch.n_seq_tokens * ubatch.n_seqs);
+L597: 
+L598:     const int64_t hc = hparams.dsv4_hc_mult;
+L599: 
+L600:     // exact copies: no scaling, no one-hot into stream 0
+L601:     ggml_tensor * inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
+L602:     inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
+L603:     cb(inpL, "hc_init", -1);
+L604: 
+L605:     for (int il = 0; il < n_layer; ++il) {
+L606:         if ((size_t) il < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[il]) {
+L607:             res->t_layer_inp[il] = build_hc_mean(ctx0, inpL);
+L608:             cb(res->t_layer_inp[il], "layer_inp", il);
+L609:             ggml_build_forward_expand(gf, res->t_layer_inp[il]);
+L610:         }
+L611: 
+L612:         ggml_tensor * residual = inpL;
+L613:         ggml_tensor * post = nullptr;
+L614:         ggml_tensor * comb = nullptr;
+L615: 
+L616:         cur = build_hc_pre(inpL,
+L617:                 model.layers[il].hc_attn_fn,
+L618:                 model.layers[il].hc_attn_scale,
+L619:                 model.layers[il].hc_attn_base,
+L620:                 &post, &comb, il);
+L621:         cb(cur, "hc_attn_pre", il);
+L622: 
+L623:         cur = build_norm(cur, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
+L624:         cb(cur, "attn_norm", il);
+L625: 
+L626:         cur = build_layer_attn(model, inp_mem, inp_kp, indexer_scoring, cur, il);
+L627: 
+L628:         inpL = build_hc_post(cur, residual, post, comb, il);
+L629:         cb(inpL, "hc_attn_post", il);
+L630: 
+L631:         residual = inpL;
+L632:         cur = build_hc_pre(inpL,
+L633:                 model.layers[il].hc_ffn_fn,
+L634:                 model.layers[il].hc_ffn_scale,
+L635:                 model.layers[il].hc_ffn_base,
+L636:                 &post, &comb, il);
+L637:         cb(cur, "hc_ffn_pre", il);
+L638: 
+L639:         // expand before the sublayer so op offload does not pull mHC state to the experts
+L640:         ggml_build_forward_expand(gf, residual);
+L641:         ggml_build_forward_expand(gf, post);
+L642:         ggml_build_forward_expand(gf, comb);
+L643: 
+L644:         cur = build_norm(cur, model.layers[il].ffn_norm, nullptr, LLM_NORM_RMS, il);
+L645:         cb(cur, "ffn_norm", il);
+L646: 
+L647:         cur = build_layer_ffn(model, cur, il);
+L648:         cb(cur, "ffn_out", il);
+L649: 
+L650:         inpL = build_hc_post(cur, residual, post, comb, il);
+L651:         inpL = build_cvec(inpL, il);
+L652:         cb(inpL, "l_last", il);
+L653:     }
+L654: 
+L655:     if ((size_t) n_layer < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[n_layer]) {
+L656:         res->t_layer_inp[n_layer] = build_hc_mean(ctx0, inpL);
+L657:         cb(res->t_layer_inp[n_layer], "layer_inp", n_layer);
+L658:         ggml_build_forward_expand(gf, res->t_layer_inp[n_layer]);
+L659:     }
+L660: 
+L661:     // unmasked nextn embeddings need all rows, so early output masking is skipped here
+L662:     const bool mask_early = !cparams.embeddings_nextn || cparams.embeddings_nextn_masked;
+L663: 
+L664:     if (inp_out_ids && mask_early) {
+L665:         // get_rows needs one token's streams contiguous
+L666:         ggml_tensor * flat = ggml_reshape_2d(ctx0, inpL, n_embd*hc, n_tokens);
+L667:         inpL = ggml_reshape_3d(ctx0, ggml_get_rows(ctx0, flat, inp_out_ids), n_embd, hc, n_outputs);
+L668:     }
+L669: 
+L670:     // unweighted mean, not DeepSeek-V4's learned gated head
+L671:     cur = build_hc_mean(ctx0, inpL);
+L672:     cb(cur, "hc_mean", -1);
+L673: 
+L674:     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+L675: 
+L676:     cb(cur, "h_nextn", -1);
+L677:     res->t_h_nextn = cur;
+L678: 
+L679:     if (inp_out_ids && !mask_early) {
+L680:         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+L681:     }
+L682: 
+L683:     cb(cur, "result_norm", -1);
+L684:     res->t_embd = cur;
+L685: 
+L686:     cur = ggml_mul_mat(ctx0, model.output, cur);
+L687:     cb(cur, "result_output", -1);
+L688:     res->t_logits = cur;
+L689: 
+L690:     ggml_build_forward_expand(gf, cur);
+L691: }
+L692: 
+L693: // NextN draft head: an ordinary DSA layer, but a plain residual and no hc_* tensors
+L694: llama_model_glm5next::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params)
+L695:     : graph(params) {
+L696:     GGML_ASSERT(hparams.n_layer_nextn == 1 && "glm5next MTP supports a single NextN block");
+L697: 
+L698:     const int il = hparams.n_layer() + cparams.nextn_layer_offset;
+L699: 
+L700:     GGML_ASSERT(cparams.nextn_layer_offset >= 0 &&
+L701:                 cparams.nextn_layer_offset < (int) hparams.n_layer_nextn &&
+L702:                 "nextn_layer_offset out of range [0, n_layer_nextn)");
+L703: 
+L704:     const auto & layer = model.layers[il];
+L705: 
+L706:     GGML_ASSERT(layer.nextn.eh_proj && layer.nextn.enorm && layer.nextn.hnorm &&
+L707:             "glm5next MTP block tensors missing; convert without --no-mtp");
+L708:     GGML_ASSERT(!layer.hc_attn_fn && "the NextN block has no mHC mixer");
+L709: 
+L710:     auto inp = std::make_unique<llm_graph_input_embd_h>(hparams.n_embd);
+L711: 
+L712:     inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+L713:     ggml_set_input(inp->tokens);
+L714: 
+L715:     inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_inp(), n_tokens);
+L716:     ggml_set_input(inp->embd);
+L717: 
+L718:     ggml_tensor * tok_embd;
+L719:     if (ubatch.token) {
+L720:         ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
+L721: 
+L722:         tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+L723:     } else {
+L724:         tok_embd = inp->embd;
+L725:     }
+L726:     cb(tok_embd, "mtp_tok_embd", il);
+L727: 
+L728:     inp->h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
+L729:     ggml_set_input(inp->h);
+L730:     ggml_set_name(inp->h, "mtp_h_input");
+L731: 
+L732:     ggml_tensor * h_embd = inp->h;
+L733: 
+L734:     res->add_input(std::move(inp));
+L735: 
+L736:     ggml_tensor * inp_out_ids = build_inp_out_ids();
+L737: 
+L738:     llm_graph_input_mem_hybrid_k * inp_mem = build_inp_mem_hybrid_k();
+L739: 
+L740:     // the NextN block is DSA: nothing consumes the recurrent half, so s_copy never enters the
+L741:     // graph while set_input would still read its buffer
+L742:     ggml_build_forward_expand(gf, inp_mem->get_recr()->s_copy);
+L743: 
+L744:     llm_graph_input_kpool * inp_kp = nullptr;
+L745:     bool indexer_scoring = false;
+L746:     {
+L747:         const auto * mctx_hyb = static_cast<const llama_memory_hybrid_context *>(mctx);
+L748: 
+L749:         if (mctx_hyb->get_idx() != nullptr) {
+L750:             indexer_scoring = cparams.n_ctx > glm5next_n_select(hparams);
+L751: 
+L752:             inp_kp = build_inp_kpool(mctx_hyb,
+L753:                     inp_mem->get_attn()->get_kq_mask(), indexer_scoring);
+L754:         }
+L755:     }
+L756: 
+L757:     ggml_tensor * h_norm = build_norm(h_embd, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+L758:     cb(h_norm, "mtp_hnorm", il);
+L759: 
+L760:     ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
+L761:     cb(e_norm, "mtp_enorm", il);
+L762: 
+L763:     ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj,
+L764:             ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0), layer.nextn.eh_proj_s);
+L765:     cb(cur, "mtp_eh_proj", il);
+L766: 
+L767:     ggml_tensor * residual = cur;
+L768: 
+L769:     cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+L770:     cb(cur, "mtp_attn_norm", il);
+L771: 
+L772:     cur = build_layer_attn(model, inp_mem, inp_kp, indexer_scoring, cur, il);
+L773: 
+L774:     ggml_tensor * ffn_inp = ggml_add(ctx0, cur, residual);
+L775:     cb(ffn_inp, "mtp_ffn_inp", il);
+L776: 
+L777:     cur = build_norm(ffn_inp, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
+L778:     cb(cur, "mtp_ffn_norm", il);
+L779: 
+L780:     cur = build_layer_ffn(model, cur, il);
+L781:     cb(cur, "mtp_ffn_out", il);
+L782: 
+L783:     cur = ggml_add(ctx0, cur, ffn_inp);
+L784:     cb(cur, "mtp_post_ffn", il);
+L785: 
+L786:     ggml_tensor * head_norm_w = layer.nextn.shared_head_norm ? layer.nextn.shared_head_norm : model.output_norm;
+L787:     GGML_ASSERT(head_norm_w && "glm5next MTP: no nextn.shared_head_norm and no output_norm");
+L788:     cur = build_norm(cur, head_norm_w, nullptr, LLM_NORM_RMS, -1);
+L789: 
+L790:     cb(cur, "h_nextn", -1);
+L791:     res->t_h_nextn = cur;
+L792: 
+L793:     if (inp_out_ids) {
+L794:         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+L795:     }
+L796:     cb(cur, "mtp_shared_head_norm", -1);
+L797: 
+L798:     ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
+L799:     ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
+L800:     GGML_ASSERT(head_w && "glm5next MTP: no nextn.shared_head_head and no output");
+L801:     cur = build_lora_mm(head_w, cur, head_s);
+L802:     cb(cur, "result_output", -1);
+L803: 
+L804:     res->t_logits = cur;
+L805:     ggml_build_forward_expand(gf, cur);
+L806: }
+L807: 
+L808: std::unique_ptr<llm_graph_context> llama_model_glm5next::build_arch_graph(const llm_graph_params & params) const {
+L809:     if (params.gtype == LLM_GRAPH_TYPE_DECODER_MTP) {
+L810:         return std::make_unique<graph_mtp>(*this, params);
+L811:     }
+L812: 
+L813:     return std::make_unique<graph>(*this, params);
+L814: }

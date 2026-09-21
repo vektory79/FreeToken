@@ -1,0 +1,12 @@
+### reasoning
+The user wants me to explain how a bicycle stays upright to a curious ten-year-old. This is a classic physics question that's actually more interesting and counterintuitive than most people realize.
+
+Let me think about what I actually know about bicycle stability:
+
+**The common misconceptions:**
+1. Many people think it's the gyroscopic effect of the spinning wheels — this is actually mostly NOT the reason. Experiments with counter-rotating wheels (which cancel out gyroscopic effects) show bikes can still be ridden.
+2. Many people think it's "trail" (the geometry where the front wheel's contact point trails behind the steering axis) — this contributes but isn't the whole story either. Bikes with negative trail have been built that still balance.
+3. The real answer,
+
+### content
+

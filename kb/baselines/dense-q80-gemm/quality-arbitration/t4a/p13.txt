@@ -1,0 +1,11 @@
+### reasoning
+The user is asking in Russian: "Explain why languages need cases (падежи), in simple words."
+
+This is a linguistics question, and the person wants a simple explanation. Since they're asking in Russian, I should respond in Russian. Russian is a highly inflected language with six cases (nominative, genitive, dative, accusative, instrumental, prepositional), so the person likely speaks Russian natively and is curious about the purpose of cases.
+
+Let me think about what cases actually do and how to explain this simply:
+
+1. **Cases mark the roles of words in a sentence** — who does what to whom. In Russian, word order is relatively free because cases tell you the function of each word. "Кот поймал мышь"
+
+### content
+

@@ -1,0 +1,16 @@
+{
+ "idx": 3,
+ "kind": "en",
+ "prompt": "What are the trade-offs between remote and office work? Give a balanced view.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "<svg viewBox=\"0 0 100 100\" xmlns=\"http://www.w3.org/2000/svg\">\n  <rect width=\"100\" height=\"100\" fill=\"#f0f0f0\"/>\n  <rect x=\"10\" y=\"10\" width=\"80\" height=\"80\" fill=\"#ffffff\" stroke=\"#000000\" stroke-width=\"2\"/>\n  <line x1=\"10\" y1=\"10\" x2=\"90\" y2=\"90\" stroke=\"#000000\" stroke-width=\"2\"/>\n  <line x1=\"90\" y1=\"10\" x2=\"10\" y2=\"90\" stroke=\"#000000\" stroke-width=\"2\"/>\n  <circle cx=\"50\" cy=\"50\" r=\"15",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 29,
+  "completion_tokens": 159,
+  "total_tokens": 188
+ },
+ "wall_s": 15.78
+}

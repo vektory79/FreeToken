@@ -1,0 +1,123 @@
+{
+ "report": "/media/ai/src/FreeToken/.tasks/mmq-v3-stationary-moe/report1.nsys-rep",
+ "sqlite16": "/media/ai/src/FreeToken/.tasks/mmq-v3-stationary-moe/v3aprobe.sqlite",
+ "baseline_sqlite4": "/media/ai/src/FreeToken/.tasks/mmq-prefill-kernel/v2probe2.sqlite",
+ "chunk_equivs": 9,
+ "tile16": {
+  "boot": {
+   "n": 158242,
+   "span_s": 146.59
+  },
+  "prefill": {
+   "span_s": 146.59,
+   "n": 158242,
+   "grouped_count": 1134,
+   "vec_count": 378,
+   "align_count": 378
+  },
+  "decode": {
+   "span_s": 7.82,
+   "vec_count": 7938,
+   "grouped_count": 126,
+   "align_count": 42
+  }
+ },
+ "tile4": {
+  "prefill": {
+   "span_s": 216.46,
+   "n": 157938,
+   "grouped_count": 1134,
+   "vec_count": 378,
+   "align_count": 378
+  }
+ },
+ "grouped_names_prefill": [
+  "moe_iq3_xxs",
+  "moe_iq4_xs",
+  "moe_q6_K"
+ ],
+ "assert": {
+  "A1_grouped_names_per_format": true,
+  "A2_zero_moe_vec_in_prefill": {
+   "vec_tile16": 0,
+   "vec_tile4": 0,
+   "ok": true
+  },
+  "A3_moe_vec_present_decode": true,
+  "A4_launch_count_math_126_42": true,
+  "A5_cta_shrink_tile16_vs_tile4": {
+   "detail": {
+    "moe_iq3_xxs": {
+     "cta4": 1054208,
+     "cta16": 277376,
+     "ratio": 3.8
+    },
+    "moe_iq4_xs": {
+     "cta4": 2108416,
+     "cta16": 554752,
+     "ratio": 3.8
+    },
+    "moe_q6_K": {
+     "cta4": 2108416,
+     "cta16": 554752,
+     "ratio": 3.8
+    }
+   },
+   "ok": true
+  }
+ },
+ "per_format": {
+  "moe_iq3_xxs": {
+   "n16": 738,
+   "med_ms16": 40.9698,
+   "sum_s16": 27.563,
+   "med_cta16": 277376,
+   "n4": 738,
+   "med_ms4": 102.3814,
+   "sum_s4": 67.953,
+   "med_cta4": 1054208,
+   "med_speedup": 2.5,
+   "sum_speedup": 2.47
+  },
+  "moe_iq4_xs": {
+   "n16": 369,
+   "med_ms16": 49.795,
+   "sum_s16": 16.692,
+   "med_cta16": 554752,
+   "n4": 369,
+   "med_ms4": 131.6048,
+   "sum_s4": 44.011,
+   "med_cta4": 2108416,
+   "med_speedup": 2.64,
+   "sum_speedup": 2.64
+  },
+  "moe_q6_K": {
+   "n16": 27,
+   "med_ms16": 33.7318,
+   "sum_s16": 0.825,
+   "med_cta16": 554752,
+   "n4": 27,
+   "med_ms4": 65.7219,
+   "sum_s4": 1.615,
+   "med_cta4": 2108416,
+   "med_speedup": 1.95,
+   "sum_speedup": 1.96
+  }
+ },
+ "phases_tile16": [
+  {
+   "n": 158242,
+   "span_s": 146.59,
+   "grouped_count": 1134,
+   "vec_count": 378,
+   "align_count": 378
+  },
+  {
+   "n": 228845,
+   "span_s": 7.82,
+   "grouped_count": 126,
+   "vec_count": 7938,
+   "align_count": 42
+  }
+ ]
+}

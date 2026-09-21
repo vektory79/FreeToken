@@ -1,0 +1,25 @@
+{
+  "tag": "gguf",
+  "phases": {
+    "prefill64k": {
+      "wall_s": 198.1,
+      "usage": {
+        "prompt_tokens": 49013,
+        "completion_tokens": 1,
+        "total_tokens": 49014
+      },
+      "prompt_chars": 227000
+    },
+    "decode_cached_256": {
+      "error": "HTTP Error 422: Unprocessable Content"
+    },
+    "decode_cached_768": {
+      "error": "HTTP Error 422: Unprocessable Content"
+    },
+    "decode_fresh_256": {
+      "error": "HTTP Error 422: Unprocessable Content"
+    }
+  },
+  "served_model": "GLM-5.3-Flash-UD-Q3_K_XL.gguf",
+  "battery_fail": 0
+}

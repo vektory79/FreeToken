@@ -1,0 +1,1449 @@
+{
+ "per_prompt": [
+  {
+   "idx": 0,
+   "kind": "en",
+   "sha": "65dfc233",
+   "wall_s": 12.83,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.642,
+     "lcp": 430,
+     "lcs": 1,
+     "len_a": 836,
+     "len_b": 862,
+     "sha_equal": false,
+     "ref_sha": "b69853ef"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.642,
+     "lcp": 430,
+     "lcs": 1,
+     "len_a": 836,
+     "len_b": 862,
+     "sha_equal": false,
+     "ref_sha": "b69853ef"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.647,
+     "lcp": 510,
+     "lcs": 1,
+     "len_a": 836,
+     "len_b": 834,
+     "sha_equal": false,
+     "ref_sha": "ec3a6255"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.647,
+     "lcp": 510,
+     "lcs": 1,
+     "len_a": 836,
+     "len_b": 834,
+     "sha_equal": false,
+     "ref_sha": "ec3a6255"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.647,
+    "lcp": 510,
+    "lcs": 1,
+    "len_a": 836,
+    "len_b": 834,
+    "sha_equal": false,
+    "ref_sha": "ec3a6255"
+   }
+  },
+  {
+   "idx": 1,
+   "kind": "en",
+   "sha": "f525e519",
+   "wall_s": 13.56,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.202,
+     "lcp": 140,
+     "lcs": 1,
+     "len_a": 787,
+     "len_b": 686,
+     "sha_equal": false,
+     "ref_sha": "f7c0e0de"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.724,
+     "lcp": 283,
+     "lcs": 2,
+     "len_a": 787,
+     "len_b": 790,
+     "sha_equal": false,
+     "ref_sha": "8a7878bf"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.548,
+     "lcp": 226,
+     "lcs": 1,
+     "len_a": 787,
+     "len_b": 775,
+     "sha_equal": false,
+     "ref_sha": "4c5c906c"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.548,
+     "lcp": 226,
+     "lcs": 1,
+     "len_a": 787,
+     "len_b": 775,
+     "sha_equal": false,
+     "ref_sha": "4c5c906c"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.724,
+    "lcp": 283,
+    "lcs": 2,
+    "len_a": 787,
+    "len_b": 790,
+    "sha_equal": false,
+    "ref_sha": "8a7878bf"
+   }
+  },
+  {
+   "idx": 2,
+   "kind": "en",
+   "sha": "c109ff10",
+   "wall_s": 12.71,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.316,
+     "lcp": 159,
+     "lcs": 1,
+     "len_a": 687,
+     "len_b": 691,
+     "sha_equal": false,
+     "ref_sha": "e04cf5d8"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.359,
+     "lcp": 159,
+     "lcs": 1,
+     "len_a": 687,
+     "len_b": 665,
+     "sha_equal": false,
+     "ref_sha": "c2a6af90"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.358,
+     "lcp": 159,
+     "lcs": 1,
+     "len_a": 687,
+     "len_b": 678,
+     "sha_equal": false,
+     "ref_sha": "9b33a4b3"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.358,
+     "lcp": 159,
+     "lcs": 1,
+     "len_a": 687,
+     "len_b": 678,
+     "sha_equal": false,
+     "ref_sha": "9b33a4b3"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.359,
+    "lcp": 159,
+    "lcs": 1,
+    "len_a": 687,
+    "len_b": 665,
+    "sha_equal": false,
+    "ref_sha": "c2a6af90"
+   }
+  },
+  {
+   "idx": 3,
+   "kind": "en",
+   "sha": "ca529b25",
+   "wall_s": 13.08,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.239,
+     "lcp": 140,
+     "lcs": 1,
+     "len_a": 787,
+     "len_b": 785,
+     "sha_equal": false,
+     "ref_sha": "a72547f0"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.298,
+     "lcp": 140,
+     "lcs": 1,
+     "len_a": 787,
+     "len_b": 781,
+     "sha_equal": false,
+     "ref_sha": "bcca6038"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.7,
+     "lcp": 468,
+     "lcs": 1,
+     "len_a": 787,
+     "len_b": 764,
+     "sha_equal": false,
+     "ref_sha": "51027630"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.7,
+     "lcp": 468,
+     "lcs": 1,
+     "len_a": 787,
+     "len_b": 764,
+     "sha_equal": false,
+     "ref_sha": "51027630"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.7,
+    "lcp": 468,
+    "lcs": 1,
+    "len_a": 787,
+    "len_b": 764,
+    "sha_equal": false,
+    "ref_sha": "51027630"
+   }
+  },
+  {
+   "idx": 4,
+   "kind": "en",
+   "sha": "b159d0f4",
+   "wall_s": 12.66,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.785,
+     "lcp": 339,
+     "lcs": 1,
+     "len_a": 736,
+     "len_b": 760,
+     "sha_equal": false,
+     "ref_sha": "60890710"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.805,
+     "lcp": 339,
+     "lcs": 1,
+     "len_a": 736,
+     "len_b": 745,
+     "sha_equal": false,
+     "ref_sha": "9c6baf45"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.805,
+     "lcp": 339,
+     "lcs": 1,
+     "len_a": 736,
+     "len_b": 745,
+     "sha_equal": false,
+     "ref_sha": "9c6baf45"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.805,
+     "lcp": 339,
+     "lcs": 1,
+     "len_a": 736,
+     "len_b": 745,
+     "sha_equal": false,
+     "ref_sha": "9c6baf45"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.805,
+    "lcp": 339,
+    "lcs": 1,
+    "len_a": 736,
+    "len_b": 745,
+    "sha_equal": false,
+    "ref_sha": "9c6baf45"
+   }
+  },
+  {
+   "idx": 5,
+   "kind": "en",
+   "sha": "cedc6dc3",
+   "wall_s": 14.31,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.531,
+     "lcp": 266,
+     "lcs": 1,
+     "len_a": 731,
+     "len_b": 820,
+     "sha_equal": false,
+     "ref_sha": "e6c837fd"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.428,
+     "lcp": 112,
+     "lcs": 1,
+     "len_a": 731,
+     "len_b": 789,
+     "sha_equal": false,
+     "ref_sha": "49c3de41"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.598,
+     "lcp": 266,
+     "lcs": 1,
+     "len_a": 731,
+     "len_b": 787,
+     "sha_equal": false,
+     "ref_sha": "20dffdbc"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.598,
+     "lcp": 266,
+     "lcs": 1,
+     "len_a": 731,
+     "len_b": 787,
+     "sha_equal": false,
+     "ref_sha": "20dffdbc"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.598,
+    "lcp": 266,
+    "lcs": 1,
+    "len_a": 731,
+    "len_b": 787,
+    "sha_equal": false,
+    "ref_sha": "20dffdbc"
+   }
+  },
+  {
+   "idx": 6,
+   "kind": "en",
+   "sha": "cc526bd1",
+   "wall_s": 12.95,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.934,
+     "lcp": 281,
+     "lcs": 1,
+     "len_a": 725,
+     "len_b": 740,
+     "sha_equal": false,
+     "ref_sha": "f36be777"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.914,
+     "lcp": 281,
+     "lcs": 1,
+     "len_a": 725,
+     "len_b": 741,
+     "sha_equal": false,
+     "ref_sha": "1491e652"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.616,
+     "lcp": 289,
+     "lcs": 1,
+     "len_a": 725,
+     "len_b": 730,
+     "sha_equal": false,
+     "ref_sha": "46b413f3"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.616,
+     "lcp": 289,
+     "lcs": 1,
+     "len_a": 725,
+     "len_b": 730,
+     "sha_equal": false,
+     "ref_sha": "46b413f3"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "patha",
+    "kind": "mid-answer",
+    "ratio": 0.934,
+    "lcp": 281,
+    "lcs": 1,
+    "len_a": 725,
+    "len_b": 740,
+    "sha_equal": false,
+    "ref_sha": "f36be777"
+   }
+  },
+  {
+   "idx": 7,
+   "kind": "en",
+   "sha": "1d9c2642",
+   "wall_s": 12.86,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.074,
+     "lcp": 15,
+     "lcs": 0,
+     "len_a": 698,
+     "len_b": 762,
+     "sha_equal": false,
+     "ref_sha": "b8ffa3b3"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.162,
+     "lcp": 15,
+     "lcs": 0,
+     "len_a": 698,
+     "len_b": 769,
+     "sha_equal": false,
+     "ref_sha": "f7a63601"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.164,
+     "lcp": 15,
+     "lcs": 0,
+     "len_a": 698,
+     "len_b": 751,
+     "sha_equal": false,
+     "ref_sha": "eb7bafc1"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.164,
+     "lcp": 15,
+     "lcs": 0,
+     "len_a": 698,
+     "len_b": 751,
+     "sha_equal": false,
+     "ref_sha": "eb7bafc1"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.164,
+    "lcp": 15,
+    "lcs": 0,
+    "len_a": 698,
+    "len_b": 751,
+    "sha_equal": false,
+    "ref_sha": "eb7bafc1"
+   }
+  },
+  {
+   "idx": 8,
+   "kind": "ru",
+   "sha": "18ba11fb",
+   "wall_s": 12.84,
+   "refs": {
+    "patha": {
+     "kind": "identical",
+     "ratio": 1.0,
+     "lcp": 793,
+     "lcs": 793,
+     "len_a": 793,
+     "len_b": 793,
+     "sha_equal": true,
+     "ref_sha": "18ba11fb"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.859,
+     "lcp": 667,
+     "lcs": 1,
+     "len_a": 793,
+     "len_b": 799,
+     "sha_equal": false,
+     "ref_sha": "d51a6fe6"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.3,
+     "lcp": 131,
+     "lcs": 1,
+     "len_a": 793,
+     "len_b": 787,
+     "sha_equal": false,
+     "ref_sha": "bec98427"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.3,
+     "lcp": 131,
+     "lcs": 1,
+     "len_a": 793,
+     "len_b": 787,
+     "sha_equal": false,
+     "ref_sha": "bec98427"
+    }
+   },
+   "verdict": "matches:patha",
+   "best_ref": {
+    "name": "patha",
+    "kind": "identical",
+    "ratio": 1.0,
+    "lcp": 793,
+    "lcs": 793,
+    "len_a": 793,
+    "len_b": 793,
+    "sha_equal": true,
+    "ref_sha": "18ba11fb"
+   }
+  },
+  {
+   "idx": 9,
+   "kind": "ru",
+   "sha": "b2e26c66",
+   "wall_s": 12.7,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.288,
+     "lcp": 68,
+     "lcs": 1,
+     "len_a": 644,
+     "len_b": 647,
+     "sha_equal": false,
+     "ref_sha": "07f59be3"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.344,
+     "lcp": 205,
+     "lcs": 1,
+     "len_a": 644,
+     "len_b": 695,
+     "sha_equal": false,
+     "ref_sha": "40e92ed5"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.287,
+     "lcp": 68,
+     "lcs": 1,
+     "len_a": 644,
+     "len_b": 639,
+     "sha_equal": false,
+     "ref_sha": "f680fb1b"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.287,
+     "lcp": 68,
+     "lcs": 1,
+     "len_a": 644,
+     "len_b": 639,
+     "sha_equal": false,
+     "ref_sha": "f680fb1b"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.344,
+    "lcp": 205,
+    "lcs": 1,
+    "len_a": 644,
+    "len_b": 695,
+    "sha_equal": false,
+    "ref_sha": "40e92ed5"
+   }
+  },
+  {
+   "idx": 10,
+   "kind": "ru",
+   "sha": "74e6b194",
+   "wall_s": 12.12,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.649,
+     "lcp": 224,
+     "lcs": 1,
+     "len_a": 697,
+     "len_b": 695,
+     "sha_equal": false,
+     "ref_sha": "be1b55b2"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.677,
+     "lcp": 224,
+     "lcs": 1,
+     "len_a": 697,
+     "len_b": 691,
+     "sha_equal": false,
+     "ref_sha": "3d588dcd"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.67,
+     "lcp": 224,
+     "lcs": 1,
+     "len_a": 697,
+     "len_b": 694,
+     "sha_equal": false,
+     "ref_sha": "e021d858"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.67,
+     "lcp": 224,
+     "lcs": 1,
+     "len_a": 697,
+     "len_b": 694,
+     "sha_equal": false,
+     "ref_sha": "e021d858"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.677,
+    "lcp": 224,
+    "lcs": 1,
+    "len_a": 697,
+    "len_b": 691,
+    "sha_equal": false,
+    "ref_sha": "3d588dcd"
+   }
+  },
+  {
+   "idx": 11,
+   "kind": "ru",
+   "sha": "ef45583b",
+   "wall_s": 13.09,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.896,
+     "lcp": 572,
+     "lcs": 1,
+     "len_a": 700,
+     "len_b": 679,
+     "sha_equal": false,
+     "ref_sha": "ca214866"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.903,
+     "lcp": 609,
+     "lcs": 1,
+     "len_a": 700,
+     "len_b": 682,
+     "sha_equal": false,
+     "ref_sha": "88790284"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.638,
+     "lcp": 173,
+     "lcs": 1,
+     "len_a": 700,
+     "len_b": 667,
+     "sha_equal": false,
+     "ref_sha": "30215a37"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.638,
+     "lcp": 173,
+     "lcs": 1,
+     "len_a": 700,
+     "len_b": 667,
+     "sha_equal": false,
+     "ref_sha": "30215a37"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.903,
+    "lcp": 609,
+    "lcs": 1,
+    "len_a": 700,
+    "len_b": 682,
+    "sha_equal": false,
+    "ref_sha": "88790284"
+   }
+  },
+  {
+   "idx": 12,
+   "kind": "ru",
+   "sha": "8ec4d662",
+   "wall_s": 12.88,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.638,
+     "lcp": 362,
+     "lcs": 1,
+     "len_a": 696,
+     "len_b": 661,
+     "sha_equal": false,
+     "ref_sha": "0233b331"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.668,
+     "lcp": 362,
+     "lcs": 1,
+     "len_a": 696,
+     "len_b": 706,
+     "sha_equal": false,
+     "ref_sha": "09e1974b"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.492,
+     "lcp": 159,
+     "lcs": 1,
+     "len_a": 696,
+     "len_b": 718,
+     "sha_equal": false,
+     "ref_sha": "db3c3985"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.492,
+     "lcp": 159,
+     "lcs": 1,
+     "len_a": 696,
+     "len_b": 718,
+     "sha_equal": false,
+     "ref_sha": "db3c3985"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.668,
+    "lcp": 362,
+    "lcs": 1,
+    "len_a": 696,
+    "len_b": 706,
+    "sha_equal": false,
+    "ref_sha": "09e1974b"
+   }
+  },
+  {
+   "idx": 13,
+   "kind": "ru",
+   "sha": "dcc2f5a5",
+   "wall_s": 12.6,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.858,
+     "lcp": 293,
+     "lcs": 1,
+     "len_a": 654,
+     "len_b": 679,
+     "sha_equal": false,
+     "ref_sha": "0370ce72"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.703,
+     "lcp": 244,
+     "lcs": 1,
+     "len_a": 654,
+     "len_b": 708,
+     "sha_equal": false,
+     "ref_sha": "5f6c089a"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.721,
+     "lcp": 124,
+     "lcs": 1,
+     "len_a": 654,
+     "len_b": 663,
+     "sha_equal": false,
+     "ref_sha": "51ad58c2"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.721,
+     "lcp": 124,
+     "lcs": 1,
+     "len_a": 654,
+     "len_b": 663,
+     "sha_equal": false,
+     "ref_sha": "51ad58c2"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "patha",
+    "kind": "mid-answer",
+    "ratio": 0.858,
+    "lcp": 293,
+    "lcs": 1,
+    "len_a": 654,
+    "len_b": 679,
+    "sha_equal": false,
+    "ref_sha": "0370ce72"
+   }
+  },
+  {
+   "idx": 14,
+   "kind": "ru",
+   "sha": "5bc660b5",
+   "wall_s": 11.99,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.71,
+     "lcp": 313,
+     "lcs": 1,
+     "len_a": 631,
+     "len_b": 651,
+     "sha_equal": false,
+     "ref_sha": "1286702c"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.608,
+     "lcp": 280,
+     "lcs": 1,
+     "len_a": 631,
+     "len_b": 590,
+     "sha_equal": false,
+     "ref_sha": "a23cf120"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.595,
+     "lcp": 280,
+     "lcs": 1,
+     "len_a": 631,
+     "len_b": 589,
+     "sha_equal": false,
+     "ref_sha": "f468013d"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.595,
+     "lcp": 280,
+     "lcs": 1,
+     "len_a": 631,
+     "len_b": 589,
+     "sha_equal": false,
+     "ref_sha": "f468013d"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "patha",
+    "kind": "mid-answer",
+    "ratio": 0.71,
+    "lcp": 313,
+    "lcs": 1,
+    "len_a": 631,
+    "len_b": 651,
+    "sha_equal": false,
+    "ref_sha": "1286702c"
+   }
+  },
+  {
+   "idx": 15,
+   "kind": "ru",
+   "sha": "e40497ca",
+   "wall_s": 12.38,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.651,
+     "lcp": 374,
+     "lcs": 1,
+     "len_a": 667,
+     "len_b": 642,
+     "sha_equal": false,
+     "ref_sha": "3cdd55f0"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.679,
+     "lcp": 458,
+     "lcs": 1,
+     "len_a": 667,
+     "len_b": 708,
+     "sha_equal": false,
+     "ref_sha": "25025145"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.403,
+     "lcp": 99,
+     "lcs": 1,
+     "len_a": 667,
+     "len_b": 724,
+     "sha_equal": false,
+     "ref_sha": "46c86a00"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.403,
+     "lcp": 99,
+     "lcs": 1,
+     "len_a": 667,
+     "len_b": 724,
+     "sha_equal": false,
+     "ref_sha": "46c86a00"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.679,
+    "lcp": 458,
+    "lcs": 1,
+    "len_a": 667,
+    "len_b": 708,
+    "sha_equal": false,
+    "ref_sha": "25025145"
+   }
+  },
+  {
+   "idx": 16,
+   "kind": "code",
+   "sha": "0154e1c4",
+   "wall_s": 15.62,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.495,
+     "lcp": 124,
+     "lcs": 2,
+     "len_a": 580,
+     "len_b": 680,
+     "sha_equal": false,
+     "ref_sha": "06d8e99c"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.495,
+     "lcp": 124,
+     "lcs": 2,
+     "len_a": 580,
+     "len_b": 680,
+     "sha_equal": false,
+     "ref_sha": "06d8e99c"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.48,
+     "lcp": 124,
+     "lcs": 1,
+     "len_a": 580,
+     "len_b": 661,
+     "sha_equal": false,
+     "ref_sha": "a3ad03df"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.48,
+     "lcp": 124,
+     "lcs": 1,
+     "len_a": 580,
+     "len_b": 661,
+     "sha_equal": false,
+     "ref_sha": "a3ad03df"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "patha",
+    "kind": "mid-answer",
+    "ratio": 0.495,
+    "lcp": 124,
+    "lcs": 2,
+    "len_a": 580,
+    "len_b": 680,
+    "sha_equal": false,
+    "ref_sha": "06d8e99c"
+   }
+  },
+  {
+   "idx": 17,
+   "kind": "code",
+   "sha": "e4dbdb6f",
+   "wall_s": 15.39,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.104,
+     "lcp": 75,
+     "lcs": 1,
+     "len_a": 826,
+     "len_b": 749,
+     "sha_equal": false,
+     "ref_sha": "bac5b78d"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.104,
+     "lcp": 75,
+     "lcs": 1,
+     "len_a": 826,
+     "len_b": 747,
+     "sha_equal": false,
+     "ref_sha": "7b6d0e66"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.271,
+     "lcp": 186,
+     "lcs": 1,
+     "len_a": 826,
+     "len_b": 766,
+     "sha_equal": false,
+     "ref_sha": "a1260f4b"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.271,
+     "lcp": 186,
+     "lcs": 1,
+     "len_a": 826,
+     "len_b": 766,
+     "sha_equal": false,
+     "ref_sha": "a1260f4b"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.271,
+    "lcp": 186,
+    "lcs": 1,
+    "len_a": 826,
+    "len_b": 766,
+    "sha_equal": false,
+    "ref_sha": "a1260f4b"
+   }
+  },
+  {
+   "idx": 18,
+   "kind": "code",
+   "sha": "beb7dc90",
+   "wall_s": 15.21,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.833,
+     "lcp": 88,
+     "lcs": 32,
+     "len_a": 636,
+     "len_b": 655,
+     "sha_equal": false,
+     "ref_sha": "d74c343e"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.762,
+     "lcp": 88,
+     "lcs": 1,
+     "len_a": 636,
+     "len_b": 643,
+     "sha_equal": false,
+     "ref_sha": "deedee42"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.747,
+     "lcp": 180,
+     "lcs": 1,
+     "len_a": 636,
+     "len_b": 615,
+     "sha_equal": false,
+     "ref_sha": "0ac8a86f"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.747,
+     "lcp": 180,
+     "lcs": 1,
+     "len_a": 636,
+     "len_b": 615,
+     "sha_equal": false,
+     "ref_sha": "0ac8a86f"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "patha",
+    "kind": "mid-answer",
+    "ratio": 0.833,
+    "lcp": 88,
+    "lcs": 32,
+    "len_a": 636,
+    "len_b": 655,
+    "sha_equal": false,
+    "ref_sha": "d74c343e"
+   }
+  },
+  {
+   "idx": 19,
+   "kind": "code",
+   "sha": "589963a5",
+   "wall_s": 15.41,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.421,
+     "lcp": 116,
+     "lcs": 1,
+     "len_a": 771,
+     "len_b": 700,
+     "sha_equal": false,
+     "ref_sha": "85844a6e"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.497,
+     "lcp": 199,
+     "lcs": 1,
+     "len_a": 771,
+     "len_b": 741,
+     "sha_equal": false,
+     "ref_sha": "d3e0ef0b"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.645,
+     "lcp": 249,
+     "lcs": 1,
+     "len_a": 771,
+     "len_b": 734,
+     "sha_equal": false,
+     "ref_sha": "f7fbbcd9"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.645,
+     "lcp": 249,
+     "lcs": 1,
+     "len_a": 771,
+     "len_b": 734,
+     "sha_equal": false,
+     "ref_sha": "f7fbbcd9"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.645,
+    "lcp": 249,
+    "lcs": 1,
+    "len_a": 771,
+    "len_b": 734,
+    "sha_equal": false,
+    "ref_sha": "f7fbbcd9"
+   }
+  },
+  {
+   "idx": 20,
+   "kind": "reason",
+   "sha": "998facad",
+   "wall_s": 10.38,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.099,
+     "lcp": 4,
+     "lcs": 0,
+     "len_a": 302,
+     "len_b": 527,
+     "sha_equal": false,
+     "ref_sha": "21e25c96"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.485,
+     "lcp": 137,
+     "lcs": 0,
+     "len_a": 302,
+     "len_b": 354,
+     "sha_equal": false,
+     "ref_sha": "44f8ca14"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.485,
+     "lcp": 137,
+     "lcs": 0,
+     "len_a": 302,
+     "len_b": 354,
+     "sha_equal": false,
+     "ref_sha": "44f8ca14"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.485,
+     "lcp": 137,
+     "lcs": 0,
+     "len_a": 302,
+     "len_b": 354,
+     "sha_equal": false,
+     "ref_sha": "44f8ca14"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t4a",
+    "kind": "mid-answer",
+    "ratio": 0.485,
+    "lcp": 137,
+    "lcs": 0,
+    "len_a": 302,
+    "len_b": 354,
+    "sha_equal": false,
+    "ref_sha": "44f8ca14"
+   }
+  },
+  {
+   "idx": 21,
+   "kind": "reason",
+   "sha": "57ac9b02",
+   "wall_s": 11.42,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.088,
+     "lcp": 1,
+     "lcs": 0,
+     "len_a": 378,
+     "len_b": 573,
+     "sha_equal": false,
+     "ref_sha": "1b5f6745"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.839,
+     "lcp": 126,
+     "lcs": 0,
+     "len_a": 378,
+     "len_b": 359,
+     "sha_equal": false,
+     "ref_sha": "f3e2b4ec"
+    },
+    "t64a": {
+     "kind": "identical",
+     "ratio": 1.0,
+     "lcp": 378,
+     "lcs": 378,
+     "len_a": 378,
+     "len_b": 378,
+     "sha_equal": true,
+     "ref_sha": "57ac9b02"
+    },
+    "t64b": {
+     "kind": "identical",
+     "ratio": 1.0,
+     "lcp": 378,
+     "lcs": 378,
+     "len_a": 378,
+     "len_b": 378,
+     "sha_equal": true,
+     "ref_sha": "57ac9b02"
+    }
+   },
+   "verdict": "matches:t64a,t64b",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "identical",
+    "ratio": 1.0,
+    "lcp": 378,
+    "lcs": 378,
+    "len_a": 378,
+    "len_b": 378,
+    "sha_equal": true,
+    "ref_sha": "57ac9b02"
+   }
+  },
+  {
+   "idx": 22,
+   "kind": "reason",
+   "sha": "fd8be8f1",
+   "wall_s": 9.26,
+   "refs": {
+    "patha": {
+     "kind": "whole-answer",
+     "ratio": 0.02,
+     "lcp": 0,
+     "lcs": 0,
+     "len_a": 228,
+     "len_b": 559,
+     "sha_equal": false,
+     "ref_sha": "38c33059"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.91,
+     "lcp": 119,
+     "lcs": 112,
+     "len_a": 228,
+     "len_b": 273,
+     "sha_equal": false,
+     "ref_sha": "f0e49ef4"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.987,
+     "lcp": 157,
+     "lcs": 15,
+     "len_a": 228,
+     "len_b": 230,
+     "sha_equal": false,
+     "ref_sha": "be397dc3"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.987,
+     "lcp": 157,
+     "lcs": 15,
+     "len_a": 228,
+     "len_b": 230,
+     "sha_equal": false,
+     "ref_sha": "be397dc3"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.987,
+    "lcp": 157,
+    "lcs": 15,
+    "len_a": 228,
+    "len_b": 230,
+    "sha_equal": false,
+    "ref_sha": "be397dc3"
+   }
+  },
+  {
+   "idx": 23,
+   "kind": "reason",
+   "sha": "122258ea",
+   "wall_s": 11.66,
+   "refs": {
+    "patha": {
+     "kind": "mid-answer",
+     "ratio": 0.117,
+     "lcp": 0,
+     "lcs": 1,
+     "len_a": 299,
+     "len_b": 485,
+     "sha_equal": false,
+     "ref_sha": "046bccb5"
+    },
+    "t4a": {
+     "kind": "mid-answer",
+     "ratio": 0.854,
+     "lcp": 107,
+     "lcs": 1,
+     "len_a": 299,
+     "len_b": 310,
+     "sha_equal": false,
+     "ref_sha": "460b21c2"
+    },
+    "t64a": {
+     "kind": "mid-answer",
+     "ratio": 0.888,
+     "lcp": 207,
+     "lcs": 1,
+     "len_a": 299,
+     "len_b": 298,
+     "sha_equal": false,
+     "ref_sha": "b503754b"
+    },
+    "t64b": {
+     "kind": "mid-answer",
+     "ratio": 0.888,
+     "lcp": 207,
+     "lcs": 1,
+     "len_a": 299,
+     "len_b": 298,
+     "sha_equal": false,
+     "ref_sha": "b503754b"
+    }
+   },
+   "verdict": "divergent-from-all-refs",
+   "best_ref": {
+    "name": "t64a",
+    "kind": "mid-answer",
+    "ratio": 0.888,
+    "lcp": 207,
+    "lcs": 1,
+    "len_a": 299,
+    "len_b": 298,
+    "sha_equal": false,
+    "ref_sha": "b503754b"
+   }
+  }
+ ],
+ "summary": {
+  "identical_all_refs": 0,
+  "boot_noise_match": 2,
+  "divergent_from_all_refs": 22
+ }
+}

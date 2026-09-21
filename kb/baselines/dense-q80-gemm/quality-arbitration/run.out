@@ -1,0 +1,129 @@
+[arb 09:54:38] [census pre-boot] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1517 MiB, 30632 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 09:54:38] NOTE: idle llama-swap proxy present (['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']); holds no compute VRAM, not a VRAM holder - proceeding (sweep precedent, never killed)
+[arb 09:56:50] t4a boot ready in 131.8s (ok)
+[arb 09:59:02] t4a prefill median c2..c7 = 578.42 tok/s (anchor 563.9, dev 2.57%)
+[arb 09:59:17] [bat t4a] p00 ok  13.6s sha=b69853ef fin=length r=861c c=0c
+[arb 09:59:31] [bat t4a] p01 ok  14.0s sha=8a7878bf fin=length r=789c c=0c
+[arb 09:59:44] [bat t4a] p02 ok  13.0s sha=c2a6af90 fin=length r=664c c=0c
+[arb 09:59:57] [bat t4a] p03 ok  12.6s sha=bcca6038 fin=length r=780c c=0c
+[arb 10:00:10] [bat t4a] p04 ok  13.5s sha=9c6baf45 fin=length r=744c c=0c
+[arb 10:00:23] [bat t4a] p05 ok  12.9s sha=49c3de41 fin=length r=788c c=0c
+[arb 10:00:37] [bat t4a] p06 ok  13.7s sha=1491e652 fin=length r=740c c=0c
+[arb 10:00:51] [bat t4a] p07 ok  13.9s sha=f7a63601 fin=length r=500c c=268c
+[arb 10:01:05] [bat t4a] p08 ok  14.0s sha=d51a6fe6 fin=length r=798c c=0c
+[arb 10:01:17] [bat t4a] p09 ok  12.5s sha=40e92ed5 fin=length r=694c c=0c
+[arb 10:01:30] [bat t4a] p10 ok  13.2s sha=3d588dcd fin=length r=690c c=0c
+[arb 10:01:44] [bat t4a] p11 ok  13.3s sha=88790284 fin=length r=681c c=0c
+[arb 10:01:57] [bat t4a] p12 ok  13.2s sha=09e1974b fin=length r=705c c=0c
+[arb 10:02:11] [bat t4a] p13 ok  14.0s sha=5f6c089a fin=length r=707c c=0c
+[arb 10:02:24] [bat t4a] p14 ok  13.0s sha=a23cf120 fin=length r=589c c=0c
+[arb 10:02:37] [bat t4a] p15 ok  13.0s sha=25025145 fin=length r=707c c=0c
+[arb 10:02:53] [bat t4a] p16 ok  16.7s sha=06d8e99c fin=length r=679c c=0c
+[arb 10:03:11] [bat t4a] p17 ok  17.2s sha=7b6d0e66 fin=length r=746c c=0c
+[arb 10:03:27] [bat t4a] p18 ok  15.9s sha=deedee42 fin=length r=642c c=0c
+[arb 10:03:44] [bat t4a] p19 ok  17.0s sha=d3e0ef0b fin=length r=740c c=0c
+[arb 10:03:56] [bat t4a] p20 ok  12.6s sha=44f8ca14 fin=length r=136c c=217c
+[arb 10:04:08] [bat t4a] p21 ok  11.9s sha=f3e2b4ec fin=length r=260c c=98c
+[arb 10:04:18] [bat t4a] p22 ok  10.1s sha=f0e49ef4 fin=stop r=163c c=109c
+[arb 10:04:31] [bat t4a] p23 ok  12.9s sha=460b21c2 fin=length r=309c c=0c
+[arb 10:04:45] [census postflight] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1326 MiB, 30824 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 10:04:45] post teardown processes (benign standing proxy): ['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']
+[arb 10:04:45] [census pre-boot] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1326 MiB, 30824 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 10:04:45] NOTE: idle llama-swap proxy present (['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']); holds no compute VRAM, not a VRAM holder - proceeding (sweep precedent, never killed)
+[arb 10:06:46] t64a boot ready in 120.2s (ok)
+[arb 10:08:26] t64a prefill median c2..c7 = 808.15 tok/s (anchor 792.08, dev 2.03%)
+[arb 10:08:41] [bat t64a] p00 ok  13.6s sha=ec3a6255 fin=length r=833c c=0c
+[arb 10:08:55] [bat t64a] p01 ok  14.3s sha=4c5c906c fin=length r=774c c=0c
+[arb 10:09:07] [bat t64a] p02 ok  12.3s sha=9b33a4b3 fin=length r=677c c=0c
+[arb 10:09:21] [bat t64a] p03 ok  13.8s sha=51027630 fin=length r=763c c=0c
+[arb 10:09:35] [bat t64a] p04 ok  13.3s sha=9c6baf45 fin=length r=744c c=0c
+[arb 10:09:48] [bat t64a] p05 ok  13.9s sha=20dffdbc fin=length r=786c c=0c
+[arb 10:10:02] [bat t64a] p06 ok  13.6s sha=46b413f3 fin=length r=729c c=0c
+[arb 10:10:16] [bat t64a] p07 ok  14.0s sha=eb7bafc1 fin=length r=536c c=214c
+[arb 10:10:29] [bat t64a] p08 ok  13.3s sha=bec98427 fin=length r=786c c=0c
+[arb 10:10:43] [bat t64a] p09 ok  13.7s sha=f680fb1b fin=length r=638c c=0c
+[arb 10:10:56] [bat t64a] p10 ok  12.8s sha=e021d858 fin=length r=693c c=0c
+[arb 10:11:09] [bat t64a] p11 ok  13.3s sha=30215a37 fin=length r=666c c=0c
+[arb 10:11:23] [bat t64a] p12 ok  13.6s sha=db3c3985 fin=length r=717c c=0c
+[arb 10:11:36] [bat t64a] p13 ok  13.3s sha=51ad58c2 fin=length r=662c c=0c
+[arb 10:11:49] [bat t64a] p14 ok  13.2s sha=f468013d fin=length r=588c c=0c
+[arb 10:12:02] [bat t64a] p15 ok  13.0s sha=46c86a00 fin=length r=723c c=0c
+[arb 10:12:19] [bat t64a] p16 ok  16.5s sha=a3ad03df fin=length r=660c c=0c
+[arb 10:12:36] [bat t64a] p17 ok  17.3s sha=a1260f4b fin=length r=765c c=0c
+[arb 10:12:52] [bat t64a] p18 ok  16.1s sha=0ac8a86f fin=length r=614c c=0c
+[arb 10:13:08] [bat t64a] p19 ok  16.2s sha=f7fbbcd9 fin=length r=733c c=0c
+[arb 10:13:20] [bat t64a] p20 ok  11.8s sha=44f8ca14 fin=length r=136c c=217c
+[arb 10:13:32] [bat t64a] p21 ok  11.7s sha=57ac9b02 fin=length r=292c c=85c
+[arb 10:13:41] [bat t64a] p22 ok   9.6s sha=be397dc3 fin=stop r=118c c=111c
+[arb 10:13:53] [bat t64a] p23 ok  11.9s sha=b503754b fin=length r=297c c=0c
+[arb 10:14:08] [census postflight] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1326 MiB, 30823 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 10:14:08] post teardown processes (benign standing proxy): ['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']
+[arb 10:14:08] [census pre-boot] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1326 MiB, 30823 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 10:14:08] NOTE: idle llama-swap proxy present (['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']); holds no compute VRAM, not a VRAM holder - proceeding (sweep precedent, never killed)
+[arb 10:16:32] t4b boot ready in 144.3s (ok)
+[arb 10:18:44] t4b prefill median c2..c7 = 578.83 tok/s (anchor 563.9, dev 2.65%)
+[arb 10:18:59] [bat t4b] p00 ok  13.6s sha=ec3a6255 fin=length r=833c c=0c
+[arb 10:19:12] [bat t4b] p01 ok  13.0s sha=4c5c906c fin=length r=774c c=0c
+[arb 10:19:24] [bat t4b] p02 ok  12.5s sha=9b33a4b3 fin=length r=677c c=0c
+[arb 10:19:39] [bat t4b] p03 ok  15.0s sha=51027630 fin=length r=763c c=0c
+[arb 10:19:53] [bat t4b] p04 ok  13.5s sha=9c6baf45 fin=length r=744c c=0c
+[arb 10:20:07] [bat t4b] p05 ok  14.1s sha=20dffdbc fin=length r=786c c=0c
+[arb 10:20:21] [bat t4b] p06 ok  13.8s sha=46b413f3 fin=length r=729c c=0c
+[arb 10:20:35] [bat t4b] p07 ok  14.0s sha=eb7bafc1 fin=length r=536c c=214c
+[arb 10:20:48] [bat t4b] p08 ok  13.6s sha=bec98427 fin=length r=786c c=0c
+[arb 10:21:02] [bat t4b] p09 ok  13.3s sha=f680fb1b fin=length r=638c c=0c
+[arb 10:21:15] [bat t4b] p10 ok  12.9s sha=e021d858 fin=length r=693c c=0c
+[arb 10:21:29] [bat t4b] p11 ok  14.3s sha=30215a37 fin=length r=666c c=0c
+[arb 10:21:42] [bat t4b] p12 ok  13.3s sha=db3c3985 fin=length r=717c c=0c
+[arb 10:21:56] [bat t4b] p13 ok  13.7s sha=51ad58c2 fin=length r=662c c=0c
+[arb 10:22:09] [bat t4b] p14 ok  13.1s sha=f468013d fin=length r=588c c=0c
+[arb 10:22:22] [bat t4b] p15 ok  13.4s sha=46c86a00 fin=length r=723c c=0c
+[arb 10:22:39] [bat t4b] p16 ok  16.7s sha=a3ad03df fin=length r=660c c=0c
+[arb 10:22:56] [bat t4b] p17 ok  16.8s sha=a1260f4b fin=length r=765c c=0c
+[arb 10:23:12] [bat t4b] p18 ok  16.4s sha=0ac8a86f fin=length r=614c c=0c
+[arb 10:23:29] [bat t4b] p19 ok  16.7s sha=f7fbbcd9 fin=length r=733c c=0c
+[arb 10:23:41] [bat t4b] p20 ok  12.0s sha=44f8ca14 fin=length r=136c c=217c
+[arb 10:23:53] [bat t4b] p21 ok  11.9s sha=57ac9b02 fin=length r=292c c=85c
+[arb 10:24:03] [bat t4b] p22 ok   9.8s sha=be397dc3 fin=stop r=118c c=111c
+[arb 10:24:15] [bat t4b] p23 ok  12.4s sha=b503754b fin=length r=297c c=0c
+[arb 10:24:30] [census postflight] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1326 MiB, 30824 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 10:24:30] post teardown processes (benign standing proxy): ['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']
+[arb 10:24:30] [census pre-boot] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1326 MiB, 30824 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 10:24:30] NOTE: idle llama-swap proxy present (['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']); holds no compute VRAM, not a VRAM holder - proceeding (sweep precedent, never killed)
+[arb 10:26:27] t64b boot ready in 117.1s (ok)
+[arb 10:28:07] t64b prefill median c2..c7 = 808.12 tok/s (anchor 792.08, dev 2.03%)
+[arb 10:28:22] [bat t64b] p00 ok  13.2s sha=ec3a6255 fin=length r=833c c=0c
+[arb 10:28:35] [bat t64b] p01 ok  13.6s sha=4c5c906c fin=length r=774c c=0c
+[arb 10:28:48] [bat t64b] p02 ok  13.2s sha=9b33a4b3 fin=length r=677c c=0c
+[arb 10:29:02] [bat t64b] p03 ok  13.5s sha=51027630 fin=length r=763c c=0c
+[arb 10:29:15] [bat t64b] p04 ok  13.0s sha=9c6baf45 fin=length r=744c c=0c
+[arb 10:29:29] [bat t64b] p05 ok  13.7s sha=20dffdbc fin=length r=786c c=0c
+[arb 10:29:42] [bat t64b] p06 ok  13.5s sha=46b413f3 fin=length r=729c c=0c
+[arb 10:29:56] [bat t64b] p07 ok  14.3s sha=eb7bafc1 fin=length r=536c c=214c
+[arb 10:30:10] [bat t64b] p08 ok  13.8s sha=bec98427 fin=length r=786c c=0c
+[arb 10:30:23] [bat t64b] p09 ok  12.6s sha=f680fb1b fin=length r=638c c=0c
+[arb 10:30:35] [bat t64b] p10 ok  12.7s sha=e021d858 fin=length r=693c c=0c
+[arb 10:30:49] [bat t64b] p11 ok  13.6s sha=30215a37 fin=length r=666c c=0c
+[arb 10:31:02] [bat t64b] p12 ok  13.2s sha=db3c3985 fin=length r=717c c=0c
+[arb 10:31:15] [bat t64b] p13 ok  12.8s sha=51ad58c2 fin=length r=662c c=0c
+[arb 10:31:28] [bat t64b] p14 ok  12.9s sha=f468013d fin=length r=588c c=0c
+[arb 10:31:41] [bat t64b] p15 ok  13.3s sha=46c86a00 fin=length r=723c c=0c
+[arb 10:31:57] [bat t64b] p16 ok  16.4s sha=a3ad03df fin=length r=660c c=0c
+[arb 10:32:14] [bat t64b] p17 ok  16.7s sha=a1260f4b fin=length r=765c c=0c
+[arb 10:32:31] [bat t64b] p18 ok  17.0s sha=0ac8a86f fin=length r=614c c=0c
+[arb 10:32:48] [bat t64b] p19 ok  16.6s sha=f7fbbcd9 fin=length r=733c c=0c
+[arb 10:33:01] [bat t64b] p20 ok  13.0s sha=44f8ca14 fin=length r=136c c=217c
+[arb 10:33:13] [bat t64b] p21 ok  11.8s sha=57ac9b02 fin=length r=292c c=85c
+[arb 10:33:22] [bat t64b] p22 ok   9.8s sha=be397dc3 fin=stop r=118c c=111c
+[arb 10:33:34] [bat t64b] p23 ok  12.0s sha=b503754b fin=length r=297c c=0c
+[arb 10:33:49] [census postflight] procs=['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config'] vram=[1326 MiB, 30824 MiB] apps=[784032, hoptodesk, 302 MiB
+832729, /app/bin/hoptodesk, 190 MiB] sem.mp-=12
+[arb 10:33:49] post teardown processes (benign standing proxy): ['3316760 /bin/bash /media/ai/bin/llama-swap', '3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config']
+[arb 10:33:49] run rc=0

@@ -1,0 +1,57 @@
+68:              ggml_tensor    * pool_cells,
+70:              ggml_tensor    * pool_bias,
+73:              ggml_tensor    * pool_reps,
+74:              ggml_tensor    * new_pool_cells,
+75:              ggml_tensor    * new_pool_reps,
+84:    GGML_ASSERT(ggml_backend_buffer_is_host(pool_cells->buffer));
+85:    GGML_ASSERT(ggml_backend_buffer_is_host(pool_bias ->buffer));
+89:    GGML_ASSERT(pool_cells->type == GGML_TYPE_I32);
+90:    GGML_ASSERT(pool_bias ->type == GGML_TYPE_F32);
+95:    GGML_ASSERT(ggml_is_contiguous(pool_cells));
+96:    GGML_ASSERT(ggml_is_contiguous(pool_bias));
+110:    const int64_t n_pools = pool_cells->ne[0]/r;
+113:    GGML_ASSERT(pool_cells->ne[0] % r == 0);
+115:    GGML_ASSERT(pool_cells->ne[1] == n_ns);
+118:    GGML_ASSERT(pool_bias->ne[0] == n_pools && pool_bias->ne[2] == n_ns);
+124:    GGML_ASSERT(pool_bias->ne[1] == n_tps);
+144:    const bool kcache = pool_reps != nullptr;
+146:    GGML_ASSERT((new_pool_cells != nullptr) == kcache);
+147:    GGML_ASSERT((new_pool_reps  != nullptr) == kcache);
+152:        GGML_ASSERT(ggml_backend_buffer_is_host(pool_reps     ->buffer));
+153:        GGML_ASSERT(ggml_backend_buffer_is_host(new_pool_cells->buffer));
+154:        GGML_ASSERT(ggml_backend_buffer_is_host(new_pool_reps ->buffer));
+156:        GGML_ASSERT(pool_reps     ->type == GGML_TYPE_I32);
+157:        GGML_ASSERT(new_pool_cells->type == GGML_TYPE_I32);
+158:        GGML_ASSERT(new_pool_reps ->type == GGML_TYPE_I64);
+160:        GGML_ASSERT(ggml_is_contiguous(pool_reps));
+161:        GGML_ASSERT(ggml_is_contiguous(new_pool_cells));
+162:        GGML_ASSERT(ggml_is_contiguous(new_pool_reps));
+164:        GGML_ASSERT(pool_reps->ne[0] == n_pools && pool_reps->ne[1] == n_ns);
+165:        GGML_ASSERT(new_pool_cells->ne[0] % r == 0 && new_pool_cells->ne[1] == n_ns);
+167:        n_new_max = new_pool_cells->ne[0]/r;
+169:        GGML_ASSERT(new_pool_reps->ne[0] == n_new_max*n_ns);
+173:    int32_t * dst_pool_reps = kcache ? (int32_t *) pool_reps     ->data : nullptr;
+174:    int32_t * dst_new_cells = kcache ? (int32_t *) new_pool_cells->data : nullptr;
+175:    int64_t * dst_new_reps  = kcache ? (int64_t *) new_pool_reps ->data : nullptr;
+178:    int32_t * dst_pool_cells = (int32_t *) pool_cells->data;
+180:    float   * dst_pool_bias  = (float   *) pool_bias ->data;
+200:        int32_t * cur_pool_cells = dst_pool_cells + s*(r*n_pools);
+203:        float   * cur_pool_bias  = dst_pool_bias  + s*(n_tps*n_pools);
+205:        std::fill(cur_pool_cells, cur_pool_cells + r*n_pools, 0);
+206:        std::fill(cur_pool_bias,  cur_pool_bias  + n_tps*n_pools, -INFINITY);
+208:        int32_t * cur_pool_reps = kcache ? dst_pool_reps + s*n_pools        : nullptr;
+218:            // a pool with no rep gathers row 0; such a pool is -INFINITY in pool_bias, so discarded
+219:            std::fill(cur_pool_reps, cur_pool_reps + n_pools, 0);
+285:            int32_t * part_pool_cells = cur_pool_cells + run_off[ps]*r;
+329:                part_pool_cells[bo*r + (p%r)] = (int32_t) j;
+349:                        cur_pool_reps[run_off[ps] + p] = part_pool_cells[p*r + (r - 1)];
+352:                            any_rep_src = part_pool_cells + p*r;
+383:                    std::copy(part_pool_cells + p*r, part_pool_cells + (p + 1)*r,
+386:                    cur_new_reps[n_new] = (int64_t) strm_of[s]*kv_size + part_pool_cells[p*r + (r - 1)];
+431:                float * q_pool_bias = cur_pool_bias + ii*n_pools + run_off[ps];
+437:                    q_pool_bias[p] = valid && visible ? 0.0f : -INFINITY;
+465:    if (pool_cells == nullptr) {
+471:    if (pool_reps) {
+481:            /* cell_pool */ nullptr, pool_cells, /* bias */ nullptr, pool_bias,
+483:            pool_reps, new_pool_cells, new_pool_reps,
+485:            pool_reps ? (int64_t) mctx_idx->get_kv()->get_size() : 0,

@@ -1,0 +1,107 @@
+{
+ "tag": "B_B",
+ "extra": [
+  "--max-running-requests",
+  "1"
+ ],
+ "boot": {
+  "ready": true,
+  "ready_s": 86.2,
+  "why": "ok",
+  "gpu_after_boot_mib": 29278
+ },
+ "reqs": {
+  "A1": {
+   "name": "A1",
+   "wall_s": 22.8,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 1152,
+    "completion_tokens": 63,
+    "total_tokens": 1215
+   },
+   "prefill": [
+    {
+     "new": 1152,
+     "cached": 0,
+     "mamba": "4/8",
+     "thr": 53.17
+    }
+   ],
+   "prompt_chars": 6108,
+   "watch": false
+  },
+  "A2": {
+   "name": "A2",
+   "wall_s": 6.96,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 1152,
+    "completion_tokens": 63,
+    "total_tokens": 1215
+   },
+   "prefill": [
+    {
+     "new": 64,
+     "cached": 1088,
+     "mamba": "4/8",
+     "thr": 9.13
+    }
+   ],
+   "prompt_chars": 6108,
+   "watch": false
+  },
+  "B1": {
+   "name": "B1",
+   "wall_s": 42.88,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 9664,
+    "completion_tokens": 63,
+    "total_tokens": 9727
+   },
+   "prefill": [
+    {
+     "new": 4096,
+     "cached": 0,
+     "mamba": "3/8",
+     "thr": 124.22
+    },
+    {
+     "new": 4096,
+     "cached": 0,
+     "mamba": "3/8",
+     "thr": 508.13
+    },
+    {
+     "new": 1472,
+     "cached": 0,
+     "mamba": "4/8",
+     "thr": 960.44
+    }
+   ],
+   "prompt_chars": 50427,
+   "watch": false
+  },
+  "B2": {
+   "name": "B2",
+   "wall_s": 7.36,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 9664,
+    "completion_tokens": 63,
+    "total_tokens": 9727
+   },
+   "prefill": [
+    {
+     "new": 64,
+     "cached": 9600,
+     "mamba": "4/8",
+     "thr": 8.8
+    }
+   ],
+   "prompt_chars": 50427,
+   "watch": false
+  }
+ }
+}

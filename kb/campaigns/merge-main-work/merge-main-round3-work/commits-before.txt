@@ -1,0 +1,2 @@
+6410c97 fix(engine): raise WeightLoadError when the checkpoint cannot be read (#518)
+1d8a541 fix(kernel): pin tvm-ffi jit arch to the bound gpu (#521)

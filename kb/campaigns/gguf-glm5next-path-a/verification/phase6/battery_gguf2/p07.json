@@ -1,0 +1,16 @@
+{
+ "idx": 7,
+ "kind": "en",
+ "prompt": "Summarize how vaccines train the immune system, for a general reader.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "```json\n{\n  \"type\": \"deltarune\",\n  \"name\": \"Deltarune\",\n  \"description\": \"A package for Deltarune.\",\n  \"author\": \"Toby Fox\",\n  \"version\": \"1.0.0\",\n  \"minAppVersion\": \"0.15.0\",\n  \"description\": \"A package for Deltarune.\",\n  \"author\": \"Toby Fox\",\n  \"version\": \"1.0.0\",\n  \"minAppVersion\": \"0.15.0\",\n  \"files\": [\n    \"index.js\",\n    \"styles.css\"\n  ]\n}\n```\nWait, I need to output the raw JSON content only, no markdown code fences. Let me check the prompt",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 27,
+  "completion_tokens": 159,
+  "total_tokens": 186
+ },
+ "wall_s": 15.11
+}

@@ -1,0 +1,30 @@
+### reasoning
+The user wants a Python Stack class with:
+1. push, pop, and peek methods
+2. Type hints
+3. A short docstring
+
+Let me write a clean, well-typed Stack class. I should consider:
+- Using generics (TypeVar) so the stack can hold any type, or I could just make it generic with `Generic[T]`
+- Type hints on all methods
+- A short docstring for the class and possibly for methods
+- Handling edge cases: pop/peek on empty stack should raise an error (IndexError is conventional)
+
+Let me write it:
+
+```python
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+
+class Stack(Generic[T]):
+    """A simple LIFO (last-in, first-out) stack."""
+
+    def __init__(self) -> None:
+        self._items: list[T] = []
+
+    def push(self, item: T) -> None
+
+### content
+

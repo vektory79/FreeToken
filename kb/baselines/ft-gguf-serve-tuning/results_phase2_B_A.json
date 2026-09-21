@@ -1,0 +1,127 @@
+{
+ "tag": "B_A",
+ "extra": [
+  "--memory-ratio",
+  "0.90"
+ ],
+ "boot": {
+  "ready": true,
+  "ready_s": 88.2,
+  "why": "ok",
+  "gpu_after_boot_mib": 29600
+ },
+ "reqs": {
+  "A1": {
+   "name": "A1",
+   "wall_s": 22.87,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 1152,
+    "completion_tokens": 63,
+    "total_tokens": 1215
+   },
+   "prefill": [
+    {
+     "new": 1152,
+     "cached": 0,
+     "mamba": "4/24",
+     "thr": 51.26
+    }
+   ],
+   "prompt_chars": 6108,
+   "watch": false
+  },
+  "A2": {
+   "name": "A2",
+   "wall_s": 7.14,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 1152,
+    "completion_tokens": 63,
+    "total_tokens": 1215
+   },
+   "prefill": [
+    {
+     "new": 64,
+     "cached": 1088,
+     "mamba": "4/24",
+     "thr": 8.89
+    }
+   ],
+   "prompt_chars": 6108,
+   "watch": false
+  },
+  "B1": {
+   "name": "B1",
+   "wall_s": 43.18,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 9664,
+    "completion_tokens": 63,
+    "total_tokens": 9727
+   },
+   "prefill": [
+    {
+     "new": 4096,
+     "cached": 0,
+     "mamba": "3/24",
+     "thr": 123.6
+    },
+    {
+     "new": 4096,
+     "cached": 0,
+     "mamba": "3/24",
+     "thr": 509.25
+    },
+    {
+     "new": 1472,
+     "cached": 0,
+     "mamba": "4/24",
+     "thr": 966.54
+    }
+   ],
+   "prompt_chars": 50427,
+   "watch": false
+  },
+  "B2": {
+   "name": "B2",
+   "wall_s": 7.7,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 9664,
+    "completion_tokens": 63,
+    "total_tokens": 9727
+   },
+   "prefill": [
+    {
+     "new": 64,
+     "cached": 9600,
+     "mamba": "4/24",
+     "thr": 8.4
+    }
+   ],
+   "prompt_chars": 50427,
+   "watch": false
+  },
+  "A3": {
+   "name": "A3",
+   "wall_s": 7.37,
+   "error": null,
+   "usage": {
+    "prompt_tokens": 1152,
+    "completion_tokens": 63,
+    "total_tokens": 1215
+   },
+   "prefill": [
+    {
+     "new": 64,
+     "cached": 1088,
+     "mamba": "4/24",
+     "thr": 0.95
+    }
+   ],
+   "prompt_chars": 6108,
+   "watch": false
+  }
+ }
+}

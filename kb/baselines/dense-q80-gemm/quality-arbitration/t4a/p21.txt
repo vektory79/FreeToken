@@ -1,0 +1,17 @@
+### reasoning
+Today is Wednesday. I need to find what day it will be in 100 days.
+
+100 mod 7 = 100 ÷ 7 = 14 remainder 2 (since 14 × 7 = 98, 100 - 98 = 2).
+
+So 100 days is 14 full weeks plus 2 extra days.
+
+Wednesday + 2 days = Thursday (1), Friday (2).
+
+So it will be Friday.
+
+### content
+**Friday.**
+
+Here's why: Days of the week repeat every 7 days, so divide 100 by 7:
+
+- 100 ÷ 7 = 14

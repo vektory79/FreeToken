@@ -1,0 +1,16 @@
+{
+ "idx": 2,
+ "kind": "en",
+ "prompt": "Describe a rainy evening in a small coastal town using vivid sensory detail.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "The user wants a descriptive piece about a rainy evening in a small coastal town, using vivid sensory detail. This is a creative writing request — pure prose, no factual claims to worry about, no safety concerns. Just craft.\n\nLet me think about what makes this good:\n\n**Sensory categories to cover:**\n- Sound: rain on different surfaces (tin roofs, awnings, water), foghorns, buoys, gulls, wind, the hiss of tires on wet pavement, lobster boats knocking against docks, rain gutters\n- Sight: sodium streetlights reflecting in puddles, wet asphalt like dark mirrors, fishing boats bobbing, fog, the gray-green sea barely visible, lit windows of shops and homes, neon of a diner or bar\n- Smell",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 26,
+  "completion_tokens": 159,
+  "total_tokens": 185
+ },
+ "wall_s": 14.09
+}

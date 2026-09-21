@@ -1,0 +1,727 @@
+{
+ "meta": {
+  "single_variable": "FREETOKEN_GGUF_KDA_NSPLIT (nsplit1 unset=1 vs nsplit2=2)",
+  "anchor": "MTILE=32 (FREETOKEN_GGUF_MOE_MTILE=32 both boots), port 18801",
+  "fill": "65,585 tokens (8x8128 + 561), .tasks/ft-gguf-serve-tuning/filler.txt",
+  "nsys_window": "fill chunks 3..7 (start after 2nd, stop after 6th thr line)",
+  "validity_refs": {
+   "morning_knob1_anchor_tok_s": 546.5,
+   "committed_class_tok_s": 556.43
+  },
+  "judge": {
+   "gross_window_s": [
+    0.24,
+    0.28
+   ],
+   "net_window_s": [
+    0.22,
+    0.26
+   ]
+  }
+ },
+ "nsplit1": {
+  "T_steady_s": 14.853,
+  "chunk_time_s": 14.853,
+  "window_s": 59.972,
+  "chunks_eq": 4.038,
+  "busy_s_per_chunk": 14.846,
+  "idle_s_per_chunk": 0.007,
+  "prefill": {
+   "all_lines": [
+    168.72,
+    551.22,
+    547.28,
+    549.13,
+    547.2,
+    547.19,
+    545.99,
+    2111.06,
+    570.13
+   ],
+   "steady_c2_c7": [
+    551.22,
+    547.28,
+    549.13,
+    547.2,
+    547.19,
+    545.99
+   ],
+   "median_tok_s": 547.24,
+   "chunk_s_median": 14.853
+  },
+  "dense_term": {
+   "s_per_chunk": 6.0947,
+   "classes": {
+    "kda_o_proj": {
+     "n_per_chunk": 34.67,
+     "med_ms": 25.031,
+     "s_per_chunk": 0.8735
+    },
+    "dense_ffn_gate_up": {
+     "n_per_chunk": 7.43,
+     "med_ms": 37.281,
+     "s_per_chunk": 0.2784
+    },
+    "dense_ffn_down": {
+     "n_per_chunk": 3.47,
+     "med_ms": 37.517,
+     "s_per_chunk": 0.131
+    },
+    "kda_in_proj_fused": {
+     "n_per_chunk": 34.18,
+     "med_ms": 91.744,
+     "s_per_chunk": 3.1466
+    },
+    "kda_ssm_f_b/g_b": {
+     "n_per_chunk": 68.35,
+     "med_ms": 0.819,
+     "s_per_chunk": 0.0566
+    },
+    "mla_q_a": {
+     "n_per_chunk": 10.9,
+     "med_ms": 4.602,
+     "s_per_chunk": 0.0524
+    },
+    "mla_q_b": {
+     "n_per_chunk": 10.9,
+     "med_ms": 18.795,
+     "s_per_chunk": 0.2109
+    },
+    "mla_kv_a_mqa": {
+     "n_per_chunk": 10.9,
+     "med_ms": 1.559,
+     "s_per_chunk": 0.017
+    },
+    "mla_o_proj": {
+     "n_per_chunk": 11.14,
+     "med_ms": 48.724,
+     "s_per_chunk": 0.5502
+    },
+    "shexp_gate_up": {
+     "n_per_chunk": 83.21,
+     "med_ms": 6.197,
+     "s_per_chunk": 0.5229
+    },
+    "shexp_down": {
+     "n_per_chunk": 41.11,
+     "med_ms": 6.19,
+     "s_per_chunk": 0.2553
+    }
+   }
+  },
+  "kda_in_proj": {
+   "mode": "fused",
+   "launches_per_chunk": 34.18,
+   "expected_launches_per_chunk": 34,
+   "liveness": "PASS",
+   "per_launch_med_ms": 91.744,
+   "tflop_per_s": 18068.55,
+   "s_per_chunk": 3.1466,
+   "near_copy_table": {
+    "elementwise_kernel": {
+     "per_launch": 2.0,
+     "s_per_chunk": 0.00024
+    }
+   }
+  },
+  "grouped_moe": {
+   "per_name": {
+    "moe_iq3_xxs": {
+     "n_per_chunk": 81.23,
+     "s_per_chunk": 2.7066
+    },
+    "moe_iq4_xs": {
+     "n_per_chunk": 40.62,
+     "s_per_chunk": 1.5042
+    },
+    "moe_q6_K": {
+     "n_per_chunk": 2.97,
+     "s_per_chunk": 0.0862
+    }
+   },
+   "total_s_per_chunk": 4.297,
+   "align": {
+    "n_per_chunk": 41.61,
+    "s_per_chunk": 0.00107
+   }
+  },
+  "fetch_copies_s_per_chunk": 3.0577,
+  "rest_s_per_chunk": 1.3964,
+  "copyish_top_table": {
+   "fast_index_copy_multi": {
+    "n_per_chunk": 41.61,
+    "med_ms": 71.3808,
+    "s_per_chunk": 3.05774
+   },
+   "elementwise_kernel": {
+    "n_per_chunk": 2373.82,
+    "med_ms": 0.0036,
+    "s_per_chunk": 0.20901
+   },
+   "CatArrayBatchedCopy_vectorized": {
+    "n_per_chunk": 108.72,
+    "med_ms": 0.5293,
+    "s_per_chunk": 0.04306
+   },
+   "vectorized_elementwise_kernel": {
+    "n_per_chunk": 4037.85,
+    "med_ms": 0.0011,
+    "s_per_chunk": 0.01944
+   },
+   "unrolled_elementwise_kernel": {
+    "n_per_chunk": 262.27,
+    "med_ms": 0.0023,
+    "s_per_chunk": 0.00697
+   },
+   "_scatter_gather_elementwise_kernel": {
+    "n_per_chunk": 217.94,
+    "med_ms": 0.0062,
+    "s_per_chunk": 0.00129
+   },
+   "CatArrayBatchedCopy_alignedK_contig": {
+    "n_per_chunk": 175.34,
+    "med_ms": 0.0052,
+    "s_per_chunk": 0.0009
+   },
+   "index_elementwise_kernel": {
+    "n_per_chunk": 142.65,
+    "med_ms": 0.0049,
+    "s_per_chunk": 0.00071
+   },
+   "elementwise_kernel_with_index": {
+    "n_per_chunk": 699.39,
+    "med_ms": 0.0005,
+    "s_per_chunk": 0.00035
+   }
+  },
+  "dense_term_eff_s_per_chunk": 6.0947,
+  "decode": {
+   "wall_s": 9.23,
+   "error": null,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "steady_tok_s": 13.35,
+   "p50_tok_s": 13.48,
+   "avg_tok_s": 6.83,
+   "min_inst_tok_s": 7.97,
+   "new_token": 49,
+   "cached_token": 65536
+  },
+  "prompts": [
+   {
+    "i": 0,
+    "prompt": "What is 17 * 23? Answer with just the number.",
+    "output_sha256": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+    "error": null,
+    "completion_tokens": 44,
+    "cached_token": 0,
+    "wall_s": 6.44
+   },
+   {
+    "i": 1,
+    "prompt": "Name the capital of France and one famous landmark there. One sentence.",
+    "output_sha256": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.61
+   },
+   {
+    "i": 2,
+    "prompt": "Write a haiku about rain on a tin roof.",
+    "output_sha256": "fe5fba17a6283ff0f014c5fcd53d83c2d888c8c3325c093fcc2629df41c5b94b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.87
+   },
+   {
+    "i": 3,
+    "prompt": "Explain in two sentences why the sky is blue.",
+    "output_sha256": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.98
+   },
+   {
+    "i": 4,
+    "prompt": "Translate 'good morning' into German, French, and Spanish.",
+    "output_sha256": "717dc9da1046ec8af635d264224996365548c6db1a2ef35cb421ab61e13bce94",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.77
+   },
+   {
+    "i": 5,
+    "prompt": "Count from 1 to 20, comma separated.",
+    "output_sha256": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.77
+   }
+  ],
+  "server_env_pins": {
+   "FREETOKEN_GGUF_MOE_MTILE": "32",
+   "NSYS_SESSION": "nsplit1cap"
+  },
+  "graph_capture_lines": [
+   "\u001b[1m[2026-09-19|18:59:17|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Start capturing CUDA graphs with sizes: [1]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]ninja: no work to do.",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.20s/batch]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.20s/batch]"
+  ],
+  "capture": {
+   "started": true,
+   "stopped": true,
+   "failed": null,
+   "n_thr": 6,
+   "t_start": 1789833625.9263895,
+   "t_stop": 1789833690.289691,
+   "start_rc": 0,
+   "start_err": "",
+   "stop_rc": 0,
+   "stop_err": "                    ] report1.nsys-rep\n[1/1] [====28%                     ] report1.nsys-rep\n[1/1] [=====32%                    ] report1.nsys-rep\n[1/1] [=======36%                  ] report1.nsys-rep\n[1/1] [========40%                 ] report1.nsys-rep\n[1/1] [=========44%                ] report1.nsys-rep\n[1/1] [==========48%               ] report1.nsys-rep\n[1/1] [===========51%              ] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\nGenerated:\n\t/media/ai/src/FreeToken/.tasks/dense-q80-gemm/report1.nsys-rep\n"
+  },
+  "teardown": {
+   "leftover": [],
+   "gpu_mib": 1394
+  }
+ },
+ "nsplit2": {
+  "T_steady_s": 14.476,
+  "chunk_time_s": 14.476,
+  "window_s": 57.967,
+  "chunks_eq": 4.004,
+  "busy_s_per_chunk": 14.469,
+  "idle_s_per_chunk": 0.006,
+  "prefill": {
+   "all_lines": [
+    168.93,
+    564.58,
+    562.13,
+    562.8,
+    560.31,
+    560.87,
+    559.38,
+    2100.82,
+    558.82
+   ],
+   "steady_c2_c7": [
+    564.58,
+    562.13,
+    562.8,
+    560.31,
+    560.87,
+    559.38
+   ],
+   "median_tok_s": 561.5,
+   "chunk_s_median": 14.476
+  },
+  "dense_term": {
+   "s_per_chunk": 5.529,
+   "classes": {
+    "mla_o_proj": {
+     "n_per_chunk": 11.24,
+     "med_ms": 48.819,
+     "s_per_chunk": 0.5611
+    },
+    "shexp_gate_up": {
+     "n_per_chunk": 83.91,
+     "med_ms": 6.198,
+     "s_per_chunk": 0.5355
+    },
+    "shexp_down": {
+     "n_per_chunk": 40.95,
+     "med_ms": 6.198,
+     "s_per_chunk": 0.2585
+    },
+    "kda_in_proj_half": {
+     "n_per_chunk": 67.92,
+     "med_ms": 37.829,
+     "s_per_chunk": 2.6347
+    },
+    "kda_ssm_f_b/g_b": {
+     "n_per_chunk": 67.92,
+     "med_ms": 0.799,
+     "s_per_chunk": 0.0553
+    },
+    "kda_o_proj": {
+     "n_per_chunk": 34.96,
+     "med_ms": 24.878,
+     "s_per_chunk": 0.8724
+    },
+    "mla_q_a": {
+     "n_per_chunk": 10.99,
+     "med_ms": 4.591,
+     "s_per_chunk": 0.0507
+    },
+    "mla_q_b": {
+     "n_per_chunk": 10.99,
+     "med_ms": 18.733,
+     "s_per_chunk": 0.2104
+    },
+    "mla_kv_a_mqa": {
+     "n_per_chunk": 10.99,
+     "med_ms": 1.551,
+     "s_per_chunk": 0.0174
+    },
+    "dense_ffn_gate_up": {
+     "n_per_chunk": 5.99,
+     "med_ms": 37.53,
+     "s_per_chunk": 0.228
+    },
+    "dense_ffn_down": {
+     "n_per_chunk": 2.75,
+     "med_ms": 37.598,
+     "s_per_chunk": 0.105
+    }
+   }
+  },
+  "kda_in_proj": {
+   "mode": "split",
+   "launches_per_chunk": 67.92,
+   "expected_launches_per_chunk": 68,
+   "liveness": "PASS",
+   "per_half_launch_med_ms": 37.829,
+   "per_pair_kernel_med_ms": 76.584,
+   "tflop_per_s_per_half": 21910.36,
+   "tflop_per_s_per_call": 21645.44,
+   "s_per_chunk_kernels": 2.6347,
+   "span_copy_table": {
+    "elementwise_kernel": {
+     "per_pair": 3.993,
+     "med_ms": 0.2631,
+     "s_per_chunk": 0.01919
+    }
+   },
+   "span_copy_total_s_per_chunk": 0.01919
+  },
+  "grouped_moe": {
+   "per_name": {
+    "moe_iq3_xxs": {
+     "n_per_chunk": 81.91,
+     "s_per_chunk": 2.7576
+    },
+    "moe_iq4_xs": {
+     "n_per_chunk": 40.95,
+     "s_per_chunk": 1.5406
+    },
+    "moe_q6_K": {
+     "n_per_chunk": 3.0,
+     "s_per_chunk": 0.0872
+    }
+   },
+   "total_s_per_chunk": 4.3854,
+   "align": {
+    "n_per_chunk": 41.95,
+    "s_per_chunk": 0.00109
+   }
+  },
+  "fetch_copies_s_per_chunk": 3.1106,
+  "rest_s_per_chunk": 1.4251,
+  "copyish_top_table": {
+   "fast_index_copy_multi": {
+    "n_per_chunk": 41.95,
+    "med_ms": 71.863,
+    "s_per_chunk": 3.11058
+   },
+   "elementwise_kernel": {
+    "n_per_chunk": 2462.49,
+    "med_ms": 0.0036,
+    "s_per_chunk": 0.22778
+   },
+   "CatArrayBatchedCopy_vectorized": {
+    "n_per_chunk": 108.88,
+    "med_ms": 0.5274,
+    "s_per_chunk": 0.04212
+   },
+   "vectorized_elementwise_kernel": {
+    "n_per_chunk": 4078.42,
+    "med_ms": 0.0011,
+    "s_per_chunk": 0.02049
+   },
+   "unrolled_elementwise_kernel": {
+    "n_per_chunk": 262.71,
+    "med_ms": 0.0022,
+    "s_per_chunk": 0.00714
+   },
+   "_scatter_gather_elementwise_kernel": {
+    "n_per_chunk": 220.25,
+    "med_ms": 0.0062,
+    "s_per_chunk": 0.00162
+   },
+   "CatArrayBatchedCopy_alignedK_contig": {
+    "n_per_chunk": 177.3,
+    "med_ms": 0.0052,
+    "s_per_chunk": 0.00091
+   },
+   "index_elementwise_kernel": {
+    "n_per_chunk": 140.84,
+    "med_ms": 0.0048,
+    "s_per_chunk": 0.00068
+   },
+   "elementwise_kernel_with_index": {
+    "n_per_chunk": 706.71,
+    "med_ms": 0.0005,
+    "s_per_chunk": 0.00035
+   }
+  },
+  "dense_term_eff_s_per_chunk": 5.5481,
+  "decode": {
+   "wall_s": 9.15,
+   "error": null,
+   "completion_tokens": 63,
+   "chunks": 65,
+   "steady_tok_s": 13.61,
+   "p50_tok_s": 13.69,
+   "avg_tok_s": 6.89,
+   "min_inst_tok_s": 7.32,
+   "new_token": 49,
+   "cached_token": 65536
+  },
+  "prompts": [
+   {
+    "i": 0,
+    "prompt": "What is 17 * 23? Answer with just the number.",
+    "output_sha256": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+    "error": null,
+    "completion_tokens": 44,
+    "cached_token": 0,
+    "wall_s": 6.17
+   },
+   {
+    "i": 1,
+    "prompt": "Name the capital of France and one famous landmark there. One sentence.",
+    "output_sha256": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.33
+   },
+   {
+    "i": 2,
+    "prompt": "Write a haiku about rain on a tin roof.",
+    "output_sha256": "fe5fba17a6283ff0f014c5fcd53d83c2d888c8c3325c093fcc2629df41c5b94b",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.4
+   },
+   {
+    "i": 3,
+    "prompt": "Explain in two sentences why the sky is blue.",
+    "output_sha256": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.55
+   },
+   {
+    "i": 4,
+    "prompt": "Translate 'good morning' into German, French, and Spanish.",
+    "output_sha256": "717dc9da1046ec8af635d264224996365548c6db1a2ef35cb421ab61e13bce94",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.12
+   },
+   {
+    "i": 5,
+    "prompt": "Count from 1 to 20, comma separated.",
+    "output_sha256": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+    "error": null,
+    "completion_tokens": 95,
+    "cached_token": 0,
+    "wall_s": 9.05
+   }
+  ],
+  "server_env_pins": {
+   "FREETOKEN_GGUF_MOE_MTILE": "32",
+   "FREETOKEN_GGUF_KDA_NSPLIT": "2",
+   "NSYS_SESSION": "nsplit2cap"
+  },
+  "graph_capture_lines": [
+   "\u001b[1m[2026-09-19|19:09:40|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Start capturing CUDA graphs with sizes: [1]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]ninja: no work to do.",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.26s/batch]",
+   "Capturing graphs: bs = 1   | avail_mem = 4.07 GiB: 100%|██████████| 1/1 [00:03<00:00,  3.26s/batch]"
+  ],
+  "capture": {
+   "started": true,
+   "stopped": true,
+   "failed": null,
+   "n_thr": 6,
+   "t_start": 1789834248.9945536,
+   "t_stop": 1789834311.1208537,
+   "start_rc": 0,
+   "start_err": "",
+   "stop_rc": 0,
+   "stop_err": "                    ] report1.nsys-rep\n[1/1] [====27%                     ] report1.nsys-rep\n[1/1] [=====32%                    ] report1.nsys-rep\n[1/1] [=======36%                  ] report1.nsys-rep\n[1/1] [========40%                 ] report1.nsys-rep\n[1/1] [=========44%                ] report1.nsys-rep\n[1/1] [==========48%               ] report1.nsys-rep\n[1/1] [===========51%              ] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\n[1/1] [========================100%] report1.nsys-rep\nGenerated:\n\t/media/ai/src/FreeToken/.tasks/dense-q80-gemm/report1.nsys-rep\n"
+  },
+  "teardown": {
+   "leftover": [],
+   "gpu_mib": 1394
+  }
+ },
+ "comparison": {
+  "prefill_median_tok_s": {
+   "nsplit1": 547.24,
+   "nsplit2": 561.5,
+   "delta_pct": 2.61
+  },
+  "chunk_time_s": {
+   "nsplit1": 14.853,
+   "nsplit2": 14.476,
+   "delta_s": 0.377
+  },
+  "validity_gate_nsplit1": {
+   "tok_s": 547.24,
+   "delta_vs_morning_anchor_pct": 0.14,
+   "delta_vs_class_pct": -1.65,
+   "band": "~-2..+3%",
+   "verdict": "PASS"
+  },
+  "dense_term_eff_s": {
+   "nsplit1": 6.0947,
+   "nsplit2": 5.5481,
+   "recovery_s": 0.5466
+  },
+  "kda_per_launch": {
+   "nsplit1_per_launch_ms": 91.744,
+   "nsplit1_per_chunk_kernels_s": 3.1466,
+   "nsplit2_per_half_ms": 37.829,
+   "nsplit2_per_pair_kernel_ms": 76.584,
+   "nsplit2_kernels_per_chunk_s": 2.6347,
+   "nsplit1_tflop_s": 18068.55,
+   "nsplit2_tflop_s_per_half": 21910.36,
+   "nsplit2_tflop_s_per_call": 21645.44
+  },
+  "liveness": {
+   "nsplit1": "PASS",
+   "nsplit1_launches": 34.18,
+   "nsplit2": "PASS",
+   "nsplit2_launches": 67.92
+  },
+  "judge_on_net": {
+   "recovery_s": 0.5466,
+   "net_window_s": [
+    0.22,
+    0.26
+   ],
+   "gross_window_s": [
+    0.24,
+    0.28
+   ],
+   "verdict": "ABOVE_UPPER_BOUND"
+  },
+  "decode": {
+   "nsplit1_steady_tok_s": 13.35,
+   "nsplit2_steady_tok_s": 13.61,
+   "class": [
+    13.5,
+    14.7
+   ]
+  },
+  "bitwise_diff": {
+   "method": "6 greedy prompts, sha256 over the raw choices JSON",
+   "identical": true,
+   "per_prompt": [
+    {
+     "i": 0,
+     "equal": true,
+     "sha_nsplit1": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+     "sha_nsplit2": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+     "nsplit1_error": null,
+     "nsplit2_error": null
+    },
+    {
+     "i": 1,
+     "equal": true,
+     "sha_nsplit1": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+     "sha_nsplit2": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+     "nsplit1_error": null,
+     "nsplit2_error": null
+    },
+    {
+     "i": 2,
+     "equal": true,
+     "sha_nsplit1": "fe5fba17a6283ff0f014c5fcd53d83c2d888c8c3325c093fcc2629df41c5b94b",
+     "sha_nsplit2": "fe5fba17a6283ff0f014c5fcd53d83c2d888c8c3325c093fcc2629df41c5b94b",
+     "nsplit1_error": null,
+     "nsplit2_error": null
+    },
+    {
+     "i": 3,
+     "equal": true,
+     "sha_nsplit1": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df",
+     "sha_nsplit2": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df",
+     "nsplit1_error": null,
+     "nsplit2_error": null
+    },
+    {
+     "i": 4,
+     "equal": true,
+     "sha_nsplit1": "717dc9da1046ec8af635d264224996365548c6db1a2ef35cb421ab61e13bce94",
+     "sha_nsplit2": "717dc9da1046ec8af635d264224996365548c6db1a2ef35cb421ab61e13bce94",
+     "nsplit1_error": null,
+     "nsplit2_error": null
+    },
+    {
+     "i": 5,
+     "equal": true,
+     "sha_nsplit1": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+     "sha_nsplit2": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+     "nsplit1_error": null,
+     "nsplit2_error": null
+    }
+   ]
+  },
+  "bitwise_diff_cross_mode": {
+   "method": "same 6 greedy prompts, plain boot (NSPLIT=1, no CUPTI) vs instrumented boot-1 (NSPLIT=1, CUPTI); source nsplit1_plain_boot_run.json",
+   "identical": false,
+   "equal": "4/6",
+   "note": "divergence sits on the MODE boundary, not on NSPLIT; bounds cross-MODE bitwise comparisons of long generations; same-mode cross-NSPLIT is 6/6 (bitwise_diff above)",
+   "per_prompt": [
+    {
+     "i": 0,
+     "equal": true,
+     "sha_plain": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135",
+     "sha_instrumented": "83aaa58b266bb34c08ced17531c6422db445711c52835863b2e794d462093135"
+    },
+    {
+     "i": 1,
+     "equal": true,
+     "sha_plain": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b",
+     "sha_instrumented": "844ebde1f1660e259f7d5d8b9302c9c0be065d2a8b3fae97f1bffdd24a30549b"
+    },
+    {
+     "i": 2,
+     "equal": false,
+     "sha_plain": "46382997871ef63710287cf9fd47b250085c3c037b0630efa607954c2e9baa62",
+     "sha_instrumented": "fe5fba17a6283ff0f014c5fcd53d83c2d888c8c3325c093fcc2629df41c5b94b"
+    },
+    {
+     "i": 3,
+     "equal": true,
+     "sha_plain": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df",
+     "sha_instrumented": "6a05845db4dab8018b9b69011cc2860209b3112adf25e1ef3210b74432a790df"
+    },
+    {
+     "i": 4,
+     "equal": false,
+     "sha_plain": "75875a1723e4be74c814be26933836b2d7f117f1355e6cc5074d46aa96a3bebf",
+     "sha_instrumented": "717dc9da1046ec8af635d264224996365548c6db1a2ef35cb421ab61e13bce94"
+    },
+    {
+     "i": 5,
+     "equal": true,
+     "sha_plain": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73",
+     "sha_instrumented": "48d89356da09607ce6af0dd1676ef8984fecd7184633f124f11f8d82d3b4bc73"
+    }
+   ]
+  }
+ }
+}

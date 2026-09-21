@@ -1,0 +1,16 @@
+{
+ "idx": 1,
+ "kind": "en",
+ "prompt": "Explain how a bicycle stays upright to a curious ten-year-old.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "The user wants me to find the area of the region bounded by the curves $y = \\sin(x)$, $y = \\cos(x)$, $x = 0$, and $x = \\pi/2$.\n\nLet's find the intersection points of $y = \\sin(x)$ and $y = \\cos(x)$ in the interval $[0, \\pi/2]$.\n$\\sin(x) = \\cos(x) \\implies \\tan(x) = 1 \\implies x = \\pi/4$.\n\nFor $x \\in [0, \\pi/4]$, $\\cos(x) \\ge \\sin(x)$.\nFor $x \\in [\\pi/4, \\pi/2]$, $\\sin(x) \\",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 28,
+  "completion_tokens": 159,
+  "total_tokens": 187
+ },
+ "wall_s": 15.41
+}

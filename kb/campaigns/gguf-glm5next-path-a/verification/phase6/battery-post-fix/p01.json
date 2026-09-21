@@ -1,0 +1,16 @@
+{
+ "idx": 1,
+ "kind": "en",
+ "prompt": "Explain how a bicycle stays upright to a curious ten-year-old.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "The user wants me to explain how a bicycle stays upright to a curious ten-year-old. This is a classic physics question that's actually more complex than most people think — the full explanation involves gyroscopic effects, trail/caster effects, and countersteering, and recent research (like the 2011 Kooijman et al. paper in Science) showed that none of these alone is necessary; the bike's design allows it to steer into falls, which is the key.\n\nBut I'm explaining to a ten-year-old. So I need to:\n1. Use simple language, no jargon (or explain jargon when used)\n2. Use analogies and comparisons to things a kid knows\n3. Keep it engaging and fun\n4. Be accurate but not overwhelming\n5",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 28,
+  "completion_tokens": 159,
+  "total_tokens": 187
+ },
+ "wall_s": 14.62
+}

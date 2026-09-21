@@ -1,0 +1,113 @@
+{
+ "name": "t4a",
+ "tile": "4",
+ "mode": "plain (no nsys)",
+ "cmd": [
+  "/media/ai/src/FreeToken/.venv/bin/ft",
+  "serve",
+  "--port",
+  "18801",
+  "--host",
+  "127.0.0.1",
+  "--model-path",
+  "/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL.gguf",
+  "--moe-cache-auto",
+  "--kv-reserve-tokens",
+  "500000",
+  "--kv-cache-dtype",
+  "fp8",
+  "--memory-ratio",
+  "0.89",
+  "--max-prefill-length",
+  "4096",
+  "--moe-strategy",
+  "hybrid",
+  "--moe-cpu-threads",
+  "16",
+  "--memory-ratio",
+  "0.85",
+  "--max-prefill-length",
+  "8191",
+  "--max-running-requests",
+  "1"
+ ],
+ "env": {
+  "FREETOKEN_GGUF_DENSE_MTILE": "4",
+  "FREETOKEN_GGUF_MOE_MTILE": "32",
+  "FREETOKEN_GGUF_KDA_NSPLIT": null,
+  "NSYS_SESSION": null
+ },
+ "boot": {
+  "ok": true,
+  "ready_s": 131.8,
+  "why": "ok"
+ },
+ "prefill": {
+  "wall_s": 130.54,
+  "error": null,
+  "prompt_tokens": 65585,
+  "completion_tokens": 3,
+  "peak_vram_mib": 32085,
+  "throughput_lines": [
+   "\u001b[1m[2026-09-20|09:57:33|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.03, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 0, #queue-req: 1, input throughput (token/s): 185.33",
+   "\u001b[1m[2026-09-20|09:57:47|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.05, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 0, #queue-req: 1, input throughput (token/s): 581.71",
+   "\u001b[1m[2026-09-20|09:58:01|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.06, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 0, #queue-req: 1, input throughput (token/s): 579.85",
+   "\u001b[1m[2026-09-20|09:58:15|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.08, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 0, #queue-req: 1, input throughput (token/s): 578.04",
+   "\u001b[1m[2026-09-20|09:58:29|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.10, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 0, #queue-req: 1, input throughput (token/s): 578.81",
+   "\u001b[1m[2026-09-20|09:58:43|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.11, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 0, #queue-req: 1, input throughput (token/s): 576.70",
+   "\u001b[1m[2026-09-20|09:58:58|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.13, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 0, #queue-req: 1, input throughput (token/s): 577.37",
+   "\u001b[1m[2026-09-20|09:59:01|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 8128, #cached-token: 0, token usage: 0.13, #mamba-slot: 3/8, mamba usage: 0.38, #running-req: 1, #queue-req: 0, input throughput (token/s): 2142.75",
+   "\u001b[1m[2026-09-20|09:59:02|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 561, #cached-token: 0, token usage: 0.13, #mamba-slot: 4/8, mamba usage: 0.50, #running-req: 1, #queue-req: 0, input throughput (token/s): 631.01"
+  ],
+  "new_token": 561,
+  "cached_token": 0,
+  "watch_in_req": false,
+  "thr_values": [
+   185.33,
+   581.71,
+   579.85,
+   578.04,
+   578.81,
+   576.7,
+   577.37,
+   2142.75,
+   631.01
+  ],
+  "median_c2_c7": 578.42,
+  "anchor_expected": 563.9,
+  "anchor_dev_pct": 2.57
+ },
+ "battery": {
+  "ok": 24,
+  "failed": 0,
+  "aborted_at": null,
+  "wall_s": 327.8,
+  "model": "GLM-5.3-Flash-UD-Q3_K_XL.gguf"
+ },
+ "env_pins": {
+  "FREETOKEN_GGUF_MOE_MTILE": "32",
+  "FREETOKEN_GGUF_DENSE_MTILE": "4"
+ },
+ "gpu_after_boot_mib": 28076,
+ "teardown": {
+  "grace_expired": false,
+  "rc": -15,
+  "leftovers": [
+   "3316760 /bin/bash /media/ai/bin/llama-swap",
+   "3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config"
+  ],
+  "gpu_mib": 1326
+ },
+ "post_census": {
+  "ts": "2026-09-20T07:04:45Z",
+  "tag": "postflight",
+  "boot": "t4a",
+  "procs": [
+   "3316760 /bin/bash /media/ai/bin/llama-swap",
+   "3316761 ./llama-swap -listen 0.0.0.0:18080 -config /media/ai/soft/llama-swap/config.yaml -watch-config"
+  ],
+  "gpu_vram": "1326 MiB, 30824 MiB",
+  "gpu_compute_apps": "784032, hoptodesk, 302 MiB\n832729, /app/bin/hoptodesk, 190 MiB",
+  "sem_mp": "12"
+ }
+}

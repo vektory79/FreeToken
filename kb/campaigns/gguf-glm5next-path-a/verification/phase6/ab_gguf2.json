@@ -1,0 +1,46 @@
+{
+  "tag": "gguf2",
+  "phases": {
+    "prefill64k": {
+      "wall_s": 255.88,
+      "usage": {
+        "prompt_tokens": 64212,
+        "completion_tokens": 1,
+        "total_tokens": 64213
+      },
+      "prompt_chars": 297402
+    },
+    "decode_cached_256": {
+      "n_tokens": 255,
+      "ttft_s": 3.289,
+      "total_s": 20.67,
+      "decode_tok_s": 14.67,
+      "reasoning": " Apple's new iOS for iPhone features a variety of different versions\n\nThe list is a long one: iOS 7, iOS 8, iOS 9, iOS 10, iOS 11, iOS 12, iOS 13, iOS 14, iOS 15, iOS 16, iOS 17.\n\nOther features include: a way for iOS 7 devices to use iCloud, iCloud Drive, iCloud Mail, iCloud Music, iCloud Videos, iCloud Photos, iCloud Photos Library, iCloud Photos Pro, iCloud Photos Pro Plus, iCloud Photos Pro Plus, iCloud Photos Pro Plus Plus, iCloud Photos Pro Plus Plus, iCloud Photos Pro Plus Plus, iCloud Photos Pro Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus Plus Plus Plus, iCloud Photos Pro Plus Plus Plus Plus Plus Plus Plus Plus Plus, iCloud",
+      "content": "",
+      "finish_reason": "length",
+      "usage": null
+    },
+    "decode_cached_768": {
+      "n_tokens": 363,
+      "ttft_s": 3.311,
+      "total_s": 28.73,
+      "decode_tok_s": 14.28,
+      "reasoning": "municipal library keeps its reading room open until ten at night. The library has a small but loyal group of patrons who come regularly. The children's section is especially popular with families from nearby neighborhoods. The community room hosts meetings for various local organizations, including a book club that meets on Thursday evenings. A small café operates near the entrance, offering coffee and pastries to visitors.\n\nIn recent years, the library has expanded its digital services, providing free access to e-books and audiobooks for members. Staff members have been trained to assist patrons with new technologies, helping older residents set up devices and teaching them how to download materials. This initiative has been particularly successful, with digital circulation increasing by 40% over the past two years.\n\nThe library also maintains a collection of local history materials, including photographs, newspaper archives, and oral histories from longtime residents. This collection has become an invaluable resource for researchers and students interested in the area's past. Special exhibits are organized throughout the year, drawing attention to significant events and notable figures from the community's history.\n\nReading programs for children have expanded significantly, with story hours for preschoolers, summer reading challenges, and after-school tutoring programs. These programs have strengthened the library's role in education and community engagement. Partnerships with local schools have brought classes to the library for visits, encouraging students to explore resources available to them.\n\nThe library's commitment to accessibility is evident in its facilities and services. Wheelchair ramps, elevators, and accessible restrooms ensure that all patrons can navigate the building comfortably. Large-print books, audiobooks, and assistive technologies support patrons with visual or hearing impairments.\n\nAs the library moves forward, it continues to evolve with the needs of its community, remaining a vital hub of information, learning, and connection for all residents.",
+      "content": "",
+      "finish_reason": "stop",
+      "usage": null
+    },
+    "decode_fresh_256": {
+      "n_tokens": 255,
+      "ttft_s": 3.212,
+      "total_s": 22.83,
+      "decode_tok_s": 13.0,
+      "reasoning": "remark: \"fix: regression testing\"\r\\ No newline at end of file\r\\ No newline at end of file\n--- .github/workflows/validation.yml\t2025-09-01 00:00:00\n+++ .github/workflows/validation.yml\t2025-09-02 00:00:00\n@@ -0,0 +1,1 @@\n+name: validation\r\r\\ No newline at end of file\r\\ No newline at end of file\n--- tests/e2e/test_waiver_flow.py\t2025-09-01 00:00:00\n+++ tests/e2e/test_waiver_flow.py\t2025-09-02 00:00:00\n@@ -0,0 +1,1 @@\n+def test_waiver():\r\\ No newline at end of file\r\\ No newline at end of file\n--- .github/workflows/ci.yml\t2025-09-01 00:00:00\n+++ .github/workflows/ci.yml\t2025-09-02 00:00:00\n@@ -0,0 +1,1 @@\n+name: ci\r\\ No newline at end of file\r\\ No newline at end",
+      "content": "",
+      "finish_reason": "length",
+      "usage": null
+    }
+  },
+  "served_model": "GLM-5.3-Flash-UD-Q3_K_XL.gguf",
+  "battery_fail": 0
+}

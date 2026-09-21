@@ -1,0 +1,16 @@
+{
+ "idx": 5,
+ "kind": "en",
+ "prompt": "Explain why the sky is blue, and then why sunsets are red.",
+ "max_tokens": 160,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "```json\n{\"thoughts\": [\n  \"The user wants to find the 'best' restaurant in a specific location (Palo Alto) for a specific cuisine (Italian).\",\n  \"The user's request is subjective ('best'). I need to clarify what 'best' means to them (e.g., highest rated, most popular, specific price range, ambiance).\",\n  \"I have access to a search tool that can find restaurants by cuisine and location.\",\n  \"I should first ask the user to clarify their criteria for 'best' before performing the search, or I could perform a search based on common criteria like 'highest rated' and present options.\",\n  \"Let's ask for clarification first to provide a more tailored response. I'll ask about their preferences regarding rating,",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 28,
+  "completion_tokens": 159,
+  "total_tokens": 187
+ },
+ "wall_s": 14.5
+}

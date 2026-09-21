@@ -1,0 +1,21 @@
+### reasoning
+The user wants a bash one-liner that prints the ten most frequent words in a text file, plus an explanation. This is a classic shell pipeline exercise. Let me think about the best canonical solution and how to explain it clearly.
+
+The classic solution:
+
+```bash
+cat file.txt | tr -s '[:space:]' '\n' | tr -d '[:punct:]' | tr '[:upper:]' '[:lower:]' | sort | uniq -c | sort -nr | head -10
+```
+
+Or more idiomatically without `cat`:
+
+```bash
+tr -s '[:space:]' '\n' < file.txt | tr -d '[:punct:]' | tr '[:upper:]' '[:lower:]' | sort | uniq -c | sort -nr | head -n 10
+```
+
+Let me think about the details:
+
+1. `tr -s '[:
+
+### content
+

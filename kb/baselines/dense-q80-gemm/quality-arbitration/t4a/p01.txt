@@ -1,0 +1,11 @@
+### reasoning
+The user wants me to explain how a bicycle stays upright to a curious ten-year-old. This is a classic physics question that's actually more interesting and counterintuitive than most people realize.
+
+Let me think about what I know about bicycle stability:
+
+1. **The gyroscopic effect**: Many people think spinning wheels act like gyroscopes that keep the bike upright. This is actually a common misconception — or at least, it's a minor contributor. Experiments with counter-rotating wheels (which cancel out gyroscopic effects) show bikes can still be ridden. The gyroscopic effect does help with steering corrections but isn't the main reason.
+
+2. **Trail/caster effect**: The front wheel's contact point is behind the steering axis (like a shopping cart wheel). This means when the bike
+
+### content
+

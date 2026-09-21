@@ -1,0 +1,84 @@
+L1075:         case LLM_ARCH_NEMOTRON_H_MOE:
+L1076:         case LLM_ARCH_QWEN3NEXT:
+L1077:         case LLM_ARCH_KIMI_LINEAR:
+L1078:         case LLM_ARCH_BAILINGMOE3:
+L1079:         case LLM_ARCH_KIMI_K3:
+L1080:         case LLM_ARCH_QWEN35:
+L1081:         case LLM_ARCH_QWEN35MOE:
+L1082:         case LLM_ARCH_QWEN4EXP:
+L1083:         case LLM_ARCH_DEEPSEEK4:
+L1084:         case LLM_ARCH_GLM5NEXT:
+L1085:         case LLM_ARCH_MINIMAX_01:
+L1086:             return true;
+L1087:         default:
+L1088:             return false;
+L1089:     }
+L1090: }
+L1091: 
+L1092: bool llm_arch_is_diffusion(const llm_arch & arch) {
+L1093:     switch (arch) {
+L1094:         case LLM_ARCH_DREAM:
+L1095:         case LLM_ARCH_LLADA:
+L1096:         case LLM_ARCH_LLADA_MOE:
+L1097:         case LLM_ARCH_RND1:
+L1098:             return true;
+L1099:         default:
+L1100:             return false;
+L1101:     }
+L1102: }
+L1103: 
+L1104: bool llm_arch_supports_rs_rollback(const llm_arch & arch) {
+L1105:     switch (arch) {
+L1106:         case LLM_ARCH_QWEN35:
+L1107:         case LLM_ARCH_QWEN35MOE:
+L1108:         case LLM_ARCH_QWEN4EXP:
+L1109:         case LLM_ARCH_DEEPSEEK4:
+L1110:         case LLM_ARCH_GLM5NEXT:
+L1111:         case LLM_ARCH_NEMOTRON_H:
+L1112:         case LLM_ARCH_NEMOTRON_H_MOE:
+L1113:         case LLM_ARCH_LFM2:
+L1114:         case LLM_ARCH_LFM2MOE:
+L1115:         case LLM_ARCH_BAILINGMOE3:
+L1116:             return true;
+L1117:         default:
+L1118:             return false;
+L1119:     }
+L1120: }
+L1121: 
+L1122: bool llm_arch_supports_sm_tensor(const llm_arch & arch) {
+L1123:     switch (arch) {
+L1124:         case LLM_ARCH_GROK:
+L1125:         case LLM_ARCH_MPT:
+L1126:         case LLM_ARCH_PLAMO2:
+L1127:         case LLM_ARCH_MINICPM3:
+L1128:         case LLM_ARCH_GEMMA3N:
+L1129:         case LLM_ARCH_MAMBA:
+L1130:         case LLM_ARCH_MAMBA2:
+L1131:         case LLM_ARCH_JAMBA:
+L1132:         case LLM_ARCH_FALCON_H1:
+L1133:         case LLM_ARCH_OLMO2:
+L1134:         case LLM_ARCH_OLMOE:
+L1135:         case LLM_ARCH_DEEPSEEK2:
+L1136:         case LLM_ARCH_DEEPSEEK32:
+L1137:         case LLM_ARCH_DOTS3NOTE:
+L1138:         case LLM_ARCH_GLM_DSA:
+L1139:         case LLM_ARCH_BITNET:
+L1140:         case LLM_ARCH_T5:
+L1141:         case LLM_ARCH_NEMOTRON_H:
+L1142:         case LLM_ARCH_NEMOTRON_H_MOE:
+L1143:         case LLM_ARCH_GRANITE_HYBRID:
+L1144:         case LLM_ARCH_MINIMAX_01:
+L1145:         case LLM_ARCH_MINIMAX_M2:
+L1146:         case LLM_ARCH_MINIMAX_M3:
+L1147:         case LLM_ARCH_MISTRAL4:
+L1148:         case LLM_ARCH_KIMI_LINEAR:
+L1149:         case LLM_ARCH_GLM5NEXT:
+L1150:         case LLM_ARCH_BAILINGMOE3:
+L1151:         case LLM_ARCH_KIMI_K3:
+L1152:         case LLM_ARCH_QWEN3TTS:
+L1153:         case LLM_ARCH_QWEN4EXP:   // TODO: fix test-llama-archs
+L1154:             return false;
+L1155:         default:
+L1156:             return true;
+L1157:     }
+L1158: }

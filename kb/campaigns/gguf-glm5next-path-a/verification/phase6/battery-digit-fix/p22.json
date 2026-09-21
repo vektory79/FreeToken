@@ -1,0 +1,16 @@
+{
+ "reasoning": "Simple arithmetic problem. 3 apples + 2 bags × 4 apples = 3 + 8 = 11 apples. Then give away 5: 11 − 5 = 6 apples left.\n\nBrief explanation requested.",
+ "content": "**6 apples.**\n\n- Start: 3 apples\n- Buy: 2 bags × 4 apples = 8 apples → 3 + 8 = 11\n- Give away: 11 − 5 = **6**",
+ "finish_reason": "stop",
+ "usage": {
+  "prompt_tokens": 42,
+  "completion_tokens": 98,
+  "total_tokens": 140
+ },
+ "wall_s": 10.73,
+ "idx": "p22",
+ "kind": "digit-battery",
+ "prompt": "I have 3 apples and buy 2 bags with 4 apples each, then give away 5. How many are left? Explain briefly.",
+ "max_tokens": 128,
+ "greedy_mode": "temp0_topk1"
+}

@@ -1,0 +1,16 @@
+{
+ "idx": 16,
+ "kind": "code",
+ "prompt": "Write a Python function that returns the first n Fibonacci numbers using iteration, with a docstring.",
+ "max_tokens": 192,
+ "greedy_mode": "temp0_topk1",
+ "reasoning": "```python\n# -*- coding: utf-8 -*-\n\"\"\"\nThis script demonstrates how to use the `pyannote.audio` library to perform\nspeaker diarization on an audio file.\n\nSpeaker diarization is the process of partitioning an audio stream into\nhomogeneous segments according to the identity of the speakers.\n\"\"\"\n\n# 1. Import the necessary libraries\nfrom pyannote.audio import Pipeline\nfrom pyannote.core import Annotation, Segment\nimport wave\nimport contextlib\n\n# 2. Load the pre-trained speaker diarization pipeline\n# Note: You need to have the Hugging Face token set up and have accepted the\n# terms of use for the models.\n# You can set the token via `huggingface-cli login` or by passing `use_auth_token=\"...\"`.\npipeline = Pipeline.from_pretrained(\n    \"pyannote/speaker-diarization-3.1\",\n    use_auth_token",
+ "content": "",
+ "finish_reason": "length",
+ "usage": {
+  "prompt_tokens": 31,
+  "completion_tokens": 191,
+  "total_tokens": 222
+ },
+ "wall_s": 16.73
+}
