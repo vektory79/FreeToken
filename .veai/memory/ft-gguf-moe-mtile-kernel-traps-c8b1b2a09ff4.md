@@ -3,7 +3,7 @@ name: "ft-gguf-moe-mtile-kernel-traps"
 description: "moe.cuh m-tile traps: x=weights y=activations naming, ds-fill garbage rows, block_size single source of truth"
 type: project
 lastUpdated: 2026-09-19T02:54
-lastRecall: 2026-09-20T14:24
+lastRecall: 2026-09-21T15:36
 ---
 
 # gguf moe.cuh m-tile modification traps (moe_q kernel structure)

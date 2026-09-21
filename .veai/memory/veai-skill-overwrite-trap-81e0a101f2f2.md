@@ -3,7 +3,7 @@ name: "veai-skill-overwrite-trap"
 description: Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
 type: project
 lastUpdated: 2026-09-16T19:29
-lastRecall: 2026-09-20T18:20
+lastRecall: 2026-09-21T15:51
 ---
 
 # write_file не перезаписывает существующие .veai/skills файлы

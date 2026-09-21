@@ -3,7 +3,7 @@ name: "gguf-hybrid-decode-handshake-floor"
 description: "GGUF hybrid per-layer cost = fetch volume + 0.6-1.0 ms sync; hardware-validated 1.43 ms/layer at 16.67 tok/s"
 type: project
 lastUpdated: 2026-09-15T18:18
-lastRecall: 2026-09-20T14:23
+lastRecall: 2026-09-21T15:35
 ---
 
 # GGUF hybrid per-layer cost: fetch volume (endogenous to CPU-leg speed) + ~0.6-1.0 ms sync

@@ -3,7 +3,7 @@ name: "ft-gate-baseline-nan-flake"
 description: "Cap-test NaN flake root-caused to torch.empty x and FIXED in v3a (zeros); gate scale 2135 tests; classification method"
 type: project
 lastUpdated: 2026-09-19T02:56
-lastRecall: 2026-09-20T14:24
+lastRecall: 2026-09-20T20:29
 ---
 
 # Full-gate baseline addition (2026-09-18, fix1-radix-track-seqlen wave)

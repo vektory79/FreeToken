@@ -1,0 +1,23 @@
+---
+name: "hybrid-radix-lru-test-integrity"
+description: "HybridRadixCache LRU test lessons: vacuous all() asserts, single-revert probe coverage, det-clock fixture, padding sink"
+type: project
+lastUpdated: 2026-09-21T10:48
+lastRecall: 2026-09-21T15:46
+---
+
+# Test integrity for hybrid radix LRU tests (Fix-3 wave lessons, 2026-09-21)
+
+- Vacuous fails-before trap: an assert shaped `all(t < deepest for n, t in ... if t != deepest)` filters by VALUE. Pre-fix the on-path snapshots all share ONE walk tic -> the generator is EMPTY -> vacuously True -> the test passes both before and after the fix. Filter by boundary KEY instead (every boundary != deepest must have t < deepest). Caught by Review-B on tests/kvcache/radix/test_hybrid_radix.py T3 after the wave claimed fails-before.
+- Probe methodology: prove a test pins the change with SINGLE-REVERT probes - revert exactly one refresh point (dedup-only, match-only) and the target test must FAIL each way. T1 pins dedup only, T2 pins match only; a "steady state" test that passes under every single revert pins nothing.
+- deterministic_clock fixture is package-autouse inside tests/kvcache/radix ONLY (tests/kvcache/radix/conftest.py:10-17 + driver.py:33-43; function-scoped, try/finally restore, itertools.count patched over time.monotonic_ns, fresh counter per test, no pollution). tests/scheduler does NOT get it: scheduler-level cache tests run on the real clock, and adjacent `timestamp > timestamp` reads can tie -> port the fixture into such tests before trusting the ordering assert.
+- Oracle coupling: tests/kvcache/radix/model.py tracks stamps (MGroup.stamp, _pick_victim LRU check at :355-368, ties treated as arbitrary heap-order) - any new engine refresh point MUST be mirrored in the oracle (match-return + dedup) or _pick_victim rejects the new victim order; the battery does not compare stamps.
+
+Why: Review-B blocked the Fix-3 wave on a vacuous T3 + missing exhaustion pin; these generalize to any eviction-order/LRU-liveness test.
+How to apply: any new test asserting eviction order, LRU survival, or timestamp freshness on HybridRadixCache, its oracle, or the scheduler cache manager.
+
+## Wave-4/5 additions (amended snapshot_lru mechanism, 2026-09)
+- Fails-before BY CONSTRUCTION is NOT empirical: a test whose first draft inverted the validation/walk order PASSED pre-fix (it pinned the wrong thing). T2's empirical fails-before was only captured by a MATCH-ONLY single-revert probe: "1 failed, 25 passed" - ONLY test_match_use_refresh_pins_survival_at_forced_eviction failed; dedup + exhaustion stayed green under match-only revert (dedup-pinned; the exhaustion pin rides the final re-insert's dedup refresh). Map test->revert coverage explicitly: T1=dedup only, T2=match only, exhaustion=dedup, scheduler decoy=both. Verify restoration bit-for-bit (`git diff <file> | sha256sum` vs the pre-probe hash).
+- Keep asserts TIEBREAK-AGNOSTIC: under the det clock every ordering key is strictly distinct, so assert by boundary KEY (survivor identity, victim sequence) and accept any correct tiebreak for exact ties; never hard-code heap-order artifacts the spec calls arbitrary. Real-clock full-tie edge: the engine stamps timestamp and snapshot_lru in two separate time.monotonic_ns() reads (hybrid_radix_cache.py:88-89/:116-117) - two boundaries validated within one tick can FULLY tie on (snapshot_lru, timestamp); victim among exact ties is heap-order. Accepted as sound: the just-validated tip is mamba-locked before ensure_mamba_slots runs, so no correctness hazard.
+- Scheduler-level discrimination limit: admission match_req ALWAYS re-validates the deepest live on-path boundary, so shallow-boundary survival is UNPINNABLE at scheduler level (DFS-first among walk-tic ties coincides with FIFO-by-validation). To discriminate pre/post at scheduler level, validate an OFF-PATH DECOY BETWEEN the two chain boundaries: post-fix the stalest-validated B64 dies and the re-validated B128 survives; pre-fix the stale-tic decoy dies instead (assert fails).
+- LinearStatePool PADDING SINK: free list = range(1, num_slots) (linear_state_pool.py:126-136, slot 0 = sink) -> num_free == num_slots-1 idle. Pool-sizing tests must add +1: a "7-slot pool" has 6 allocatable (3 snapshots + 3 req slots + 1 padding); getting this wrong by one costs iterations (cost 3 in wave 4). If the sink is ever removed the test fails LOUDLY (no eviction fires) - acceptable coupling; build the pool directly (_pool(num_slots=7)) so _linear_pool_num_slots refactors cannot break it.

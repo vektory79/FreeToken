@@ -16,7 +16,6 @@
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-7b70b4071ae8.md) — Skill merge-main-into-vektory79 (.veai/skills): merge origin/main into vektory79; duplicates->main; boot-smoke
 - [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-bfc2e865360a.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
-- [git-integration-preferences](git-integration-preferences-8f8abb82eaac.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-3ab3f82469b1.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
@@ -34,9 +33,14 @@
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; old ~4 GB/s likely IOMMU tax
 - [nsys-silent-no-collection-trap](nsys-silent-no-collection-trap-561ecdc4872d.md) — nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe
 - [ft-dense-q80-gemm-campaign](ft-dense-q80-gemm-campaign-8b567bc03197.md) — dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61%; dense tile64 +40.46%; all committed (HEAD 8e2e4c7)
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-991119b5ad1d.md) — gguf-native-serving skill: T01-T56 + D01-D10 after dense-q80 self-update; committed e277d4b
 - [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-bc52e0593004.md) — v3 m-tile campaign: grouped MoE tile sweep +67.2% (1706aae); production default MOE_MTILE=32 via 8e2e4c7
 - [measured-advice-over-paper](measured-advice-over-paper-d343b7abbdf3.md) — User rejects paper extrapolations as config advice; demands measured numbers (2026-09-20 VRAM-headroom case)
-- [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-d3612f631d60.md) — GGUF glm5next VRAM headroom: ratio 0.80 + reserve 400k = 1.96 GiB free at -0.1% prefill; ratio floor 0.80 fail-fast
 - [ft-serve-gguf-tuning-campaign-2026-09](ft-serve-gguf-tuning-campaign-2026-09-479a22553522.md) — GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs
 - [ft-ftw-gguf-fastpath-outcome](ft-ftw-gguf-fastpath-outcome-df7f6d230787.md) — Task S FTW gguf fastpath: Gaps 1-3 + capability fallback done and committed (8568807..2e9fcf1); boot 52.1s vs 94-132s
+- [merge-wave-interrupted-provenance](merge-wave-interrupted-provenance-eea44dde4469.md) — Continue interrupted merge wave safely: git merge-tree bit-for-bit check + provenance rules + tee runner stdout
+- [ftw-index-scans-silent-none](ftw-index-scans-silent-none-98c041aefd3e.md) — GGUF/FTW signature scans degrade to None silently (expert_banks.py:285/:406/:517), not raw errors
+- [git-integration-preferences](git-integration-preferences-90e2d8dc168a.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
+- [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-82d7aac85712.md) — GGUF glm5next VRAM headroom: 0.80/400k winner needs >=29.28 GiB free at boot; flips with desktop VRAM swing; options
+- [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-5a46bffb7e8b.md) — HybridRadixCache LRU test lessons: vacuous all() asserts, single-revert probe coverage, det-clock fixture, padding sink
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-cc4c4d1258e6.md) — gguf-native-serving skill ledger: TRAPS T01-T63; fix3 self-update committed a20519e; campaign validated
+- [fix3-hybrid-cache-loss-donation](fix3-hybrid-cache-loss-donation-09364e19044a.md) — Fix-3 campaign LANDED+VALIDATED: donation fixes user's periodic full loss (5/5 -> 0/5 misses, 4.3x turns 2-6); 5 commits

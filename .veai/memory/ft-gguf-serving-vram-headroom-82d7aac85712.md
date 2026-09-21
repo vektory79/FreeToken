@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-serving-vram-headroom"
-description: "GGUF glm5next VRAM headroom: ratio 0.80 + reserve 400k = 1.96 GiB free at -0.1% prefill; ratio floor 0.80 fail-fast"
+description: "GGUF glm5next VRAM headroom: 0.80/400k winner needs >=29.28 GiB free at boot; flips with desktop VRAM swing; options"
 type: project
-lastUpdated: 2026-09-20T14:37
-lastRecall: 2026-09-20T17:40
+lastUpdated: 2026-09-20T20:41
+lastRecall: 2026-09-21T15:38
 ---
 
 # GGUF glm5next serving VRAM headroom: measured config matrix (RTX 5090, 32607 MiB)
@@ -18,3 +18,6 @@ Measured 2026-09-20 (7 boots, 2 s phase-tagged VRAM sampler; artifacts .tasks/de
 - Measured VRAM-per-0.05-ratio = 1500 MiB (peak 32103 -> 30603 MiB) - the earlier paper estimate (1.3-1.4 GB) was ~10% low but directionally right.
 - Decode peak-free ~= fill peak-free (2004 vs 2008 MiB at the winner config).
 - Known benign side effect: slot-floor fail-fast kills leak sem.mp-* (observed 12 -> 18, /dev/shm only, no VRAM impact).
+
+## Flip condition found (2026-09-20, repro .tasks/ft-serve-crash-mr080-400k/)
+The winner recipe sits AT the slot floor: it needs >= ~29.28 GiB free VRAM at boot (the 09-20 run had only +39 MiB margin: planned 1062 slots vs floor 1059). A desktop VRAM swing flips it: +357 MiB desktop usage -> planned 1035 < 1059 -> fail-fast ValueError at cache_budget.py:77 BEFORE any load (~9 s boot). Not a merge regression (gate untouched since 315b278; fp8 vs nvfp4 KV irrelevant - no dtype branch in the crash path; pre-merge the late check_partition_floors net would reject the same plan after the multi-minute load). Options computed from the closed-form plan model (fitted once on the archived 09-20 waves, reproduces every recorded plan exactly): 0.81 -> 1062-1064 (razor-thin); reserve 350000 @0.80 -> 1063-1065 (~zero peak-VRAM cost, 351k pool still radix-hits 65k contexts); robust 0.82 (or 0.81 + 350k) -> 1091-1093, tolerates ~400-500 MiB desktop swing at ~300 MiB peak-free cost per 0.01 ratio (measured 1500 MiB per 0.05).

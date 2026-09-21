@@ -3,7 +3,7 @@ name: "vektory79-main-rewrite-gotcha"
 description: "vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits"
 type: project
 lastUpdated: 2026-09-15T22:44
-lastRecall: 2026-09-20T16:45
+lastRecall: 2026-09-20T20:29
 ---
 
 # vektory79: переписанная main - ловушка для rebase, правила git-операций
