@@ -232,6 +232,11 @@ concurrent microbenches both leaked and invalidated their own numbers).
   hard timeout, PID-reap (wait + verify the PID is gone) + ps census between
   runs. Concurrent runs leak AND corrupt each other's timings (T32, D07; the
   campaign's first microbench round was discarded for exactly this).
+- ATTRIBUTION instrumentation is temporary by contract: [tag]-prefixed debug
+  lines at decision points via init_logger (bare stdlib getLogger is
+  boot-log-invisible, T46), a sha256 ledger of touched files taken before and
+  after; at the end remove the lines, verify the tree bit-for-bit and re-run
+  the fast suite. Never ship instrumentation (fix3 campaign pattern).
 - OMP/thread-pinning env is set BEFORE process start (libgomp parses in a
   pre-main constructor; setenv from main collapses threads onto core 0).
 
@@ -291,7 +296,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T58 + recipes D01-D10; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T63 + recipes D01-D10; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),

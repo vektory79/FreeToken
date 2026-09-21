@@ -1,4 +1,4 @@
-# TRAPS.md - 58 ловушек для native GGUF serving (T01-T58, рецепты D01-D10)
+# TRAPS.md - 63 ловушки для native GGUF serving (T01-T63, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -168,6 +168,9 @@
   пересборки). После приёмки свитч удалять (прецедент
   FREETOKEN_GGUF_GROUPED_PREFILL: добавлен под A/B, удалён post-validation
   7f8c570).
+  Superseded (fix3 кампания, 2026-09-21): python-only A/B = два бута с
+  git-stash тронутых исходников + sha256-леджер до/после; env kill switch не
+  нужен.
 - **T46** (Phase 6, liveness) Смена ядра требует kernel-level liveness proof:
   nsys kernel-name контракт + ТОЧНАЯ математика счётчиков запусков (пример:
   grouped moe ядра 42 слоя x 3 proj x 9 чанков = 1134 + moe_align 42x9 = 378;
@@ -196,6 +199,10 @@ chunk transitions").
   MISS на мелких (4096 -> 0/49) при любом ratio/mr - конфиг-независимый баг
   (НЕ dtype/mr/ratio/timing), зависит только от chunk size. Пост-фикс, повтор
   65k: #cached-token 65472 @4096 / 65536 @8191 (8128-чанки, 0.85+mr1).
+  Superseded (fix3 кампания, 2026-09-21): метка L теперь расходуется на
+  создании continuation (per-chunk donation, 7080824), а не доносится до
+  finish; chunk-size-dependent MISS-сигнатура остаётся диагностикой - следи
+  за ней.
 - **T49** (gate, Environment-классификация) NaN/Environment-фейл полного
   гейта, который проходит изолированно И с диффом, И без - это suite-ordering
   Environment, а не регрессия (прецедент
@@ -208,6 +215,9 @@ chunk transitions").
   ретраев: 0.89 -> 0.90 (free-after-init 2.59 GiB); для 8191 нужен 0.85+mr1
   (см. T28). Налог переменный день ото дня - VRAM-конкуренция, а не регрессия
   конфига.
+  Extension (fix3 кампания, 2026-09-21): с per-chunk donation пул становится
+  несущим MID-PREFILL (commit frequency ~8x на длинный промпт) - следи за
+  slot-floor fail-fast лестницей.
 
 ## MMQ v3a m-tile кампания 2026-09-18 T51-T52
 
@@ -305,6 +315,48 @@ FREETOKEN_GGUF_MOE_MTILE, winner tile 32).
   shared-хелпере (single source of truth, ef14efb). FTW gguf-директории от
   старых сборок (нет gguf_types meta) фейл-фастят в load_ftw_banks с
   сообщением о ре-конверсии вместо смерти на serve init.
+
+## Fix-3 hybrid radix кампания 2026-09-21 (scheduler/kvcache) T59-T63
+
+Ловушки кампании fix-3 (per-chunk donation boundary-снапшотов для hybrid
+radix; артефакты .tasks/fix3-snapshot-lru-refresh/; коммиты 9732be0 + e5730e0
++ 7080824; инвариант-комментарии be57ee8).
+
+- **T59** (debug, instrumentation) Гейдж #mamba-slot структурно ИСКЛЮЧАЕТ
+  evictable tree-снапшоты: used = total - (num_free + mamba_evictable) считает
+  ТОЛЬКО live + 2pp + LOCKED (scheduler.py:464-473 + scheduler/cache.py:114-117);
+  padding-sink: total = num_slots - 1, поэтому один running-запрос читается
+  как <= 3 + #locked.
+  Никогда не выводи из него occupancy пула / накопление снапшотов / retention
+  policy - occupancy читать из числа свободных слотов + числа tree-снапшотов.
+  Это прочтение стоило fix3-кампании двух неверных root-cause теорий
+  (capacity-bound; gauge-unused).
+- **T60** (cache, donation gate) Finish live-donate молча пропускается при
+  align_down(cached_len) != cached_len (cache.py:364-379): recurrent state
+  position-exact, поэтому гейт КОРРЕКТЕН - но промпты, не кончающиеся
+  page-aligned, никогда не доносят своё end state. Проверяй гейт раньше, чем
+  винить donation-логику (он маскировал root cause fix3 несколько дней).
+- **T61** (scheduler, donation point) Промежуточные ChunkedReq-чанки никогда
+  не зовут cache_req (scheduler.py:322-338): drain-point donation - double-free:
+  stale pp tuple освобождает tree-owned слот на finish; чередование pp затирает
+  tree-owned слот; stale admission handle заставляет следующий dedup free
+  пере-освобождать adopted страницы; per-commit unlock underflow'ит admission
+  ноду. ЕДИНСТВЕННАЯ overlap-safe точка donation для zero-copy переноса слота
+  - СОЗДАНИЕ CONTINUATION (prefill.py try_add_one), строго после завершения
+  prior forward и до state copy. Железная сигнатура скипа: ровно один attach
+  за ход + ноль evictions при давлении на пул.
+- **T62** (attention, tracked boundary) Треканный boundary L для extend-чанка
+  = cached_len + ((extend_len-1)//CHUNK_SIZE)*CHUNK_SIZE - глубочайшая x64
+  граница СТРОГО ВНУТРИ чанка (8064 для чанка 8128; attention/linear.py:121-127;
+  kda h[i] = state на НАЧАЛЕ чанка i, extend-end state живёт только в live
+  слоте). Допущение chunk-end donations неверно читает acceptance-ключи (кейс
+  48704 vs 48768): ожидания ключей A/B держать на сетке класса k*chunk+8064.
+- **T63** (measurement, log parsing) Эмиттер #new-token/#cached-token пишет
+  ОДНУ СТРОКУ НА PREFILL-БАТЧ (scheduler/status.py:70-97): первый чанк логирует
+  admission match, continuation-чанки логируют 0. Pick-правила анализатора
+  (first / largest-new / last) могут сфабриковать или замаскировать "full
+  misses" - сверяйся с сырыми per-chunk строками до любой интерпретации A/B
+  replay.
 
 ## Debugging
 

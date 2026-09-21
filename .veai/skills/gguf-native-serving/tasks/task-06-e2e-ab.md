@@ -32,8 +32,9 @@ run the quality battery, and deliver the honest verdict.
 
 - Radix reuse on a repeated 65k prompt: #cached-token 65472 @4096-chunks /
   65536 @8191-chunks (5b72aba made reuse work at ANY chunk size; the old
-  "0 cached @4096" class is obsolete). The deep-node LRU eviction gap remains
-  open (snapshot eviction, hybrid_radix_cache.py:168-237).
+  "0 cached @4096" class is obsolete). The deep-node snapshot-eviction gap is
+  CLOSED (per-node snapshot_lru + evict_mamba FIFO ordering, 9732be0; victims
+  stalest-validated first, tip never a victim).
 - Prefill medians of full chunks (exclude the chunk-1 triton warmup, ~124
   tok/s on 8128-chunk runs and ~92 on 4096-chunk runs, and the bogus
   last-full-chunk line, T43): ~300 @4096 / ~336 @8128 tok/s class.
@@ -55,6 +56,12 @@ run the quality battery, and deliver the honest verdict.
   --quant-backend for gguf - repack defeats raw streaming); boot 52.1 s
   (banks 125G @ 4.12 GB/s, 30 s in-boot); prefill @8128 790.7 tok/s;
   decode @65k 14.8-15.5 tok/s, radix HIT 65536.
+- Hybrid-radix per-chunk donation A/B replay class (fix3, 2026-09-21): the
+  pre-change baseline is recorded FIRST, one variable changes, and the BEFORE
+  stage is re-anchored against the recorded baseline (T44). Measured example
+  (GLM-5.3-Flash hybrid, mr=1, 0.82/400k): turn-2 divergence-hit key
+  #cached-token 48704, re-prefill 60184 -> 11480, full misses 2/12 -> 1/12,
+  FIFO evictions stalest-validated-first.
 
 ## Debugging an IMA or OOM
 
@@ -84,6 +91,8 @@ run the quality battery, and deliver the honest verdict.
 - T45: same-session A/B without stash: per-call env kill switch + two boots with
   an env flip; the JIT disk-cache compiles once for both boots; delete the
   switch after acceptance (FREETOKEN_GGUF_GROUPED_PREFILL precedent).
+  SUPERSEDED (fix3): python-only A/B = two boots with a git-stash of the source
+  files + a sha256 ledger, no env kill switch needed.
 - T46: a kernel swap needs kernel-level liveness proof: nsys kernel-name contract
   + exact launch-count math; bare stdlib loggers are invisible in boot logs -
   catch one-time INFO markers via a PYTHONPATH sitecustomize probe.
@@ -93,11 +102,17 @@ run the quality battery, and deliver the honest verdict.
   ends below the x64 track boundary - the pre-5b72aba scheduler dropped
   mamba_last_track_seqlen across chunk transitions (config-independent,
   chunk-size-dependent); post-fix expectations above.
+  SUPERSEDED (fix3): L is now consumed at continuation creation (per-chunk
+  donation, 7080824); the chunk-size-dependent MISS signature stays the
+  diagnostic to watch.
 - T49: a NaN/Environment failure that passes in isolation with AND without the
   diff is suite-ordering Environment, not a regression - verify isolated A/B
   before blaming a change.
 - T50: the boot slot-floor gate fail-fasts when desktop VRAM tax lands
   (~492 MiB) - retry ladder in the Expected result classes above.
+  EXTENDED (fix3): with per-chunk donation the pool is load-bearing
+  mid-prefill - commit frequency ~8x per long prompt; watch the slot-floor
+  fail-fast ladder.
 - D09: nsys live-serve profiling: `nsys launch` rejects -o; launch +
   start-after-ready + --cuda-graph-trace=node works; a bare mid-run start yields
   a report without eager kernel activities; analyze via sqlite export; bracket
