@@ -168,6 +168,9 @@ Before declaring a phase closed, verify ALL of:
 - [ ] commit created - one per phase (section 8);
 - [ ] artifacts and report recorded under `.tasks/<campaign>/` with exact paths;
 - [ ] process census clean - postflight done, no survivors (section 7);
+- [ ] kb-distill invoked - phase/campaign insights distilled into kb/ (skill
+      [kb-distill](../kb-distill/SKILL.md)); digest of what was recorded and
+      skipped attached to the phase close;
 - [ ] plan/brief checkboxes updated.
 
 Hard invariant: a successful coding-role call means the implementation step

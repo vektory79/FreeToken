@@ -150,4 +150,6 @@ prior-driven текст после 2-минутной загрузки - худ�
 
 Кампания завершена, когда discovery и все фазы прошли свои STOP GATE вместе с
 commit gate каждого брифа (контракт и единственное исключение - фаза 7 при
-offload-only - в [ORCHESTRATION.md](ORCHESTRATION.md)).
+offload-only - в [ORCHESTRATION.md](ORCHESTRATION.md)). На STOP GATE каждой фазы
+вызывай kb-distill (навык [kb-distill](../kb-distill/SKILL.md)): инсайты фазы
+дистиллируются в kb/, дайджест записанного и пропущенного приложен к закрытию фазы.
