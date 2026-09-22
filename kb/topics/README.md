@@ -11,6 +11,9 @@
 | [vram-budget.md](vram-budget.md) | Сколько VRAM нужно рецепту; почему reserve/moe-cache-size не освобождают VRAM; меню рецептов |
 | [radix-cache-reuse.md](radix-cache-reuse.md) | Почему длинные промпты не переиспользовались и что починено (fix-1, fix-3) |
 | [moe-hybrid-cost-model.md](moe-hybrid-cost-model.md) | Из чего складывается шаг декода гибридного MoE; пределы флаговых рычагов |
+| [ftw-load-path.md](ftw-load-path.md) | Как GGUF превращается в FTW и почему бут падает с 94-132 с до 52 с; контракт silent-None |
+| [gguf-upstream-map.md](gguf-upstream-map.md) | Карта upstream llama.cpp GLM5NEXT для GGUF-портов; что проверять перед новым портом |
+| [merge-wave-procedure.md](merge-wave-procedure.md) | Регламент слияния origin/main в ветку: волны, правила конфликтов, продолжение прерванной волны |
 
 Правила статей: YAML-шапка (title/date/hardware/branch-commits/status/tags),
 <=~250 строк, все перекрёстные ссылки — markdown-ссылки на существующие
