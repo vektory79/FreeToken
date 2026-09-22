@@ -50,6 +50,21 @@ CUDA kernels are JIT-compiled with `nvcc` on first use unless the prebuilt `free
 
 Put a new test in the `tests/` directory that mirrors the module it protects, and extend an existing file before creating a new one. Bug fixes come with a test that fails before and passes after. Performance changes come with A/B numbers against `main`.
 
+## VRAM protocol (local / cloud LLM rig)
+
+This rig runs a local LLM that occupies all VRAM and can process only one request at a time. Treat VRAM as occupied unless the user says otherwise:
+
+- Do not run tests or any workload that needs VRAM while the local LLM is resident.
+- Do not run parallel or background subagents; launch subagents synchronously, one at a time.
+- CPU-only work (unit tests without VRAM, log parsing, static analysis) is fine at any time.
+
+VRAM-heavy work (GPU tests, hardware A/B, `ft serve` runs):
+
+1. Prepare the test package first: scripts, configs, expected numbers, acceptance criteria.
+2. Ask the user to switch to the cloud LLM and free VRAM.
+3. Run the tests serially, one server at a time; verify server readiness with a real request, not a cheap endpoint (`/v1/models` answers before the engine finishes loading - see `.tasks/interleave-cache-repro/run_arm.sh` for the pattern).
+4. When done, tell the user so they can switch back to the local LLM and re-occupy VRAM.
+
 ## Issues and PRs
 
 - Search existing issues and PRs before starting. Items on the [Roadmap](https://github.com/FlashML-org/FreeToken/issues/79) are discussed with maintainers before implementation; features not on it start as an issue.
