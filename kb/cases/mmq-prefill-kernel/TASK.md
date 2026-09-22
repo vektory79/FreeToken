@@ -7,7 +7,8 @@ and measured, +14.4/+15.6/+16.4% prefill (4096/6144/8128), far below the
 2.3-2.7x ceiling (see v2 hardware A/B section).
 Composed 2026-09-17 from a code+header kernel study (roofline
 reconciled with hardware measurements; summary memory:
-`ft-gguf-prefill-mmq-roofline`; campaign artifacts: `.tasks/ft-gguf-serve-tuning/`).
+`ft-gguf-prefill-mmq-roofline`; campaign artifacts in the git-ignored ft-gguf-serve-tuning
+worktree, results mirrored under [baselines/ft-gguf-serve-tuning/](../../baselines/ft-gguf-serve-tuning/)).
 Read CONTRIBUTING.md first - it is binding. Line anchors verified 2026-09-17 on
 vektory79 @ 1a444e4; re-verify before editing (they drift). Private-use scope for
 GGUF glm5next: no push, no upstream PR.
@@ -55,7 +56,7 @@ reference on the same geometry (it pays the same rest). Write the numbers into t
 TASK.md before starting v0/v2.
 
 Measured (nsys 2026.1.3 interactive session, zero code changes; full method, raw
-tables and cross-checks in `.tasks/mmq-prefill-kernel/step0-profile.md`; trace
+tables and cross-checks in [step0-profile-mmq.md](../../methods/step0-profile-mmq.md); trace
 `report1.nsys-rep`, split `step0_split.json`). Winner config, port 18801, single
 serial run, boot at memory-ratio 0.85 (free-after-init 4.05 GiB, no fallback needed).
 Steady full-chunk time T = 28.77 s median (28.72-28.90 spread, 282-283 tok/s this
@@ -215,7 +216,7 @@ Full report: `v2-ab.md` / `v2-ab-results.json` / `v2ab_probe_liveness.json`
 
 ## Hardware validation protocol (both stages)
 
-- Harness: `.tasks/ft-gguf-serve-tuning/measure.py` (already patched: decode steady
+- Harness: [measure.py](../../harness/serve-measure/measure.py) (already patched: decode steady
   skips the pre-prefill SSE frame; throughput regex anchored on
   "input throughput (token/s):"). Port 18801; llama-swap stopped.
 - Config: winner flags `--moe-cache-auto --kv-reserve-tokens 500000
@@ -242,6 +243,6 @@ Commit only when the user asks. Never push.
 
 ## Out of scope (separate tasks)
 
-- `.tasks/fix1-radix-track-seqlen/TASK.md` - radix reuse fix (independent).
-- `.tasks/ftw-gguf-fastpath/TASK.md` - FTW load fast path (independent).
+- [fix1-radix-track-seqlen/TASK.md](../fix1-radix-track-seqlen/TASK.md) - radix reuse fix (independent).
+- [ftw-gguf-fastpath/TASK.md](../ftw-gguf-fastpath/TASK.md) - FTW load fast path (independent).
 - Prefill overlap enablement (576 slots/partition) - capacity redesign, not this task.

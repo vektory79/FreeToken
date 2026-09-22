@@ -22,7 +22,7 @@ Boot command (effective; measure.py BASE_ARGS + last-wins extras):
 Sole variable: env `FREETOKEN_GGUF_MOE_MTILE` (per-call getenv in
 `gguf_kernel.cu ft_gguf_mtile`; unset/"4"=4). Fill = the 65,585-token campaign
 filler (8x8128 + 561 tail) then a same-prompt decode re-send (mode `full` of
-the patched `.tasks/ft-gguf-serve-tuning/measure.py`). Prefill metric = median
+the patched [measure.py](../harness/serve-measure/measure.py)). Prefill metric = median
 of the full-chunk "input throughput (token/s):" lines EXCLUDING chunk 1 (warmup)
 and the last full chunk (T43 tail artifact) = c2..c7. Decode = streamed re-send,
 radix HIT expected (#cached-token: 65536), first SSE frame skipped.
@@ -156,8 +156,8 @@ Step-0 ranking are the dense q8_0 GEMM and the fetch copies.**
 ## Deviations / caveats
 
 1. nsys liveness ran on tile 16 only (per brief). Tile-4 per-format and CTA
-   baselines come from the v2 campaign capture `.tasks/mmq-prefill-kernel/
-   v2probe2.sqlite` (same 65,585 fill, same winner flags, grouped tile 4)
+   baselines come from the v2 campaign capture `v2probe2.sqlite` (not mirrored;
+   same 65,585 fill, same winner flags, grouped tile 4)
    instead of a fresh tile-4 nsys boot.
 2. The analyzer's first A1/A2 pass was over-strict (demanded moe_q8_0, absent
    in this model; phase-split merged the post-prefill 378-vec burst into
@@ -170,21 +170,22 @@ Step-0 ranking are the dense q8_0 GEMM and the fetch copies.**
 4. Battery "win" stage = tile 32 (the prefill-median winner).
 5. Baseline -1.45% vs the committed class is session noise, inside the gate.
 
-## Artifacts (all under .tasks/mmq-v3-stationary-moe/ unless noted)
+## Artifacts (run in the git-ignored mmq-v3-stationary-moe worktree; kb mirrors linked)
 
-- `v3a-ab-results.json` - machine-readable sweep record
-- `v3a_v3a_t{4,8,16,32}.out` - stage outputs; boot logs
-  `.tasks/ft-gguf-serve-tuning/logs/v3a_t{4,8,16,32}.log` (+ .pid)
-- `v3a_stage_raw.json` - parsed medians/decode per tile
-- `report1.nsys-rep`, `v3aprobe.sqlite`, `v3a_probe.json`,
-  `v3a_probe_liveness.json`, `v3a_probe.py`, `v3a_probe_analyze.py`,
-  `ft_nsys_v3.sh` - liveness + per-format analysis
-- `quality/base`, `quality/win` (+ `*_stage_summary.json`), `v3a_divergence.json`,
-  `v3a_battery_analyze.py`, `run_battery_v3a.py` - battery
-- `v3a_stage.sh` - serial stage runner (census + trap + watchdog)
-- `v3a_build_results.py` - results assembler
+- [v3a-ab-results.json](../baselines/mmq-v3/v3a-ab-results.json) - machine-readable sweep record
+- `v3a_v3a_t{4,8,16,32}.out` stage outputs and boot logs: not mirrored (distilled away)
+- [v3a_stage_raw.json](../baselines/mmq-v3/v3a_stage_raw.json) - parsed medians/decode per tile
+- `report1.nsys-rep`, `v3aprobe.sqlite`: not mirrored; [v3a_probe.json](../baselines/mmq-v3/v3a_probe.json),
+  [v3a_probe_liveness.json](../baselines/mmq-v3/v3a_probe_liveness.json),
+  `v3a_probe.py` (не зеркалирован), [v3a_probe_analyze.py](../harness/mmq/v3a_probe_analyze.py),
+  `ft_nsys_v3.sh` (not mirrored) - liveness + per-format analysis
+- battery: [base](../baselines/mmq-v3/quality/base_stage_summary.json) / [win](../baselines/mmq-v3/quality/win_stage_summary.json)
+  stage summaries, [v3a_divergence.json](../baselines/mmq-v3/v3a_divergence.json),
+  [v3a_battery_analyze.py](../harness/mmq/v3a_battery_analyze.py), [run_battery_v3a.py](../harness/mmq/run_battery_v3a.py)
+- [v3a_stage.sh](../harness/mmq/v3a_stage.sh) - serial stage runner (census + trap + watchdog)
+- `v3a_build_results.py` - results assembler (not mirrored)
 
-## CORRECTION (2026-09-19, Step 0 of .tasks/dense-q80-gemm)
+## CORRECTION (2026-09-19, Step 0 of the dense-q80-gemm campaign: [step0-profile.md](step0-profile.md))
 
 The tile-32 MoE-term magnitude above ("~1.8 s, e2e fit") was an
 e2e-subtraction estimate, not a direct measurement; it assumed tile-invariant

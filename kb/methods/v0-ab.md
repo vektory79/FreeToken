@@ -18,7 +18,7 @@ instrument, see Liveness below) - it was recovered with a harness-side probe.
 
 Serial same-session A/B, one boot per stage, winner flags, port 18801,
 llama-swap stopped (systemctl: inactive). Harness:
-`.tasks/ft-gguf-serve-tuning/measure.py` mode `full` (boot + one 65,585-token
+[measure.py](../harness/serve-measure/measure.py) mode `full` (boot + one 65,585-token
 prefill + one decode @ cached prefix + teardown), which self-censuses, refuses
 concurrent ft serve, watchdogs AssertionError|OutOfMemoryError|Backend worker
 is gone (plus CUDA error/Traceback), and tears down SIGTERM -> SIGKILL.
@@ -51,7 +51,7 @@ before -> `timeout 1800 python3 measure.py full --name <name> --log <log>
 4. AFTER: stage v0_after (log logs/ab_v0_after).
 5. Liveness probe: one extra boot + 4,371-token prefill with a PYTHONPATH-
    injected `sitecustomize` that adds a root logging handler (harness-side
-   only, no production edits): `.tasks/mmq-prefill-kernel/v0ab_probe.py`.
+   only, no production edits): [v0ab_probe.py](../harness/mmq/v0ab_probe.py).
 
 Prefill metric: median of the six full 8128-token chunks excluding chunk 1
 (triton autotune warmup) and excluding the last full chunk (tail-report
@@ -133,7 +133,8 @@ NEVER appear in any boot log:
 The server log's visible records all come from init_logger'd loggers
 ([...|core|rank=0], [...|FrontendAPI], ...); `freetoken.layers.moe` is not one.
 
-Probe recovery (no production edits): `.tasks/mmq-prefill-kernel/probe_sitecustomize/sitecustomize.py`
+Probe recovery (no production edits): [sitecustomize.py](../harness/mmq/sitecustomize.py) (the
+original probe_sitecustomize/ directory was not mirrored, the file itself is)
 calls `logging.basicConfig(level=logging.INFO)` and is injected via
 `PYTHONPATH`; `v0ab_probe.py` boots the same winner config, sends one 4,371-
 token prefill, greps the log:
@@ -176,7 +177,7 @@ performance merits.
 ## Deviations / caveats
 
 1. Quality battery SKIPPED: no reusable 24-prompt/parity tooling exists in
-   `.tasks/ft-gguf-serve-tuning` (grep over py/md/json found nothing; REPORT.md
+   the ft-gguf-serve-tuning campaign folder (grep over py/md/json found nothing; [REPORT.md](../cases/ft-gguf-serve-tuning/REPORT.md)
    has no quality section). Not fabricated.
 2. Liveness check as specified (line in boot log) is unpassable by design -
    instrument defect documented above; recovered via the PYTHONPATH probe.
@@ -196,11 +197,10 @@ performance merits.
 
 ## Artifacts
 
-- Stage runner: `.tasks/mmq-prefill-kernel/v0ab_stage.sh`
-- Analyzer: `.tasks/mmq-prefill-kernel/v0ab_analyze.py`
-- Stage raw outputs: `v0ab_v0_before.out`, `v0ab_v0_after.out` (task folder)
-- Server logs: `.tasks/ft-gguf-serve-tuning/logs/ab_v0_before`, `ab_v0_after`
-- Probe: `v0ab_probe.py`, `probe_sitecustomize/sitecustomize.py` (raw probe
-  output distilled away; see kb/baselines/mmq-prefill-kernel/README.md),
-  `logs/ab_v0_probe`
+- Stage runner: v0ab_stage.sh not mirrored (distilled away)
+- Analyzer: [v0ab_analyze.py](../harness/mmq/v0ab_analyze.py)
+- Stage raw outputs: not mirrored (distilled away; medians live in the tables above)
+- Server logs: not mirrored (distilled away)
+- Probe: [v0ab_probe.py](../harness/mmq/v0ab_probe.py), [sitecustomize.py](../harness/mmq/sitecustomize.py) (raw probe
+  output distilled away; see [baselines README](../baselines/mmq-prefill-kernel/README.md))
 - Machine-readable results: `v0-ab-results.json` (this folder)

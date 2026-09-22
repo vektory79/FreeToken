@@ -66,7 +66,7 @@ ORCHESTRATION.md:309-318 (цели + гейты):
 ```
 - Where to integrate - update-in-place over duplication, cross-reference
   instead of repeating:
-  - [TRAPS.md](TRAPS.md) - a new T-number continuing the sequence, or an
+  - [TRAPS.md](../../../../.veai/skills/gguf-native-serving/TRAPS.md) - a new T-number continuing the sequence, or an
     in-place extension of an existing trap already covered;
   - task briefs - expected-result classes (task-06 for serving expectations);
   - this file - hygiene / protocol bullets (sections 7 and 8).
@@ -93,7 +93,7 @@ SKILL.md:25-29 (русский указатель):
 В конце сессии скилл самообновляется: новые знания сессии (причины с
 коммит-идами, замеренные классы ожиданий, новые ловушки, правки протокола)
 интегрируются в TRAPS.md / брифы / ORCHESTRATION.md (см. раздел
-"Session-end self-update" в [ORCHESTRATION.md](ORCHESTRATION.md)); проход
+"Session-end self-update" в [ORCHESTRATION.md](../../../../.veai/skills/gguf-native-serving/ORCHESTRATION.md)); проход
 никогда не коммитит сам - коммит остаётся решением пользователя.
 ```
 
@@ -101,8 +101,8 @@ SKILL.md:25-29 (русский указатель):
 
 ```
 TRAPS.md:1        # TRAPS.md - 50 ловушек для native GGUF serving (T01-T50, рецепты D01-D10)
-ORCHESTRATION.md:283  - [TRAPS.md](TRAPS.md) - T01-T50 + recipes D01-D10; the pre-close checklist
-SKILL.md:146      См. [TRAPS.md](TRAPS.md) - 50 ловушек, каждая из которых стоила реального
+ORCHESTRATION.md:283  - [TRAPS.md](../../../../.veai/skills/gguf-native-serving/TRAPS.md) - T01-T50 + recipes D01-D10; the pre-close checklist
+SKILL.md:146      См. [TRAPS.md](../../../../.veai/skills/gguf-native-serving/TRAPS.md) - 50 ловушек, каждая из которых стоила реального
 ```
 
 git-состояние (ничего не закоммичено, ровно 6 файлов, без untracked):

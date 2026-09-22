@@ -41,7 +41,7 @@ memory-ratio 0.85, max-running-requests 1, max-prefill-length per ladder point):
   --max-prefill-length <4096|6144|8191> --memory-ratio 0.85
 ```
 
-Stage runner: `.tasks/mmq-prefill-kernel/v2ab_stage.sh <name> <log> <mode>
+Stage runner: [v2ab_stage.sh](../harness/mmq/v2ab_stage.sh) `<name> <log> <mode>
 "<extra>" "<ENV=V>"` = census -> `timeout 1800 python3 measure.py <mode>
 --name <name> --log <log> --extra "<extra>" --env "<ENV=V>"` -> census.
 Analyzer: `v2ab_analyze.py` -> `v2-ab-results.json`.
@@ -238,6 +238,6 @@ weight-resident tiles. Follow-up analysis belongs in a new task.
   `v2ab_probe_analyze2.py` (raw analyze dump distilled away; see
   kb/baselines/mmq-prefill-kernel/README.md), `v2probe2.sqlite`,
   `v2ab_probe_liveness.json`, `report3.nsys-rep`
-- A/B boot logs: `.tasks/ft-gguf-serve-tuning/logs/ab_v2_*`
+- A/B boot logs: not mirrored (distilled away)
 - Broken-attempt evidence kept: `report2.nsys-rep` (kernels missing),
   `report1.nsys-rep` (Step-0)

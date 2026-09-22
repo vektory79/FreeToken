@@ -2,7 +2,8 @@
 
 Status: DONE - committed on vektory79 (8568807, e9ad38d, ef14efb, 2e9fcf1; no push).
 Composed 2026-09-17 from a hardware-measured campaign
-(artifacts: `.tasks/ft-gguf-serve-tuning/`, summary memory:
+(artifacts in the git-ignored ft-gguf-serve-tuning campaign worktree; results mirrored under
+[baselines/ft-gguf-serve-tuning/](../../baselines/ft-gguf-serve-tuning/), summary memory:
 `ft-serve-gguf-tuning-campaign-2026-09`). Read CONTRIBUTING.md first - it is binding.
 Scope note: GGUF glm5next serving is private-use local work on branch vektory79; the
 upstream issue #34 gate was waived by the user (2026-09-13) - keep it that way, no push,
@@ -140,7 +141,7 @@ Commit only when the user asks. Never push.
 
 - Parallel fill of bare-gguf banks (only worth doing if the phase breakdown of boot shows
   bank reading dominates; the FTW path replaces that need).
-- Larger prefill kernel work; radix fixes (see .tasks/fix1-radix-track-seqlen/TASK.md).
+- Larger prefill kernel work; radix fixes (see [fix1-radix-track-seqlen/TASK.md](../fix1-radix-track-seqlen/TASK.md)).
 
 ## Outcome (implementation + hardware validation; commits 8568807/e9ad38d/ef14efb/2e9fcf1)
 

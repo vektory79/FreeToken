@@ -1,7 +1,8 @@
 # TASK: fix-1 - radix/prefix reuse for long chunked prompts (persist mamba_last_track_seqlen)
 
 Status: COMMITTED as 5b72aba on vektory79 2026-09-18 (no push; 3 files, 214+/5-). Implemented + hardware-verified 2026-09-18. Wave artifacts: research/code-anchors.md, research/tests-and-harness.md, verification/hardware-report.md. Verdicts: repeat 65k @4096 -> HIT #cached-token 65472 (pre-fix 0); 8191@0.85+mr1 -> HIT 65536; prefill medians 300.6/336.4 tok/s, decode 13.9-14.7 tok/s (no regression); boot deviations: 0.89 fail-fast -> 0.90 (Run A) / winner 0.85+mr1 (Run B). Follow-up wave 2026-09-18: A3 test test_final_prefill_commit_clears_track_seqlen_and_donates (tests/scheduler/test_abort_inflight_prefill.py:199-238, pins the finished=False L-clear invariant, revert-check proven, tests/scheduler 104 passed) + orphan-process sweep done (semaphores 11 -> 5, 2 stale PIDs reaped). Composed 2026-09-17 from a hardware-measured A/B campaign
-(artifacts: `.tasks/ft-gguf-serve-tuning/`, summary memory:
+(artifacts in the git-ignored ft-gguf-serve-tuning worktree, results mirrored under
+[baselines/ft-gguf-serve-tuning/](../../baselines/ft-gguf-serve-tuning/), summary memory:
 `ft-serve-gguf-tuning-campaign-2026-09`). Read CONTRIBUTING.md first - it is binding.
 Line anchors below were verified on vektory79 @ 1a444e4 on 2026-09-17 and re-verified on HEAD ebf071b 2026-09-18 (diff vs 1a444e4 over target files: empty).
 
@@ -25,7 +26,7 @@ re-prefills are the dominant latency spike) this is the highest-value single bug
   - fp8 KV dtype is NOT the cause; nor mr, nor ratio, nor request timing (60 s gaps).
 - Decode speed itself is unaffected (13.5-14.7 tok/s across configs) - the cost is purely
   the re-prefill TTFT.
-- Full matrix: `.tasks/ft-gguf-serve-tuning/phase2/PHASE2.md`.
+- Full matrix: [PHASE2.md](../ft-gguf-serve-tuning/PHASE2.md).
 
 ## Root cause (verified in code, consistent with every observation)
 
@@ -80,7 +81,7 @@ before creating a new one):
 
 ## Hardware validation (GPU, after unit tests pass)
 
-Harness: reuse `.tasks/ft-gguf-serve-tuning/measure.py` (already patched: decode steady
+Harness: reuse [measure.py](../../harness/serve-measure/measure.py) (already patched: decode steady
 skips the pre-prefill SSE frame; throughput regex is anchored). Gotchas: pkill needs the
 '[f]t serve' bracket pattern; gauges (#mamba-slot, token usage) EXCLUDE evictable tree
 snapshots - use the server log "#cached-token" lines as the verdict; serial runs only,

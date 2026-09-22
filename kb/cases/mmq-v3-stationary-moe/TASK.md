@@ -5,7 +5,7 @@ Status: v3a COMPLETE through hardware A/B (2026-09-18); winner tile 32
 (2026-09-19, 5 files +318/-147, not pushed).
 Composed
 2026-09-18 from the v2 outcome
-(`.tasks/mmq-prefill-kernel/TASK.md` v2 verdict block + `v2-ab.md`). Read
+([mmq-prefill-kernel/TASK.md](../mmq-prefill-kernel/TASK.md) v2 verdict block + [v2-ab.md](../../methods/v2-ab.md)). Read
 CONTRIBUTING.md first - it is binding. Line anchors were verified 2026-09-18
 against the v2 changeset; re-verify before editing (they drift). Private-use
 scope for GGUF glm5next: no push, no upstream PR.
@@ -22,7 +22,7 @@ i.e. traffic cut ~4x vs moe_vec instead of to-once).
 ## Verified background (do not re-derive; re-anchor before editing)
 
 - Step-0 measured split of the 28.77 s 8128 chunk
-  (.tasks/mmq-prefill-kernel/step0-profile.md): MoE GEMM 18.13 s (63%),
+  ([step0-profile-mmq.md](../../methods/step0-profile-mmq.md)): MoE GEMM 18.13 s (63%),
   fetch copies 3.15 s, rest 7.49 s - dense q8_0 GEMM 6.04 s is the top
   "rest" item and the next bottleneck after this task.
 - v2 state (committed 2026-09-18): grouped entry `ggml_moe_a8` with cases
@@ -140,12 +140,12 @@ padding dominates:
 
 ## Hardware validation protocol
 
-Same as `.tasks/mmq-prefill-kernel/TASK.md` (winner flags, port 18801,
+Same as [mmq-prefill-kernel/TASK.md](../mmq-prefill-kernel/TASK.md) (winner flags, port 18801,
 medians of full chunks excluding c1 warmup AND the last-full-chunk report
 artifact, decode @65k radix-hit, hygiene: census / FAILPAT watchdog
 AssertionError|OutOfMemoryError|Backend worker is gone / serial reaped
 runs / SIGTERM->SIGKILL 30 s). Notes for v3:
-- Quality battery tooling EXISTS: `.tasks/mmq-prefill-kernel/quality/`
+- Quality battery tooling EXISTS: [harness/quality/](../../harness/quality/README.md)
   (runner + divergence analyzer, 24 prompts, PASS bar documented in
   quality-ab.md). The env-flip A/B is gone (kill switch removed) - A/B =
   pre-change boot vs candidate boot, or compare against the committed v2

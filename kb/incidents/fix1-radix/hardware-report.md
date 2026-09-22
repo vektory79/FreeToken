@@ -4,7 +4,7 @@ Date: 2026-09-18 21:30-21:55 +03. Box: RTX 5090 (32 GiB, IOMMU=pt). Branch: vekt
 (working tree contains the fix under test; nothing modified/committed/pushed).
 Model: GLM-5.3-Flash UD-Q3_K_XL GGUF (~147.5 GB), fp8 KV, moe-strategy hybrid,
 kv-reserve 500000, moe-cache-auto, moe-cpu-threads 16, port 18801.
-Harness: .tasks/ft-gguf-serve-tuning/measure.py mode=full (both known patches present:
+Harness: [measure.py](../../harness/serve-measure/measure.py) mode=full (both known patches present:
 decode steady skips times[0]; throughput regex anchored on "input throughput (token/s):").
 Runner: verification/run_one.sh (FAILPAT watchdog every 3 s incl. boot-wait, hard timeout
 900 s with SIGTERM->SIGKILL after 30 s, trap-on-EXIT pkill '[f]t serve').
@@ -95,8 +95,8 @@ on this box (VRAM headroom OOM at the only bootable ratio); mechanism-level risk
 fix regressing it is nil (the change only forwards mamba_last_track_seqlen across chunk
 transitions), and 8128 HIT was already hardware-proven pre-fix.
 
-Artifacts: logs .tasks/ft-gguf-serve-tuning/logs/{fix4096.log,fix8191.log};
-runner .tasks/fix1-radix-track-seqlen/verification/run_one.sh.
+Artifacts: boot logs fix4096.log/fix8191.log not mirrored (distilled away);
+runner [run_one.sh](../../harness/repro/run_one.sh).
 
 ## 8. Run B retry (0.85+mr1) - closes the 8128-chunk item: PASS (HIT)
 

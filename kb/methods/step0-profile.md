@@ -34,7 +34,7 @@ cheap measured A/B (T52: measure, don't model). The naive-traffic projection
    (hoptodesk app present, untouched), 5 `sem.mp-` baseline, HEAD
    cb8db23 = 1706aae + Skill/Memory commits only.
 2. Boot under `nsys launch --session=denseq80cap --trace=cuda
-   --cuda-graph-trace=node` (wrapper `.tasks/dense-q80-gemm/ft_nsys_dq80.sh`),
+   --cuda-graph-trace=node` (wrapper `ft_nsys_dq80.sh`, not mirrored; mechanics
    runner `dq80_stage.sh` (trap-on-EXIT cleanup + SIGTERM->10 s->SIGKILL +
    outer `timeout 2400`; FAILPAT watchdog inside `step0_run.py` =
    measure.WATCH + `backend worker .* exited`, hard deadline 1800 s, nsys
@@ -191,7 +191,7 @@ step0-split.json and the table below verbatim (step0-projection-table.md is
 the generated fragment, the source of this table):
 
 ```
-python3 .tasks/dense-q80-gemm/final_split.py
+python3 ../harness/ab-runner/final_split.py
 ```
 
 Total dense work = 120.7 TFLOP/chunk (2 x MACs, tile-invariant; sum of the
@@ -271,19 +271,20 @@ out-of-scope fetch copies (3.11 s).
 
 ## Artifacts
 
-- `.tasks/dense-q80-gemm/step0-profile.md` (this file)
-- `.tasks/dense-q80-gemm/step0-split.json` (machine-readable:
+- This file
+- [step0-split.json](../baselines/dense-q80-gemm/step0-split.json) (machine-readable:
   kernel/class -> {launches_per_chunk, seconds_per_chunk}, regime + projections)
-- `.tasks/dense-q80-gemm/denseq80.nsys-rep` + `denseq80.sqlite` (the trace;
-  kept)
-- `.tasks/dense-q80-gemm/denseq80_header.json` (gguf-py scan)
-- `.tasks/dense-q80-gemm/step0-projection-table.md` (generated widening-table
-  fragment; `python3 .tasks/dense-q80-gemm/final_split.py` regenerates it +
+- `denseq80.nsys-rep` + `denseq80.sqlite` (the trace): not mirrored (kept only
+  in the original campaign worktree)
+- [denseq80_header.json](../baselines/dense-q80-gemm/denseq80_header.json) (gguf-py scan)
+- step0-projection-table.md (generated widening-table fragment; not mirrored -
+  [final_split.py](../harness/ab-runner/final_split.py) regenerates it +
   step0-split.json - F2)
-- `.tasks/dense-q80-gemm/step0_run.json`, `seq_probe.py`/`.out`,
-  `classify_launches.py`, `microbench_dense.py`, `microbench_format_ab.py`,
-  `final_split.py` (the single step0-split.json generator; opens the sqlite
+- [step0_run.json](../baselines/dense-q80-gemm/step0_run.json), `seq_probe.py`/`.out`,
+  `classify_launches.py`, [microbench_dense.py](../harness/ab-runner/microbench_dense.py), [microbench_format_ab.py](../harness/ab-runner/microbench_format_ab.py),
+  [final_split.py](../harness/ab-runner/final_split.py) (the single step0-split.json generator; opens the sqlite
   read-only), `ft_nsys_dq80.sh`, `dq80_stage.sh`, `step0_run.py`,
   `step0_analyze_superseded.py` (superseded pre-audit generator, renamed +
-  write-guarded - N10), `header_scan.py`, `ncu_dense.log` (the ERR log)
-- Server log: `.tasks/ft-gguf-serve-tuning/logs/dq80_nsys.log` (+ .pid)
+  write-guarded - N10), [header_scan.py](../harness/ab-runner/header_scan.py), `ncu_dense.log` (the ERR log);
+  scripts not linked above were not mirrored
+- Server log: not mirrored (distilled away)

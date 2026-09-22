@@ -41,8 +41,9 @@ the engine would have hit the cap-1 fallback). `ft bench bw` full refresh, 03:24
        overlapped: CPU-MoE 11.3 + PCIe 40.1 GB/s -> hybrid fetches 78.0% of misses
 
 Reproduces Task 03's measured leg (11.71 / 43.45 / 0.781); headline verdict "offload"
-is the conservative 2.0-threshold rule, expected and NOT a blocker. Saved to
-~/.cache/freetoken/benchbw/GPU-ec07f396-8269-f150-1f86-0c511e4972fb.json.
+is the conservative 2.0-threshold rule, expected and NOT a blocker. Saved to the
+machine-local benchbw profile cache (GPU-ec07f396-8269-f150-1f86-0c511e4972fb.json,
+not mirrored).
 
 ## Full regression (STEP 1)
 

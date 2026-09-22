@@ -102,10 +102,10 @@ bimodal boot-mode nondeterminism (T54), config-independent as expected.
 
 ## Artifacts
 
-- results: `.tasks/dense-q80-gemm/vram-headroom-results.json`
-- per-boot run jsons: `.tasks/dense-q80-gemm/vram_{a,b,b2,c,d,e}_boot.json`
-- VRAM sampler csv (ts,epoch,phase,used_mib): `.tasks/dense-q80-gemm/vram_{a,b,b2,c,d,e}.csv`
-- boot logs: `.tasks/ft-gguf-serve-tuning/logs/vram_{a,b,b2,c,d,e}.log`(+`.pid`)
-- run transcript: `.tasks/dense-q80-gemm/vram-headroom-run.out`
-- harness: `.tasks/dense-q80-gemm/vram_headroom_run.py`
-- census: `.tasks/dense-q80-gemm/vram-headroom/census.log`
+- results: [vram-headroom-results.json](../baselines/dense-q80-gemm/vram-headroom-results.json)
+- per-boot run jsons: [vram_{a,b,b2,c,d,e}_boot.json](../baselines/dense-q80-gemm/)
+- VRAM sampler csv (ts,epoch,phase,used_mib): [vram_{a,b,b2,c,d,e}.csv](../baselines/dense-q80-gemm/)
+- boot logs: not mirrored (distilled away; the verdict-relevant numbers are in the results json and above)
+- run transcript: not mirrored (distilled away)
+- harness: [vram_headroom_run.py](../harness/ab-runner/vram_headroom_run.py)
+- census: [census.log](../baselines/dense-q80-gemm/vram-headroom/census.log)

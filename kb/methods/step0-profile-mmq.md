@@ -13,7 +13,8 @@ Chosen: **nsys interactive session, zero code changes** (least invasive).
 `nsys` 2026.1.3 is installed; torch.profiler would have required env-gated
 edits to the MoE path plus a revert cycle, so the nsys route was taken.
 
-Flow (artifacts in `.tasks/mmq-prefill-kernel/`):
+Flow (run in the git-ignored mmq-prefill-kernel campaign worktree; kb-mirrored
+artifacts are linked below):
 
 - `ft_nsys.sh` (TEMPORARY, deleted after measurement): `exec nsys launch
   --session=step0cap --trace=cuda .venv/bin/ft "$@"` - boots the server with
@@ -21,7 +22,7 @@ Flow (artifacts in `.tasks/mmq-prefill-kernel/`):
   `--sample` belongs on `nsys start`, not `launch` (two smoke runs failed on
   this before the flow validated).
 - `step0_run.py`: driver that imports
-  `.tasks/ft-gguf-serve-tuning/measure.py` UNCHANGED (only `measure.FT` is
+  [measure.py](../harness/serve-measure/measure.py) UNCHANGED (only `measure.FT` is
   pointed at the wrapper), boots winner config via `measure.start_server`,
   waits `/ready` via `measure.wait_ready`, sends the 65,585-token filler
   prompt via `measure.do_prefill` (same as campaign `prefill` mode), tears
@@ -136,8 +137,7 @@ Implied ceilings (from THESE numbers, not the TASK.md model):
 - Note the model's "copies ~3.0 s" term exists but is a copy KERNEL over PCIe,
   not a memcpy storm; and the "rest" is ~100% GPU kernels, not CPU overhead.
 
-Full machine-readable results: step0_split.json; capture/driver state:
-step0_run.json; trace: report1.nsys-rep (+ step0.sqlite export).
+Full machine-readable results: [step0_split.json](../baselines/mmq-prefill-kernel/step0_split.json); capture/driver state: [step0_run.json](../baselines/mmq-prefill-kernel/step0_run.json); trace report1.nsys-rep (+ step0.sqlite export) not mirrored.
 
 ## Reconciliation
 
@@ -158,8 +158,8 @@ vs the TASK.md model (chunk 8128 = 27.7 s: GEMM 16.6-20.8 s + copies ~3.0 s + re
   and that the GPU is never CPU-starved.
 
 vs the NVFP4 reference: the 510 tok/s figure is ~507 tok/s steady prefill measured
-on 4096-token chunks (.tasks/gguf-glm5next-hybrid/verification/nvfp4-
-ab-measurements.md, hybrid == offload, prefill identical in both strategies) =
+on 4096-token chunks ([nvfp4-ab-measurements.md](../cases/gguf-glm5next-hybrid/verification/nvfp4-ab-measurements.md),
+hybrid == offload, prefill identical in both strategies) =
 8.08 s per 4096-token chunk. Consistency: that chunk must cover NVFP4's own MoE
 GEMM + its rest; its per-token rest budget (<= ~1.97 ms/token) vs GGUF's measured
 rest (7.49 s / 8128 = 0.92 ms/token at 8128-token amortization) leaves ample room -
@@ -201,5 +201,5 @@ Also: this run's steady chunks ran 28.72-28.90 s (282-283 tok/s) vs the campaign
   point (nsys is external); `git diff`/status show no profiling scaffolding
   (temporary ft_nsys.sh wrapper was deleted after the run; driver/analysis scripts
   live only in this git-ignored task folder).
-- Server log: .tasks/ft-gguf-serve-tuning/logs/step0_nsys.log (measure.py reused;
+- Server log: not mirrored (distilled away; measure.py reused;
   do_prefill rebuilt req_prefill.json from filler.txt with identical content).

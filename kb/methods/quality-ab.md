@@ -20,13 +20,14 @@ SKIPPED" item of the v2 hardware validation protocol (v2-ab.md, TASK.md).
   --moe-cpu-threads 16 --max-running-requests 1 --port 18801 --host 127.0.0.1`
 - Battery: the phase-6 runner (`quality/ft_phase6_battery.py`, copied verbatim
   from the volatile /tmp/ft_phase6_battery.py) run ONCE per boot, identical
-  prompt order p00..p23 from
-  `.tasks/gguf-glm5next-path-a/verification/phase6/battery-post-fix/`
+  prompt order p00..p23 from the kb-mirrored baseline directory
+  [battery-post-fix/](../cases/gguf-glm5next-path-a/verification/phase6/battery-post-fix/)
   (8 en prose / 8 ru prose / 4 code / 4 reason-with-digits; max_tokens
   160/160/192/128 by kind), greedy temp0/topk1, stream=False, model name from
   GET /v1/models, POST /v1/chat/completions with the "model" field.
 - Per-boot liveness probe: PYTHONPATH sitecustomize
-  (`.tasks/mmq-prefill-kernel/probe_sitecustomize`, `logging.basicConfig(INFO)`)
+  ([sitecustomize.py](../harness/mmq/sitecustomize.py), `logging.basicConfig(INFO)`; the
+  original probe_sitecustomize/ directory was not mirrored, the file itself is)
   surfaces the one-shot marker line "gguf moe grouped mmq prefill active"
   (moe.py:520, bare-logger trap): expected ABSENT in env0, fired in env1.
 - Historical context only (NOT the control): battery-post-fix outputs

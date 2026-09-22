@@ -1,7 +1,7 @@
 # orchestration-notes.md - dense q8_0 GEMM campaign protocol digest
 
-Sources (read in full 2026-09-19): ORCHESTRATION.md (324 lines), TRAPS.md
-(280 lines) under /media/ai/src/FreeToken/.veai/skills/gguf-native-serving/,
+Sources (read in full 2026-09-19): [ORCHESTRATION.md](../../.veai/skills/gguf-native-serving/ORCHESTRATION.md) (324 lines), [TRAPS.md](../../.veai/skills/gguf-native-serving/TRAPS.md)
+(280 lines) under the committed .veai/skills/gguf-native-serving/ skill,
 plus the campaign TASK.md (HEAD 1706aae). Self-sufficient digest for the
 orchestrator and all wave agents - it replaces re-reading both skill files.
 Section 6 keeps trap/recipe texts verbatim (original Russian is the binding
@@ -323,7 +323,7 @@ bare stdlib loggers are boot-invisible - sitecustomize probe. Campaign: dense
 > порта full-coverage ds-цикла плотного mul_mat_q (mmq.cuh:77-88) с
 > ids=(ids0+tid.y*QI8_1+tid.x/(32/QI8_1))%mmq_x, читающим
 > sorted_token_ids[col_dst_0+ids]. Эвиденс фикса:
-> .tasks/mmq-v3-stationary-moe/ (v3a-surface-map.md, аналитическая
+> Эвиденс фикса: [v3a-surface-map.md](v3a-surface-map.md) (аналитическая
 > ds-регрессия, поймавшая revert).
 
 [x = WEIGHTS, y = ACTIVATIONS in moe.cuh; the m>4 gate is y-ds fill coverage:
@@ -344,7 +344,7 @@ inversion applies to the lineage and the T40 audit is still required.]
 > предпосылка мертва; expert battery BITWISE идентична между тайлами
 > (per-element порядок редукции tile-инвариантен). Привязывай проекции
 > MoE-ядер к измеренному режиму, а не к трафик-моделям. Эвиденс:
-> .tasks/mmq-v3-stationary-moe/v3a-ab.md.
+> (.tasks/mmq-v3-stationary-moe в кампании) Эвиденс: [v3a-ab.md](v3a-ab.md).
 
 [Traffic cuts pay sub-linearly once the kernel leaves BW-bound (per-MAC
 ALU/LDS floor; marginal e2e gain halved per tile doubling; battery BITWISE
@@ -361,8 +361,8 @@ tile-invariant). Pin projections to the MEASURED regime - hence Step 0 first.]
 > OMP_PLACES/OMP_PROC_BIND выставлять ДО старта процесса (libgomp читает их в
 > pre-main конструкторе; setenv из main молча сваливает все треды на ядро 0);
 > warmup + автокалибровка >= 3 s на точку. Gate: sustained GB/s >= эффективной
-> PCIe gather полосы. Эвиденс: .tasks/gguf-glm5next-hybrid/verification/
-> ggml-microbench.md + ggml-microbench-harness.cpp.
+> PCIe gather полосы. Эвиденс: [ggml-microbench.md](../cases/gguf-glm5next-hybrid/verification/ggml-microbench.md)
+> + ggml-microbench-harness.cpp.
 
 [Same-ISA-flags standalone reference build; byte-exact synthetic blocks; parity
 max rel err < 1e-3 on random rows EVERY run BEFORE timings; OMP env pre-start;

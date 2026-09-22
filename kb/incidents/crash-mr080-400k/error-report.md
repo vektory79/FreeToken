@@ -57,7 +57,7 @@ identical formula against the archived 09-20 wave (tree 315b278):
 The closed-form model reproduces all four plans (also boot a 0.85/500k = 1148 exact)
 with weights+fixed as the single fitted constant and only baseline_free varying.
 Delta explanation: today's desktop stack used 1908 MiB pre-boot vs 1551 MiB on
-09-20 (from `.tasks/dense-q80-gemm/vram-headroom.md` census) = **+357 MiB**;
+09-20 (from [vram-headroom.md](../../methods/vram-headroom.md) census) = **+357 MiB**;
 0.8 x 357 MiB = 286 MiB budget = 27.5 slots; 1062 - 27 = 1035 - the observed plan
 exactly. Pass threshold at 0.80/400k is baseline_free >= ~29.28 GiB; the 09-20
 winner had 29.32 GiB (+3 slots = ~39 MiB of headroom), so any ~40+ MiB rise in
@@ -101,11 +101,12 @@ explicit KV cap + `--moe-cache-size 288` is the other known direction but costs 
 
 ## 5. Artifacts
 
-- `.tasks/ft-serve-crash-mr080-400k/serve.log` - full server log incl. traceback
-- `.tasks/ft-serve-crash-mr080-400k/runner.out` - runner stdout (FAILPAT hit + verdict)
-- `.tasks/ft-serve-crash-mr080-400k/repro-runner.sh` - the runner
-- 09-20 references: `.tasks/dense-q80-gemm/vram-headroom.md`,
-  `.tasks/ft-gguf-serve-tuning/logs/vram_{a,b,b2,c}.log`
+- [serve.log](serve.log) - full server log incl. traceback
+- [runner.out](runner.out) - runner stdout (FAILPAT hit + verdict)
+- [repro-runner.sh](repro-runner.sh) - the runner (kb copy; ready-to-use variant:
+  [crash-mr080-repro.sh](../../harness/repro/crash-mr080-repro.sh))
+- 09-20 references: [vram-headroom.md](../../methods/vram-headroom.md);
+  the vram_{a,b,b2,c}.log boot logs were not mirrored
 
 ## 6. Census
 

@@ -150,9 +150,9 @@ cd /media/ai/src/FreeToken
   102400 > 101376. Also 10x `ModuleNotFoundError: No module named 'tests'` artifacts
   under console pytest are import-mode noise, not regressions.
 
-## C. Hardware harness: .tasks/ft-gguf-serve-tuning/measure.py
+## C. Hardware harness: [measure.py](../../harness/serve-measure/measure.py)
 
-EXISTS (437 lines). `.tasks/ft-gguf-serve-tuning/phase2/PHASE2.md` EXISTS (chunk-size
+EXISTS (437 lines, mirrored into kb). [PHASE2.md](../../cases/ft-gguf-serve-tuning/PHASE2.md) EXISTS (chunk-size
 disambiguation matrix + back-to-back decode A/B; notes the 0.89 fail-fast deviation
 when the desktop ate VRAM -> fall back to 0.90).
 

@@ -179,13 +179,17 @@ run-variance spread; bs=1 replays the MMVQ graph, neither knob enters it).
 
 ## Artifacts
 
-- Harness: .tasks/dense-q80-gemm/{ab_mtile_stage.sh, ab_mtile_run.py, ab_mtile_analyze.py}
+- Harness: [ab_mtile_run.py](../harness/ab-runner/ab_mtile_run.py),
+  [ab_mtile_analyze.py](../harness/ab-runner/ab_mtile_analyze.py)
   (adapted from the nsplit wave; nsys mechanics per D09 + nsys-silent-no-collection-trap:
-  report presence + sqlite kernel counts, never banners).
-- Per boot: .tasks/dense-q80-gemm/mtile{4,8,16,32,64,4b}.{nsys-rep,sqlite,_run.json};
-  logs .tasks/ft-gguf-serve-tuning/logs/mtile{4,8,16,32,64,4b}.log (+.pid).
-- Results: .tasks/dense-q80-gemm/ab-mtile-results.json (5-tile sweep + comparison block).
-- Gate: .tasks/dense-q80-gemm/gate-candidate-a.log; pre-step archive in wave2-candidate-a.md.
+  report presence + sqlite kernel counts, never banners). The ab_mtile_stage.sh
+  wrapper itself was not mirrored.
+- Per boot: per-tile `*_run.json` under [baselines/dense-q80-gemm/](../baselines/dense-q80-gemm/);
+  the .nsys-rep/.sqlite traces and boot logs were not mirrored (distilled away).
+- Results: [ab-mtile-results.json](../baselines/dense-q80-gemm/ab-mtile-results.json)
+  (5-tile sweep + comparison block).
+- Gate: gate-candidate-a.log not mirrored (numbers distilled into
+  [wave2-candidate-a.md](wave2-candidate-a.md)).
 
 ## Postflight census (2026-09-20 02:0x)
 

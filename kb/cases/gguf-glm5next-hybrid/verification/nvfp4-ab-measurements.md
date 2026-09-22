@@ -83,7 +83,8 @@ Expert slot = one (layer, expert) pair = 166.22 GiB / (42x288) = 14.42 MB.
 | required CPU-leg bandwidth | 2.85 GiB / 72.6 ms = 40.2 GB/s | - |
 | CPU cores busy during 64k decode (1 Hz /proc/stat sampler) | **19.9 of 20** | 3-4 of 20 |
 
-Cached benchbw profile (~/.cache/freetoken/benchbw/GPU-ec07f396-....json) - the two legs:
+Cached benchbw profile (per-GPU json in the machine-local benchbw cache, not mirrored;
+GPU-ec07f396-... - the two legs:
 
 | format | cpu_moe standalone | pcie_gather standalone | cpu OVERLAP | pcie OVERLAP | planner fraction = pcie_ov/(pcie_ov+cpu_ov) |
 |---|---|---|---|---|---|

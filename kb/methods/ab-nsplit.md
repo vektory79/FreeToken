@@ -152,15 +152,18 @@ in `ab-nsplit-results.json` (comparison.bitwise_diff_cross_mode).
 
 ## Artifacts
 
-- `.tasks/dense-q80-gemm/ab-nsplit.md` (this file), `ab-nsplit-results.json`
-- `.tasks/dense-q80-gemm/nsplit{1,2}.nsys-rep`, `nsplit{1,2}.sqlite`,
-  `nsplit{1,2}_run.json`, `nsplit1_plain_boot_run.json`
-- `.tasks/dense-q80-gemm/req_ns_{0..5}.json` (bitwise-diff prompts)
-- Boot logs: `.tasks/ft-gguf-serve-tuning/logs/nsplit1.log` + `nsplit1.log.pid`
-  and `nsplit2.log` + `nsplit2.log.pid`; `nsplit1_plain.log` is present, its
-  `.pid` sidecar is NOT (no `nsplit1_plain.log.pid` was written).
-- Tooling (reusable): `ab_nsplit_stage.sh`, `ab_nsplit_run.py`, `ab_nsplit_analyze.py`,
-  `ft_nsys_nsplit.sh`
+- This file; machine-readable results: [ab-nsplit-results.json](../baselines/dense-q80-gemm/ab-nsplit-results.json)
+- Per-stage run jsons: [nsplit1_run.json](../baselines/dense-q80-gemm/nsplit1_run.json),
+  [nsplit2_run.json](../baselines/dense-q80-gemm/nsplit2_run.json),
+  [nsplit1_plain_boot_run.json](../baselines/dense-q80-gemm/nsplit1_plain_boot_run.json);
+  the .nsys-rep/.sqlite traces were not mirrored (distilled away)
+- req_ns_{0..5}.json (bitwise-diff prompts): not mirrored
+- Boot logs: not mirrored (distilled away; note from the wave: `nsplit1_plain.log`
+  had no `.pid` sidecar because none was written)
+- Tooling (reusable): [ab_nsplit_stage.sh](../harness/ab-runner/ab_nsplit_stage.sh),
+  [ab_nsplit_run.py](../harness/ab-runner/ab_nsplit_run.py),
+  [ab_nsplit_analyze.py](../harness/ab-runner/ab_nsplit_analyze.py),
+  [ft_nsys_nsplit.sh](../harness/ab-runner/ft_nsys_nsplit.sh)
 
 ## Hygiene log
 

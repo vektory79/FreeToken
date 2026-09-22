@@ -1,11 +1,13 @@
 # TASK: fix-3 - keep hybrid radix reuse points alive (refresh snapshot LRU on validate/use) + verify the --linear-state-cache-ratio lever
 
-Status: OPEN (composed 2026-09; anchors verified by direct file reads on vektory79 HEAD 5001504).
+Status: LANDED + VALIDATED (2026-09; composed 2026-09, anchors verified by direct file reads on vektory79 HEAD 5001504).
+Landed: per-chunk donation fixes, commits 9732be0 / e5730e0 / 7080824 / be57ee8 + docs a20519e; hardware validation 5/5 -> 0/5 full misses, turns 2-6 wall 426 s -> 99 s. Wave-by-wave log: [WAVES.md](WAVES.md).
 Read CONTRIBUTING.md first - it is binding. Bug fixes come with a test that fails before and passes after.
 Context: user-observed periodic FULL cache loss in multi-turn agent conversations on GLM-5.3-Flash
 GGUF hybrid (`--moe-cache-auto --kv-reserve-tokens 400000 --kv-cache-dtype fp8 --memory-ratio 0.82
 --max-prefill-length 8191 --moe-strategy hybrid --moe-cpu-threads 16 --max-running-requests 1`).
-Evidence artifacts: `.tasks/conversation/request1.json` + `request2.json` (two consecutive requests).
+Evidence artifacts: two consecutive request bodies request1.json + request2.json (not
+mirrored; the byte-verified facts below are distilled from them).
 Diagnosis chat 2026-09; memory: ft-serve-cache-loss-midhistory-rewrite.
 
 ## Observed facts (byte-verified from the two request bodies)
