@@ -1,9 +1,9 @@
 ---
 name: "hybrid-radix-lru-test-integrity"
-description: "HybridRadixCache LRU test lessons: vacuous all() asserts, single-revert probe coverage, det-clock fixture, padding sink"
+description: "HybridRadixCache tests: vacuous asserts, single-revert probes, det-clock, padding sink, full_evictable suffix-pages"
 type: project
-lastUpdated: 2026-09-21T10:48
-lastRecall: 2026-09-21T15:46
+lastUpdated: 2026-09-22T20:42
+lastRecall: 2026-09-22T20:40
 ---
 
 # Test integrity for hybrid radix LRU tests (Fix-3 wave lessons, 2026-09-21)
@@ -21,3 +21,7 @@ How to apply: any new test asserting eviction order, LRU survival, or timestamp 
 - Keep asserts TIEBREAK-AGNOSTIC: under the det clock every ordering key is strictly distinct, so assert by boundary KEY (survivor identity, victim sequence) and accept any correct tiebreak for exact ties; never hard-code heap-order artifacts the spec calls arbitrary. Real-clock full-tie edge: the engine stamps timestamp and snapshot_lru in two separate time.monotonic_ns() reads (hybrid_radix_cache.py:88-89/:116-117) - two boundaries validated within one tick can FULLY tie on (snapshot_lru, timestamp); victim among exact ties is heap-order. Accepted as sound: the just-validated tip is mamba-locked before ensure_mamba_slots runs, so no correctness hazard.
 - Scheduler-level discrimination limit: admission match_req ALWAYS re-validates the deepest live on-path boundary, so shallow-boundary survival is UNPINNABLE at scheduler level (DFS-first among walk-tic ties coincides with FIFO-by-validation). To discriminate pre/post at scheduler level, validate an OFF-PATH DECOY BETWEEN the two chain boundaries: post-fix the stalest-validated B64 dies and the re-validated B128 survives; pre-fix the stale-tic decoy dies instead (assert fails).
 - LinearStatePool PADDING SINK: free list = range(1, num_slots) (linear_state_pool.py:126-136, slot 0 = sink) -> num_free == num_slots-1 idle. Pool-sizing tests must add +1: a "7-slot pool" has 6 allocatable (3 snapshots + 3 req slots + 1 padding); getting this wrong by one costs iterations (cost 3 in wave 4). If the sink is ever removed the test fails LOUDLY (no eviction fires) - acceptable coupling; build the pool directly (_pool(num_slots=7)) so _linear_pool_num_slots refactors cannot break it.
+
+## Interleave-baseline additions (2026-09-22)
+- Two new scenario tests in tests/kvcache/radix/test_hybrid_radix.py (file 28 passed; package radix+scheduler 260/1 skipped): `test_interleaved_conversations_wash_out_the_older_trace` pins the CURRENT cross-conversation policy as the measured baseline (victims leave FIFO A0 -> A1(tip) -> B0; the older conversation's resume collapses to cached=0/second=None and its KV is cascade-freed) - a future pin-tip protection policy must flip the A-resume assert to retention; `test_interleave_with_enough_snapshot_pool_keeps_both_traces` is the no-pressure contrast (both tips retained).
+- Counter gotcha: `full_evictable` counts NODE lengths = each node's SUFFIX pages only (insert of ids(9,10) onto existing ids(9) adds 1 page, not 2); a tombstoned INTERNAL node keeps its KV (counter unchanged); a leaf victim frees its KV plus the exposed tombstone ancestors (cascade). Draft assert 5*PAGE was wrong; correct was 3*PAGE (three 1-page B nodes, B0 tombstoned). Computing expected counters from token spans overcounts - derive them from the node list.

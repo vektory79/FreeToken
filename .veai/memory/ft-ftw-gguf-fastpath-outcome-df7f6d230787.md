@@ -3,7 +3,7 @@ name: "ft-ftw-gguf-fastpath-outcome"
 description: "Task S FTW gguf fastpath: Gaps 1-3 + capability fallback done and committed (8568807..2e9fcf1); boot 52.1s vs 94-132s"
 type: project
 lastUpdated: 2026-09-20T18:24
-lastRecall: 2026-09-22T12:00
+lastRecall: 2026-09-22T18:39
 ---
 
 # FTW GGUF fast path (task S): implemented + hardware-validated, COMMITTED

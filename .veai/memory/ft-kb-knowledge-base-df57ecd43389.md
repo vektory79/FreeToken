@@ -3,7 +3,7 @@ name: "ft-kb-knowledge-base"
 description: "kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md"
 type: project
 lastUpdated: 2026-09-22T18:26
-lastRecall: 2026-09-22T18:06
+lastRecall: 2026-09-22T18:41
 ---
 
 # FreeToken knowledge base: kb/ (created 2026-09-20)

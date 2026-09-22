@@ -11,7 +11,6 @@
 - [vektory79-main-rewrite-gotcha](vektory79-main-rewrite-gotcha-44d497ec530c.md) — vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-78dd276b7ddd.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
-- [process-hygiene-protocol](process-hygiene-protocol-ea279db69539.md) — Test-wave hygiene: census, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs; cross-wave GPU OOM = Environment
 - [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-08c4102d02ca.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-7b70b4071ae8.md) — Skill merge-main-into-vektory79 (.veai/skills): merge origin/main into vektory79; duplicates->main; boot-smoke
 - [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
@@ -41,9 +40,12 @@
 - [ftw-index-scans-silent-none](ftw-index-scans-silent-none-98c041aefd3e.md) — GGUF/FTW signature scans degrade to None silently (expert_banks.py:285/:406/:517), not raw errors
 - [git-integration-preferences](git-integration-preferences-90e2d8dc168a.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
 - [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-82d7aac85712.md) — GGUF glm5next VRAM headroom: 0.80/400k winner needs >=29.28 GiB free at boot; flips with desktop VRAM swing; options
-- [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-5a46bffb7e8b.md) — HybridRadixCache LRU test lessons: vacuous all() asserts, single-revert probe coverage, det-clock fixture, padding sink
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-cc4c4d1258e6.md) — gguf-native-serving skill ledger: TRAPS T01-T63; fix3 self-update committed a20519e; campaign validated
 - [fix3-hybrid-cache-loss-donation](fix3-hybrid-cache-loss-donation-09364e19044a.md) — Fix-3 campaign LANDED+VALIDATED: donation fixes user's periodic full loss (5/5 -> 0/5 misses, 4.3x turns 2-6); 5 commits
 - [kb-authoring-user-requirements](kb-authoring-user-requirements-d5e5128874ab.md) — User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity
 - [local-llm-vram-protocol](local-llm-vram-protocol-99ff7827a0e7.md) — Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model
 - [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md
+- [hybrid-interleave-snapshot-washout](hybrid-interleave-snapshot-washout-dce37ef61e12.md) — HybridRadixCache cross-convo snapshot wash: evict_mamba FIFO; pool=4*mr+max(4,ceil(ratio*mr))+1; ratio flag; wash tests
+- [process-hygiene-protocol](process-hygiene-protocol-74ae16a3c293.md) — Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment
+- [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-48113b8cd115.md) — HybridRadixCache tests: vacuous asserts, single-revert probes, det-clock, padding sink, full_evictable suffix-pages
+- [ft-interleave-cache-wash-repro](ft-interleave-cache-wash-repro-0065e2ed9c34.md) — Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x

@@ -1,9 +1,9 @@
 ---
 name: "process-hygiene-protocol"
-description: "Test-wave hygiene: census, trap+watchdog runners, SIGTERM->SIGKILL, serialized runs; cross-wave GPU OOM = Environment"
+description: "Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment"
 type: feedback
-lastUpdated: 2026-09-16T16:42
-lastRecall: 2026-09-21T17:47
+lastUpdated: 2026-09-22T20:42
+lastRecall: 2026-09-22T20:40
 ---
 
 # Process-hygiene protocol for agent test waves
@@ -20,3 +20,8 @@ Rule (user directive 2026-09-15): every subagent test wave that spawns processes
 A CPU-path pytest wave ran while a concurrent hardware wave (ft serve deep-fill verification, same 786k config, port 18081) held 29.8 GiB VRAM on the single RTX 5090: 2 pre-existing CUDA tests in tests/models/test_gguf_expert_banks.py failed with torch.OutOfMemoryError - NOT regressions (they were green before that wave started). The wave agent correctly did NOT touch the active wave (kill rule above) and documented it instead.
 - Why: one GPU per box; any CUDA-touching test inherits whatever VRAM the concurrent wave leaves free, so overlapping waves produce false OOM failures.
 - How to apply: before flagging CUDA test failures, check for a live hardware wave (pgrep 'ft serve' + nvidia-smi) and classify OOMs under concurrent VRAM pressure as Environment - re-run just those tests after the wave ends. Conversely, test-only or CPU-path fixes do not invalidate a concurrent hardware verification run (no restart needed); changes touching the hardware-executed path do.
+
+## Census incidents (2026-09-22, interleave-repro wave)
+- Stale prior-campaign wrapper BLOCKS a gated census: a fix3-session zombie (PID 2404281, alive 1d02h, infinite `while true` nvidia-smi sampler -> /tmp/fix3_logs/grow_r8_vram.csv, only child `sleep 2`) had the literal text 'ft serve' inside its own pgrep invocation, so any `pgrep '[f]t serve'` matched it and refused the GPU launch. Discriminate before killing: etime >> wave duration, no nvidia-smi compute apps, campaign logs stale >24h. It was killed (SIGTERM then SIGKILL) and the wave reran.
+- pkill -9 -f SELF-KILL: `pkill -9 -f 'fix3_logs/grow_r8_vram'` inside a chained command matched the invoking wrapper's OWN cmdline (the pattern string appears in it) -> the whole background chain was SIGKILLed instantly: empty output, zero artifacts, arms never started. Rule: never put an unbracketed literal in a pkill/pgrep pattern if that same literal appears anywhere in your own command line; bracket-escape ([f]ix3_logs) or separate the verify step from the kill step.
+- Escalation of the "harmless self-match" nuance: it is harmless only for REPORT-ONLY census. When census GATES a launch (refuse-if-live), a false positive BLOCKS the wave - gate census must match the real invocation shape (`[f]t serve --port`), not bare 'ft serve'.
