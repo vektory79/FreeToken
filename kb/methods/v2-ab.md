@@ -235,7 +235,8 @@ weight-resident tiles. Follow-up analysis belongs in a new task.
 - Stage outputs: `v2ab_{before,after}_{4096,6144,8191}.out` (this folder)
 - Results: `v2-ab-results.json` (per-chunk lines, medians, deltas, boot times)
 - Probe: `v2ab_probe.py`, `ft_nsys_v2.sh`, `v2ab_probe.json`,
-  `v2ab_probe_analyze2.py`, `v2ab_probe_analyze2.out`, `v2probe2.sqlite`,
+  `v2ab_probe_analyze2.py` (raw analyze dump distilled away; see
+  kb/baselines/mmq-prefill-kernel/README.md), `v2probe2.sqlite`,
   `v2ab_probe_liveness.json`, `report3.nsys-rep`
 - A/B boot logs: `.tasks/ft-gguf-serve-tuning/logs/ab_v2_*`
 - Broken-attempt evidence kept: `report2.nsys-rep` (kernels missing),

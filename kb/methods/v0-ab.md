@@ -200,6 +200,7 @@ performance merits.
 - Analyzer: `.tasks/mmq-prefill-kernel/v0ab_analyze.py`
 - Stage raw outputs: `v0ab_v0_before.out`, `v0ab_v0_after.out` (task folder)
 - Server logs: `.tasks/ft-gguf-serve-tuning/logs/ab_v0_before`, `ab_v0_after`
-- Probe: `v0ab_probe.py`, `probe_sitecustomize/sitecustomize.py`, `v0ab_probe.out`,
+- Probe: `v0ab_probe.py`, `probe_sitecustomize/sitecustomize.py` (raw probe
+  output distilled away; see kb/baselines/mmq-prefill-kernel/README.md),
   `logs/ab_v0_probe`
 - Machine-readable results: `v0-ab-results.json` (this folder)

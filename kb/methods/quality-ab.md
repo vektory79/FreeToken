@@ -83,7 +83,8 @@ SKIPPED" item of the v2 hardware validation protocol (v2-ab.md, TASK.md).
 
 Combined text = reasoning + content. digit ok = contains the expected answer
 (p20 80 km/h, p21 Friday, p22 6 apples, p23 1024). Full data:
-quality/divergence.json; raw analyzer print: quality/analyze_output.txt.
+quality/divergence.json (raw analyzer print distilled away; see
+kb/baselines/mmq-prefill-kernel/README.md).
 
 | idx | kind | div@char | len0 | len1 | delta | flip? | digit e0/e1 |
 |-----|------|---------|------|------|-------|-------|-------------|
@@ -166,8 +167,9 @@ AND quality battery both complete - the v2 protocol is CLOSED.
 3. Historical Task-05/Task-08 outputs were copied to quality/t05_hybrid_main_battery
    and quality/t08_hybrid_battery (volatile /tmp preservation per the brief);
    battery-post-fix stayed in place and was read in situ.
-4. analyze_output.txt was first truncated by a SIGPIPE from a `| head` pipeline;
-   re-run cleanly. divergence.json was never affected.
+4. The raw analyzer print (analyze_output.txt, since distilled away) was first
+   truncated by a SIGPIPE from a `| head` pipeline; re-run cleanly.
+   divergence.json was never affected.
 5. Boot flags use single --memory-ratio 0.85 / --max-prefill-length 8191 instead
    of the v2ab duplicate-flag idiom (argparse last-wins made those identical;
    effective config matches the winner flags exactly). No 0.90 fallback needed:

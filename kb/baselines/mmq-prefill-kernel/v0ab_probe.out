@@ -1,7 +1,0 @@
-[measure] census before: []
-[measure] ready=True in 122.3s why=ok
-[measure] probe prefill: 29.5s usage={'prompt_tokens': 4371, 'completion_tokens': 1, 'total_tokens': 4372} err=None
-[measure] marker lines: ['INFO:freetoken.layers.moe:gguf moe prefill: expert-sorted pair order active']
-[measure] throughput lines: ['ken usage: 0.00, #mamba-slot: 0/8, mamba usage: 0.00, #running-req: 0, #queue-req: 0, input throughput (token/s): 137.09']
-[measure] teardown leftover=[] gpu=1430
-{"ready": true, "marker_found": true, "marker_lines": ["INFO:freetoken.layers.moe:gguf moe prefill: expert-sorted pair order active"], "teardown": {"leftover": [], "gpu_mib": 1430}}
