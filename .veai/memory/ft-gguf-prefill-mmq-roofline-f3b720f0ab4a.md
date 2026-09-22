@@ -3,7 +3,7 @@ name: "ft-gguf-prefill-mmq-roofline"
 description: "GGUF prefill MMQ roofline analysis: step-0 nsys split, v0 no-op, v2 grouped +16.4%, ~758 ceiling unreachable (ALU-bound)"
 type: project
 lastUpdated: 2026-09-19T18:18
-lastRecall: 2026-09-21T15:35
+lastRecall: 2026-09-22T13:05
 ---
 
 # GGUF prefill MMQ roofline + campaign history (RTX 5090, 2026-09-17)

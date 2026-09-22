@@ -44,3 +44,6 @@
 - [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-5a46bffb7e8b.md) — HybridRadixCache LRU test lessons: vacuous all() asserts, single-revert probe coverage, det-clock fixture, padding sink
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-cc4c4d1258e6.md) — gguf-native-serving skill ledger: TRAPS T01-T63; fix3 self-update committed a20519e; campaign validated
 - [fix3-hybrid-cache-loss-donation](fix3-hybrid-cache-loss-donation-09364e19044a.md) — Fix-3 campaign LANDED+VALIDATED: donation fixes user's periodic full loss (5/5 -> 0/5 misses, 4.3x turns 2-6); 5 commits
+- [kb-authoring-user-requirements](kb-authoring-user-requirements-d5e5128874ab.md) — User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity
+- [local-llm-vram-protocol](local-llm-vram-protocol-99ff7827a0e7.md) — Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model
+- [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md

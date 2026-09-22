@@ -3,7 +3,7 @@ name: "ft-serve-gguf-tuning-campaign-2026-09"
 description: "GGUF ft serve tuning winner (mr1+8191+0.85, radix L-drop root cause), harness gotchas, task briefs"
 type: project
 lastUpdated: 2026-09-20T18:20
-lastRecall: 2026-09-21T15:38
+lastRecall: 2026-09-21T21:45
 ---
 
 # ft serve GGUF GLM-5.3-Flash: tuning campaign 2026-09-16/17 (RTX 5090)

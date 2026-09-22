@@ -3,7 +3,7 @@ name: "fix3-hybrid-cache-loss-donation"
 description: "Fix-3 campaign LANDED+VALIDATED: donation fixes user's periodic full loss (5/5 -> 0/5 misses, 4.3x turns 2-6); 5 commits"
 type: project
 lastUpdated: 2026-09-21T19:06
-lastRecall: 2026-09-21T17:47
+lastRecall: 2026-09-22T11:22
 ---
 
 # Fix-3: hybrid radix full cache loss on mid-history rewrite -> per-chunk donation LANDED

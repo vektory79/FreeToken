@@ -3,6 +3,7 @@ name: "ftw-index-scans-silent-none"
 description: "GGUF/FTW signature scans degrade to None silently (expert_banks.py:285/:406/:517), not raw errors"
 type: project
 lastUpdated: 2026-09-20T19:45
+lastRecall: 2026-09-22T12:00
 ---
 
 # GGUF/FTW signature-group scans degrade to None silently (by contract)
