@@ -88,7 +88,7 @@ GPU никогда не ждёт CPU (idle 0.05%). Ядро MMQ-класса —
 ## Как измерить / проверить
 
 - Живой сервер: [harness/serve-measure/measure.py](../harness/serve-measure/measure.py)
-  + payload'ы `req_prefill.json`/`req_ladder.json`; общие гочвы прогонов — в
+  + payload'ы `req_prefill.json`/`req_ladder.json`; общие готчи прогонов — в
   [корневом README kb](../README.md) и [harness/README.md](../harness/README.md).
 - A/B одной переменной (один boot на значение): шаблон
   [ab-nsplit.md](../methods/ab-nsplit.md); свип по тайлу —

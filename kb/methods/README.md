@@ -27,7 +27,7 @@
 - «Почему падает префилл / не хватает VRAM» — сначала
   [vram-headroom.md](vram-headroom.md), затем [../incidents/README.md](../incidents/README.md).
 - «Как поставить A/B» — [ab-nsplit.md](ab-nsplit.md) как минимальный шаблон,
-  [ab-mtile.md](ab-mtile.md) как шаблон свипа, гочвы прогонов в [../README.md](../README.md).
+  [ab-mtile.md](ab-mtile.md) как шаблон свипа, готчи прогонов в [../README.md](../README.md).
 - «Изменилось ли качество» — [quality-ab.md](quality-ab.md), а при мигающих
   результатах — [arbitration-battery.md](arbitration-battery.md).
 
