@@ -15,6 +15,10 @@ Specification / Acceptance / Checklist.
 - [fix3-snapshot-lru-refresh/](fix3-snapshot-lru-refresh/) — диагностика
   периодической полной потери кэша по двум телам запросов; WAVES-план волн.
   Вход: [TASK.md](fix3-snapshot-lru-refresh/TASK.md). Статус: OPEN.
+- [session-cache-tiering/](session-cache-tiering/) — бриф ярусного кеша сессий
+  (L0 VRAM -> L1 RAM 30 GiB -> L2 SSD 100 GiB): pull-on-evict с адаптивной
+  селекцией, контент-адресный стор, журнал-персистентность; фазы 1/2, приёмка
+  на фазу 1. Вход: [TASK.md](session-cache-tiering/TASK.md). Статус: PLANNED.
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
