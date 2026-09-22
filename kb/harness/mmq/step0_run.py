@@ -27,7 +27,8 @@ measure.FT = os.path.join(TASKDIR, "ft_nsys.sh")
 NSYS = "/usr/local/bin/nsys"
 SESSION = "step0cap"
 REPORT = os.path.join(TASKDIR, "step0.nsys-rep")
-WATCH = re.compile(measure.WATCH.pattern)
+# FAILPAT: measure.WATCH + the backend-worker-exited variant (process-hygiene).
+WATCH = re.compile(measure.WATCH.pattern + r"|backend worker .* exited")
 START_AFTER_LINES = 2  # capture begins inside chunk 3
 STOP_AFTER_LINES = 6   # capture ends inside chunk 7
 HARD_DEADLINE_S = 1800

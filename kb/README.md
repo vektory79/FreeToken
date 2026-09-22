@@ -26,9 +26,8 @@ daytime-vs-night decode runs (daytime noise swamped a real -10% once).
 | File | Hook |
 |---|---|
 | orchestration-digest.md | Wave protocol, STOP GATE, trap digest (ORCHESTRATION+TRAPS condensed, replaces re-reading skill files) |
-| step0-profile.md | nsys step-0 split: launch decomposition, BW vs ALU regime classification |
+| step0-profile.md | nsys step-0 split: launch decomposition, BW vs ALU regime classification (incl. widening projections under MTILE sweep) |
 | step0-profile-mmq.md | same method, mmq-prefill-kernel instance |
-| step0-projection-table.md | widening projections under MTILE sweep |
 | ab-mtile.md / ab-nsplit.md | A/B runner usage, per-call env kill switch, two-boot flip |
 | quality-ab.md / v0-ab.md / v2-ab.md | quality battery + A/B numbers for MMQ variants |
 | arbitration-battery.md | quality arbitration method (env0/env1, divergence analysis) |
@@ -40,9 +39,9 @@ daytime-vs-night decode runs (daytime noise swamped a real -10% once).
 
 | Dir | Contents |
 |---|---|
-| serve-measure/ | measure.py (patched: skip SSE times[0], anchor `input throughput (token/s):`), campaign.py ladder runner, req_*.json payloads |
-| ab-runner/ | dense q8_0 A/B machinery: mtile/nsplit sweeps, arbitration, seq_probe, classify_launches, step0_run, microbenches, vram_headroom_run, stage scripts |
-| mmq/ | MMQ A/B: v0ab/v2ab probe+analyze, step0_analyze, v3a probe/battery, sitecustomize liveness probe, ft_nsys_*.sh |
+| serve-measure/ | measure.py (patched: skip SSE times[0], anchor `input throughput (token/s):`), req_*.json payloads |
+| ab-runner/ | dense q8_0 A/B machinery: mtile/nsplit sweeps, arbitration, microbenches, vram_headroom_run, ab_nsplit_stage.sh (parameterized stage runner) |
+| mmq/ | MMQ A/B: v0ab/v2ab analyze, v2ab probe, step0_analyze, v3a stage/analyze + battery, sitecustomize liveness probe |
 | quality/ | ft_phase6_battery.py, run_battery.py, analyze_divergence.py (quality A/B battery) |
 | probes/ | pcie_bw.cu + prebuilt pcie_bw/pcie_bw2 binaries, ram_bw.py, dram_dir_bw.py, size_scaling.py, nvme_thermal_test.sh (RTX 5090 / NVMe rig probes) |
 | repro/ | crash repro runners, fix1 run_one.sh, merge-wave boot-smoke |
@@ -80,7 +79,7 @@ Anchors: prefill 792-808 tok/s bare baseline after dense-q80+m-tile (2026-09);
 earlier 293 tok/s anchor is pre-dense-q80. Always re-state the config line
 with a number.
 
-### campaigns/ - per-campaign briefs, plans, reviews
+### cases/ - per-campaign briefs, plans, reviews
 
 Task briefs and plan packages double as templates for future campaign plans
 (Goal / Scope / Specification / Acceptance / Checklist). merge-main-work/ holds
