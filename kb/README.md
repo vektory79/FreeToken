@@ -50,6 +50,11 @@ serving на RTX 5090): методики измерений, переиспол�
   статусом OPEN/CLOSED. **Читать первым:** при загрузке больших контекстов —
   [README.md](incidents/crash-mr080-400k/README.md) (статус OPEN) и
   [failfast-report.md](incidents/nvfp4-1m-capacity/failfast-report.md) (CLOSED).
+- [topics/](topics/README.md) — атомарные статьи по темам (вердикт -> механизм ->
+  числа -> как измерить): префилл ([prefill-throughput.md](topics/prefill-throughput.md)),
+  VRAM-бюджет ([vram-budget.md](topics/vram-budget.md)), переиспользование
+  radix-кэша ([radix-cache-reuse.md](topics/radix-cache-reuse.md)), стоимость
+  гибридного MoE ([moe-hybrid-cost-model.md](topics/moe-hybrid-cost-model.md)).
 - [glossary.md](glossary.md) — глоссарий терминов kb (mr, MTILE, step-0, MMQ,
   fail-fast gate, ...) с ссылками на основной документ по каждому термину.
 - [raw/](raw/.gitignore) — зеркала nsys-профилей (.sqlite, .nsys-rep),
