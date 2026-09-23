@@ -551,3 +551,64 @@ def test_interleave_with_enough_snapshot_pool_keeps_both_traces(hyb):
     m, _ = hyb.do_match(b_chain)
     assert (m.cached_len, m.second) == (3 * PAGE, b_tip)
     hyb.check()
+
+
+# ------------------------------------------------- W2: victim path-key derivation (additive)
+def _two_snapshot_tree():
+    from freetoken.kvcache.hybrid_radix_cache import HybridRadixCache
+
+    cache = HybridRadixCache(torch.device("cpu"), 1)
+    cache.insert(torch.tensor([1, 2], dtype=torch.int32),
+                 torch.tensor([10, 11], dtype=torch.int32), 1)
+    cache.insert(torch.tensor([1, 2, 3, 4], dtype=torch.int32),
+                 torch.tensor([10, 11, 12, 13], dtype=torch.int32), 2)
+    return cache
+
+
+def test_evict_mamba_derives_internal_tombstone_victim_path_key():
+    """The internal tombstone victim (slot freed, KV kept) still emits its chain-key path:
+    its boundary is a live reuse point for the session-tier demotion seam."""
+    from freetoken.scheduler.session_tier import chain_page_key
+
+    cache = _two_snapshot_tree()
+    k1 = chain_page_key(None, (1,))
+    k2 = chain_page_key(k1, (2,))
+    er = cache.evict_mamba(1, derive_paths=True)
+    assert er.victim_path_keys == (k2,)          # the stalest-validated boundary dies first
+    assert len(er.victim_paths) == 1
+    vp = er.victim_paths[0]
+    assert vp.boundary_len == 2 and vp.chain_keys == (k1, k2)
+    assert vp.kv_indices.tolist() == [10, 11] and vp.mamba_slot == 1
+    assert er.kv_indices.numel() == 0 and er.mamba_slots == [1]   # tombstone: slot only
+    cache.check_integrity()
+
+
+def test_evict_mamba_derives_leaf_victim_path_key():
+    """The leaf victim emits the full ancestor chain over its path's pages."""
+    from freetoken.scheduler.session_tier import chain_page_key
+
+    cache = _two_snapshot_tree()
+    cache.evict_mamba(1, derive_paths=True)      # tombstone the internal boundary first
+    k = chain_page_key(None, (1,))
+    for t in (2, 3, 4):
+        k = chain_page_key(k, (t,))
+    er = cache.evict_mamba(1, derive_paths=True)
+    assert er.victim_path_keys == (k,)
+    vp = er.victim_paths[0]
+    assert vp.boundary_len == 4 and vp.mamba_slot == 2
+    assert vp.kv_indices.tolist() == [10, 11, 12, 13]             # ancestors included
+    assert len(vp.chain_keys) == 4
+    # core freeing is unchanged: the leaf KV + the exposed KV-only tombstone cascade
+    assert er.kv_indices.tolist() == [12, 13, 10, 11] and er.mamba_slots == [2]
+    cache.check_integrity()
+
+
+def test_evict_victim_path_keys_default_empty():
+    """No derivation requested -> the additive fields stay empty; construction sites and
+    positional consumers are untouched."""
+    cache = _two_snapshot_tree()
+    er = cache.evict_mamba(1)
+    assert er.victim_path_keys == () and er.victim_paths == ()
+    assert er.kv_indices.numel() == 0 and er.mamba_slots == [1]
+    er2 = cache.evict_full(2)
+    assert er2.victim_path_keys == () and er2.victim_paths == ()

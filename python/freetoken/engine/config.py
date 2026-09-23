@@ -78,6 +78,9 @@ class EngineConfig:
     # `--cache-type naive` opts out. linear_state_cache_ratio sizes the GDN snapshot cache as
     # ceil(ratio * max_running_req) extra slots.
     linear_state_cache_ratio: float = 2.0
+    session_tier_ram_gib: float = 0.0
+    session_tier_dir: str | None = None
+    session_tier_ssd_gib: float = 0.0
     # Window/full ratio for the SWA radix cache (`--cache-type radix` on SWA models) and the DSV4
     # window tier: the DEFAULT window-pool size = max(working-set floor, ratio x full-pool tokens).
     # < 1.0 trades retained window-prefix capacity for memory savings; must be in (0, 1]. It is the

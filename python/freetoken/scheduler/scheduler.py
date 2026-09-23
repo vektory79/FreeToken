@@ -81,10 +81,17 @@ class Scheduler(SchedulerIOMixin):
         # virtual full-token coordinate; model-specific tiers ride the plug-ins -- DSV4's
         # window/cmp/idx shadows via swa_pool, Gemma's swa via swa_pool, GDN state via
         # linear_state_pool. No model supplies its own manager.
+        from .cache import SessionTierCfg
+
         self.cache_manager = CacheManager(
             self.engine.num_pages, config.page_size, self.engine.page_table, config.cache_type,
             linear_state_pool=self.engine.linear_state_pool,
             swa_pool=self.engine.kv_cache,
+            session_tier_cfg=SessionTierCfg(
+                ram_bytes=int(config.session_tier_ram_gib * 2**30),
+                dir=config.session_tier_dir,
+                ssd_bytes=int(config.session_tier_ssd_gib * 2**30),
+            ) if (config.session_tier_ram_gib > 0 or config.session_tier_dir is not None) else None,
             sliding_window_size=next(
                 (g.sliding_window for g in config.model_config.kv_cache_group_specs() if g.is_swa),
                 None,
@@ -307,6 +314,7 @@ class Scheduler(SchedulerIOMixin):
     def shutdown(self) -> None:
         torch.cuda.synchronize(self.device)
         self.sync_all_ranks()
+        self.cache_manager.shutdown_tier()   # session tier: flush live segments to L2
         self.engine.shutdown()
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
@@ -628,7 +636,11 @@ class Scheduler(SchedulerIOMixin):
             return
         for req in batch.reqs:
             if req.mamba_restore_src is not None:
-                pool.copy_from(req.mamba_restore_src, req.linear_slot_idx)
+                src = req.mamba_restore_src
+                pool.copy_from(src, req.linear_slot_idx)
+                if self.cache_manager.tier_owns_restore_slot(src):
+                    pool.free(src)                  # session-tier restore slot: no tree owner
+                    self.cache_manager.tier_release_restore_slot(src)
                 req.mamba_restore_src = None  # consumed: restore exactly once
 
     def _free_req_resources(self, req: Req) -> None:
@@ -638,6 +650,14 @@ class Scheduler(SchedulerIOMixin):
         # slots to two later requests. table_idx == -1 marks an already-freed request.
         if req.table_idx == -1:
             return
+        # A session-tier restore slot that never reached its first forward has no tree owner
+        # (the COW in _restore_linear_states frees it): return it here.
+        if req.mamba_restore_src is not None and self.cache_manager.tier_owns_restore_slot(
+                req.mamba_restore_src):
+            if self.engine.linear_state_pool is not None:
+                self.engine.linear_state_pool.free(req.mamba_restore_src)
+            self.cache_manager.tier_release_restore_slot(req.mamba_restore_src)
+            req.mamba_restore_src = None
         # Polymorphic free: the DSV4 manager returns the request's window pages + cmp/idx blocks
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).

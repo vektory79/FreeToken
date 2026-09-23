@@ -82,9 +82,11 @@ class PrefillAdder:
         )
 
         if estimated_size + self.reserved_size > self.cache_manager.available_size:
+            self.cache_manager.abandon_restore(handle)
             return None
         self.cache_manager.lock(handle)
         if estimated_size + self.reserved_size > self.cache_manager.available_size:
+            self.cache_manager.abandon_restore(handle)
             return self.cache_manager.unlock(handle)
 
         # Second currency (hybrid GDN): reserve 1 live + 2 ping-pong state slots; evict tree
@@ -94,6 +96,7 @@ class PrefillAdder:
             if pool.num_free_slots < 3:
                 self.cache_manager.ensure_mamba_slots(3)
             if pool.num_free_slots < 3:
+                self.cache_manager.abandon_restore(handle)
                 return self.cache_manager.unlock(handle)
 
         # Third currency (SWA): refuse admission unless the swa pool can seat this request's first
@@ -108,6 +111,7 @@ class PrefillAdder:
                 min(max(extend_len, 1), self.cache_manager.sliding_window_size) + 1, ps
             ) * ps
             if self.cache_manager.swa_available_size - self.reserved_swa < need_swa:
+                self.cache_manager.abandon_restore(handle)
                 return self.cache_manager.unlock(handle)
 
         table_idx = self.table_manager.allocate()

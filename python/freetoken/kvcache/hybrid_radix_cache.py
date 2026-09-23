@@ -47,9 +47,26 @@ class HybridMatch(NamedTuple):
     node: RadixTreeNode           # the matched node (lock target)
 
 
+class VictimPath(NamedTuple):
+    """Per-victim path detail for the session-tier interception (W2 additive): the
+    incremental chain-key path key, the end boundary length, the per-page chain keys,
+    the FULL-path KV page indices [0:boundary_len) (ancestors included -- they stay in
+    the tree, the caller only reads bytes through them) and the snapshot slot freed at
+    this boundary (None for a KV-only victim). Derived on eviction only, and only when
+    the caller asks (derive_paths=True); nothing is cached on the node."""
+
+    path_key: bytes
+    boundary_len: int
+    chain_keys: Tuple[bytes, ...]
+    kv_indices: torch.Tensor
+    mamba_slot: Optional[int]
+
+
 class EvictResult(NamedTuple):
     kv_indices: torch.Tensor      # KV page indices to free
     mamba_slots: List[int]        # GDN state slots to free
+    victim_path_keys: tuple = ()  # per-victim path keys; empty unless derive_paths was requested
+    victim_paths: tuple = ()      # per-victim VictimPath detail, aligned with victim_path_keys
 
 
 class HybridRadixCache:
@@ -154,37 +171,50 @@ class HybridRadixCache:
             cur = cur.parent
 
     # ---------------------------------------------------------------- eviction (dual)
-    def evict_full(self, num_tokens: int) -> EvictResult:
+    def evict_full(self, num_tokens: int, derive_paths: bool = False) -> EvictResult:
         """Evict KV tokens by LRU over UNLOCKED LEAF nodes (an internal node's KV is a prefix
-        dependency for all descendants). Frees each evicted node's snapshot too."""
+        dependency for all descendants). Frees each evicted node's snapshot too.
+        derive_paths=True additionally derives each popped leaf victim's chain-key path
+        (session-tier demotion seam); cascaded KV-only tombstones are not victims of this
+        policy and emit nothing."""
         leaves = [n for n in self._leaves() if n.ref_count == 0]
         heapq.heapify(leaves)
         kv, mamba, freed = [], [], 0
+        victims: List[VictimPath] = []
         while freed < num_tokens and leaves:
             node = heapq.heappop(leaves)
             if node.ref_count != 0 or not node.is_leaf() or node.is_root():
                 continue
             freed += node.length
             kv.append(node.value)
+            n_slots = len(mamba)
             self.full_evictable -= node.length
             self._free_node_mamba(node, mamba)
+            if derive_paths:
+                victims.append(self._derive_victim_path(
+                    node, mamba[n_slots] if len(mamba) > n_slots else None))
             parent, casc = self._cascade_tombstone_leaves(self._unlink(node), kv)
             freed += casc
             if parent.is_leaf() and parent.ref_count == 0 and not parent.is_root():
                 heapq.heappush(leaves, parent)
-        return EvictResult(torch.cat(kv) if kv else self.empty, mamba)
+        return EvictResult(torch.cat(kv) if kv else self.empty, mamba,
+                           tuple(v.path_key for v in victims), tuple(victims))
 
-    def evict_mamba(self, num: int) -> EvictResult:
+    def evict_mamba(self, num: int, derive_paths: bool = False) -> EvictResult:
         """Evict GDN snapshots by LRU over UNLOCKED snapshot-bearing nodes -- internal nodes
         too. Internal node -> TOMBSTONE (free the slot, keep KV + children). Leaf node -> free
         both KV and slot and unlink, then cascade-delete any KV-only tombstone leaves it exposes
-        upward (so a leaf always carries a live snapshot -- mirrors sglang)."""
+        upward (so a leaf always carries a live snapshot -- mirrors sglang). derive_paths=True
+        additionally derives each victim's chain-key path (both the leaf and the internal
+        tombstone victim emit theirs -- the tombstone victim's boundary is a live reuse point
+        for the session-tier demotion seam)."""
         # Victim heap keys on (snapshot_lru, timestamp): FIFO by last validation with the
         # walk tic as tiebreak. __lt__ (timestamp) stays the KV-LRU key for evict_full.
         cands = [((n.snapshot_lru, n.timestamp), n) for n in self._snapshot_nodes()
                  if n.mamba_ref_count == 0]
         heapq.heapify(cands)
         kv, mamba, freed = [], [], 0
+        victims: List[VictimPath] = []
         while freed < num and cands:
             node = heapq.heappop(cands)[1]
             if node.mamba_value is None or node.mamba_ref_count != 0 or node.is_root():
@@ -194,11 +224,17 @@ class HybridRadixCache:
                 self.full_evictable -= node.length
                 self._free_node_mamba(node, mamba)
                 freed += 1
+                if derive_paths:
+                    victims.append(self._derive_victim_path(node, mamba[-1]))
                 self._cascade_tombstone_leaves(self._unlink(node), kv)
             else:
+                slot = node.mamba_value
                 self._free_node_mamba(node, mamba)  # tombstone internal (or locked-KV) node
                 freed += 1
-        return EvictResult(torch.cat(kv) if kv else self.empty, mamba)
+                if derive_paths:
+                    victims.append(self._derive_victim_path(node, slot))
+        return EvictResult(torch.cat(kv) if kv else self.empty, mamba,
+                           tuple(v.path_key for v in victims), tuple(victims))
 
     @property
     def full_evictable_size(self) -> int:
@@ -224,6 +260,29 @@ class HybridRadixCache:
             assert n.snapshot_lru >= 0
 
     # ---------------------------------------------------------------- helpers
+    def _derive_victim_path(self, node: RadixTreeNode, mamba_slot: Optional[int]) -> VictimPath:
+        """One chain_page_key call per page walking root -> node; the node's FIRST-page key
+        (the tree's dict key) is not enough -- the store needs the full ancestor chain. Not
+        cached: computed on eviction only, only when a consumer asked."""
+        from freetoken.kvcache.utils import chain_page_key
+
+        keys, pages = [], []
+        n = node
+        while not n.is_root():
+            keys.append(n._key)
+            pages.append(n.value)
+            n = n.parent
+        keys.reverse()
+        pages.reverse()
+        ps = self.page_size
+        prev: Optional[bytes] = None
+        chain: List[bytes] = []
+        for k in keys:
+            for off in range(0, len(k), ps):
+                prev = chain_page_key(prev, tuple(k[off:off + ps].tolist()))
+                chain.append(prev)
+        return VictimPath(prev, sum(len(k) for k in keys), tuple(chain), torch.cat(pages), mamba_slot)
+
     def _free_node_mamba(self, node: RadixTreeNode, out: List[int]) -> None:
         if node.mamba_value is not None:
             out.append(node.mamba_value)
@@ -305,4 +364,4 @@ class HybridRadixCache:
         return node, prefix_len
 
 
-__all__ = ["HybridRadixCache", "HybridMatch", "EvictResult", "HybridCacheHandle"]
+__all__ = ["HybridRadixCache", "HybridMatch", "EvictResult", "VictimPath", "HybridCacheHandle"]

@@ -8,6 +8,9 @@ import torch
 from freetoken.core import Req
 from freetoken.kvcache import BaseCacheHandle, MatchResult, create_prefix_cache
 from freetoken.utils import align_down, div_ceil
+from freetoken.utils.logger import init_logger
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from .utils import PendingReq
@@ -25,13 +28,90 @@ _SWA_EVICTION_INTERVAL = _swa_eviction_interval()
 
 # Finish-time retention keeps [P - window - gap, P) swa-live for the next turn's cut near the
 # prompt end. The gap covers templates whose generation prompt injects tokens that vanish when
-# the client drops reasoning (Qwen's "<think>\n": the re-render diverges 2 tokens BEFORE P).
+# the client drops reasoning (Qwen's "\ key\n": the re-render diverges 2 tokens BEFORE P).
 _SWA_RETAIN_GAP = 16
+
+
+class SessionTierCfg:
+    """Raw sizes for the session-tier store; GiB flags are converted by the caller.
+    ram_bytes == 0 and dir None == the store is inert (SessionTierStore.enabled False)."""
+
+    __slots__ = ("ram_bytes", "dir", "ssd_bytes")
+
+    def __init__(self, ram_bytes: int = 0, dir=None, ssd_bytes: int = 0):
+        self.ram_bytes = ram_bytes
+        self.dir = dir
+        self.ssd_bytes = ssd_bytes
+
+
+class _SlotSnapshot:
+    """SnapshotSource view of one LinearStatePool slot: conv + recurrent + slot_states packed
+    in pool-attribute order. The store materializes bytes inside offer(); the slot must still
+    be LIVE at that moment (offer before free)."""
+
+    def __init__(self, pool, slot: int):
+        self._pool, self._slot = pool, slot
+
+    def payload(self) -> bytes:
+        return b"".join(
+            p.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+            for p in _slot_parts(self._pool, self._slot))
+
+
+def _slot_parts(pool, slot: int):
+    parts = [pool.conv_states[:, slot], pool.recurrent_states[:, slot]]
+    parts.extend(t[:, slot] for t in pool.slot_states.values())
+    return parts
+
+
+def _unpack_slot(pool, slot: int, data: bytes) -> None:
+    pos = 0
+    for p in _slot_parts(pool, slot):
+        n = p.numel() * p.element_size()
+        flat = torch.frombuffer(bytearray(data[pos:pos + n]), dtype=torch.uint8)
+        p.copy_(flat.view(p.dtype).reshape(p.shape).to(p.device))
+        pos += n
+    assert pos == len(data), "snapshot byte length mismatch"
+
+
+class _KVPageBytes:
+    """Byte codec over the paged KV pool (MHAKVCache-family ``_kv_buffer`` layout), scale
+    buffers included so a restored page is byte-identical. W2 scope: hybrid-linear models
+    route through this pool family; others keep the tier inert (never offered, never probed)."""
+
+    def __init__(self, pool):
+        self._pool = pool
+        buf = pool._kv_buffer
+        self._scales = [s for s in (getattr(pool, "_scale_buffer", None),
+                                    getattr(pool, "_block_scale_buffer", None))
+                        if s is not None]
+        for s in self._scales:
+            assert s.shape[2] == buf.shape[2] * buf.shape[3], (
+                "KV scale buffer does not span the pool's page grid")
+
+    def read_page(self, page: int) -> bytes:
+        buf = self._pool._kv_buffer
+        span = slice(page * buf.shape[3], (page + 1) * buf.shape[3])
+        return b"".join(
+            t.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+            for t in [buf[:, :, page]] + [s[:, :, span] for s in self._scales])
+
+    def write_page(self, page: int, data: bytes) -> None:
+        buf = self._pool._kv_buffer
+        span = slice(page * buf.shape[3], (page + 1) * buf.shape[3])
+        pos = 0
+        for t in [buf[:, :, page]] + [s[:, :, span] for s in self._scales]:
+            n = t.numel() * t.element_size()
+            flat = torch.frombuffer(bytearray(data[pos:pos + n]), dtype=torch.uint8)
+            t.copy_(flat.view(t.dtype).reshape(t.shape).to(t.device))
+            pos += n
+        assert pos == len(data), "KV page byte length mismatch"
 
 
 class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
-                 linear_state_pool=None, swa_pool=None, sliding_window_size=None):
+                 linear_state_pool=None, swa_pool=None, sliding_window_size=None,
+                 session_tier_cfg=None):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
@@ -61,6 +141,27 @@ class CacheManager:
         self.page_table = page_table
         self.page_size = page_size
         self.cache_type = type
+        # Session tiering (W2): inert unless a hybrid manager gets an enabled cfg AND a byte
+        # codec for its KV pool; off == bit-identical behavior (every hook early-returns).
+        self.tier_store = None
+        self._tier_on = False
+        self._tier_sessions: dict = {}
+        self._tier_snap_bound: dict = {}
+        self._tier_restore_slots: set = set()
+        self._tier_pending_restore = None
+        self._page_bytes = None
+        if self.is_hybrid and self.linear_state_pool is not None and session_tier_cfg is not None:
+            from .session_tier import SessionTierStore
+
+            store = SessionTierStore(session_tier_cfg)
+            if store.enabled and getattr(swa_pool, "_kv_buffer", None) is not None:
+                store.replay_journal()   # boot hook: rebuild the L2 index from the journal
+                self.tier_store = store
+                self._page_bytes = _KVPageBytes(swa_pool)
+                self._tier_on = True
+            elif store.enabled:
+                logger.warning("session tier: no paged-KV byte codec for this pool family; "
+                               "tier stays inert")
 
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
@@ -101,6 +202,10 @@ class CacheManager:
         if self.is_hybrid:
             from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
             m = self.prefix_cache.match_prefix(ids)
+            self._tier_admission(ids, m.cached_len)
+            restored = self.try_restore(ids, m.cached_len)
+            if restored is not None:
+                return restored
             return MatchResult(
                 HybridCacheHandle(m.cached_len, m.node, m.kv_indices), mamba_value=m.mamba_value)
         return self.prefix_cache.match_prefix(ids)
@@ -139,9 +244,12 @@ class CacheManager:
         """Free GDN state slots until >= ``n`` are available by tombstoning LRU tree snapshots
         (evict_mamba), returning their slots + any freed KV to the pools."""
         while self.linear_state_pool.num_free_slots < n:
-            er = self.prefix_cache.evict_mamba(n - self.linear_state_pool.num_free_slots)
+            er = self.prefix_cache.evict_mamba(
+                n - self.linear_state_pool.num_free_slots, derive_paths=self._tier_on)
             if not er.mamba_slots:
                 break
+            if self._tier_on:
+                self._tier_offer(er.victim_paths)   # offer BEFORE the free: slots stay live
             self.linear_state_pool.free(er.mamba_slots)
             self._free(er.kv_indices)
 
@@ -235,6 +343,11 @@ class CacheManager:
                 req.swa_evicted_seqlen = new_evicted
 
     def lock(self, handle: BaseCacheHandle) -> None:
+        # A locked handle means admission consumed the restored match: clear the pending
+        # restore deterministically here (abandon_restore only handles the refusal paths).
+        pending = self._tier_pending_restore
+        if pending is not None and pending[0] is handle:
+            self._tier_pending_restore = None
         if self.is_swa:
             # records the window boundary on the (frozen) handle for unlock/dec_lock.
             object.__setattr__(handle, "swa_uuid", self.prefix_cache.inc_lock(handle.node))
@@ -595,8 +708,10 @@ class CacheManager:
                 self._free_swa(ev.swa_indices)
             elif self.is_hybrid:
                 # Evicting KV leaf nodes drops their GDN snapshots too -> return both pools.
-                er = self.prefix_cache.evict_full(need)
+                er = self.prefix_cache.evict_full(need, derive_paths=self._tier_on)
                 evicted = er.kv_indices
+                if self._tier_on:
+                    self._tier_offer(er.victim_paths)   # offer BEFORE the free: slots stay live
                 if er.mamba_slots:
                     self.linear_state_pool.free(er.mamba_slots)
             else:
@@ -617,6 +732,149 @@ class CacheManager:
         # [X * page_size] -> [X * page_size, ..., X * page_size + page_size - 1]
         offsets = torch.arange(self.page_size, device=self.device, dtype=torch.int32)
         return (pages.unsqueeze(1) + offsets).flatten()
+
+    # ------------------------------------------------- session tiering (W2, additive)
+
+    def shutdown_tier(self) -> int:
+        """Graceful-shutdown hook: flush live tier segments to L2, then compact the journal
+        (dead records dropped; crash-safe convergence via replay's payload-crc check)."""
+        if self.tier_store is None:
+            return 0
+        flushed = self.tier_store.flush_live()
+        self.tier_store.compact()
+        return flushed
+
+    def tier_owns_restore_slot(self, slot: int) -> bool:
+        return slot in self._tier_restore_slots
+
+    def tier_release_restore_slot(self, slot: int) -> None:
+        self._tier_restore_slots.discard(slot)
+
+    def _chain_keys(self, ids) -> list:
+        """The request's per-page chain keys, the same incremental hash the store indexes."""
+        from freetoken.kvcache.utils import chain_page_key
+
+        ps = self.page_size
+        prev, chain = None, []
+        for off in range(0, len(ids) - len(ids) % ps, ps):
+            prev = chain_page_key(prev, tuple(ids[off:off + ps].tolist()))
+            chain.append(prev)
+        return chain
+
+    def _tier_admission(self, ids, cached_len: int) -> None:
+        """note_match wiring: a shallow/cold match vs the session's stored tip is a divergence
+        -- refresh the store's LRU currency at the matched path key and record the
+        under-divergence boundary for the adaptive keep set. All boundary bookkeeping here is
+        in TOKENS (cached_len and the victim boundary_len are token counts); page units are
+        derived only at the offer/restore seams. Sessions group by their FIRST-page
+        chain key (a common system prefix groups coarser: documented phase-1 approximation).
+        A full match (the whole stripped prompt cached) still promotes the tip."""
+        if not self._tier_on:
+            return
+        chain = self._chain_keys(ids)
+        if not chain:          # prompt shorter than page_size: nothing to index or probe
+            return
+        st = self._tier_sessions.setdefault(chain[0], [0, 0, 0, None])
+        if cached_len < st[0]:
+            st[1] = cached_len                      # last known divergence depth (tokens)
+        elif cached_len > st[0]:
+            st[2], st[0] = st[0], cached_len        # the old tip becomes the newest non-tip
+        if cached_len > 0:                          # a cold match only tracks the session
+            self.tier_store.note_match(chain[cached_len // self.page_size - 1], cached_len)
+
+    def _tier_offer(self, victims) -> None:
+        """Keep/drop each evicted victim against the adaptive set {tip, the DEEPEST boundary
+        <= divergence depth, newest non-tip} of its tracked session; kept victims are offered
+        to the store (bytes materialized via the page codec / SnapshotSource closure) BEFORE
+        the caller frees the originals -- demotion never changes what the core frees.
+        Session bookkeeping (st = [tip, div, spare, under]) and victim boundary_len are in
+        TOKENS; offer() takes PAGES (len(vp.chain_keys)) and _tier_snap_bound stores PAGES
+        (what try_restore's probe depth is counted in)."""
+        ps = self.page_size
+        for vp in victims:
+            st = self._tier_sessions.get(vp.chain_keys[0])
+            if st is None:
+                continue
+            if vp.boundary_len > st[0]:
+                st[2], st[0] = st[0], vp.boundary_len
+            elif st[0] > vp.boundary_len > st[2]:
+                st[2] = vp.boundary_len
+            if vp.boundary_len <= st[1] and (st[3] is None or vp.boundary_len >= st[3]):
+                st[3] = vp.boundary_len                     # deepest under-divergence slot
+            elif vp.boundary_len == st[0] or vp.boundary_len == st[2]:
+                pass                                        # tip / newest non-tip slot
+            else:
+                continue                                    # stale grid point: not kept
+            kv_pages = [(key, self._page_bytes.read_page(int(vp.kv_indices[i * ps]) // ps))
+                        for i, key in enumerate(vp.chain_keys)]
+            snaps = (_SlotSnapshot(self.linear_state_pool, vp.mamba_slot)
+                     if vp.mamba_slot is not None else None)
+            if self.tier_store.offer(vp.path_key, len(vp.chain_keys), kv_pages, snaps) \
+                    and snaps is not None:
+                self._tier_snap_bound[vp.path_key] = len(vp.chain_keys)   # pages
+            elif vp.mamba_slot is not None:
+                self._tier_snap_bound.pop(vp.path_key, None)   # dropped offer: stale bound
+
+    def try_restore(self, ids, cached_len: int) -> MatchResult | None:
+        """Synchronous session-tier restore on a shallow/cold admission match, before the
+        re-prefill fall-through: probe the store with the request's page-hash chain; on a hit
+        memcpy the page bytes into free KV pages and the snapshot bytes into a fresh
+        LinearStatePool slot and hand the normal insert()/cache_req path a prefetched match
+        (mamba_value rides the existing COW machinery). Budget rule: the restore consumes the
+        free pages + one slot the replaced re-prefill would (no extra over-admit; the padding
+        sink is never touched -- slots come from the pool's own free list). Anything missing
+        (free pages, slot, snapshot at the matched depth) falls back to the normal path."""
+        if not self._tier_on or cached_len >= len(ids):
+            return None
+        chain = self._chain_keys(ids)
+        hit = self.tier_store.probe(chain)
+        if hit is None:
+            return None
+        depth, handle = hit
+        res = self.tier_store.restore(handle)
+        if res is None:
+            return None
+        pages, snaps = res
+        # Hybrid reuse needs the GDN state AT the matched boundary: a KV-only restore would
+        # hand the continuation a prefix it cannot resume from (no checkpointed boundary).
+        if (self._tier_snap_bound.get(handle.path_key) != depth or not snaps
+                or depth == 0 or len(pages) != depth):
+            return None
+        if len(self.free_slots) < depth or self.linear_state_pool.num_free_slots < 1:
+            return None
+        ps = self.page_size
+        allocated, self.free_slots = self.free_slots[:depth], self.free_slots[depth:]
+        slot = self.linear_state_pool.alloc(1)[0]
+        try:
+            for i, data in enumerate(pages):
+                self._page_bytes.write_page(int(allocated[i]) // ps, data)
+            _unpack_slot(self.linear_state_pool, slot, snaps[0])
+        except Exception:
+            self.linear_state_pool.free(slot)
+            self.free_slots = torch.cat([allocated, self.free_slots])
+            return None
+        from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
+
+        handle_h = HybridCacheHandle(depth * ps, self.prefix_cache.root,
+                                     self._page_to_token(allocated))
+        slot_owned = MatchResult(handle_h, mamba_value=slot)
+        self._tier_restore_slots.add(slot)          # no tree owner: scheduler frees post-COW
+        self._tier_pending_restore = (handle_h, allocated, slot)   # for abandon_restore
+        return slot_owned
+
+    def abandon_restore(self, handle) -> None:
+        """Return a restored-but-refused admission's pages and slot to their pools. Idempotent:
+        the pending entry is cleared, and a slot already released (admitted -> COW-consumed)
+        is not freed twice. No-op for any handle that was not a restored match."""
+        pending = self._tier_pending_restore
+        if pending is None or pending[0] is not handle:
+            return
+        self._tier_pending_restore = None
+        _, allocated, slot = pending
+        if slot in self._tier_restore_slots:
+            self.tier_release_restore_slot(slot)
+            self.linear_state_pool.free(slot)
+        self.free_slots = torch.cat([self.free_slots, allocated])
 
 
 def _write_page_table(

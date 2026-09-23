@@ -363,6 +363,27 @@ def parse_args(
         ),
     )
 
+    parser.add_argument(
+        "--session-tier-ram-gib",
+        type=float,
+        default=ServerArgs.session_tier_ram_gib,
+        help="Session tier: RAM pool in GiB for demoted session boundaries (0 = off).",
+    )
+
+    parser.add_argument(
+        "--session-tier-dir",
+        type=str,
+        default=ServerArgs.session_tier_dir,
+        help="Session tier: directory for the L2 blob + journal (off when not set).",
+    )
+
+    parser.add_argument(
+        "--session-tier-ssd-gib",
+        type=float,
+        default=ServerArgs.session_tier_ssd_gib,
+        help="Session tier: L2 SSD cap in GiB.",
+    )
+
     assert ServerArgs.use_dummy_weight == False
     parser.add_argument(
         "--dummy-weight",

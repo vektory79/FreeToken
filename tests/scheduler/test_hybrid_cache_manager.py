@@ -768,6 +768,340 @@ def test_pool_exhaustion_evicts_the_stale_validated_boundary():
     cm.prefix_cache.check_integrity()
 
 
+# ------------------------------------------------- W2: session-tier interception + restore
+class _FakeKVPool:
+    """Minimal MHAKVCache-family stand-in: the `_kv_buffer` layout _KVPageBytes codes over
+    (no scale buffers, no swa paging)."""
+
+    swa_paged = False
+
+    def __init__(self, pages=256, page_size=1):
+        self._kv_buffer = torch.zeros(2, 2, pages, page_size, 2, 4, dtype=torch.bfloat16)
+
+
+def _tiered_cm(pool, kvpool, pt, ram=1 << 22):
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    return CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                        session_tier_cfg=SessionTierCfg(ram_bytes=ram))
+
+
+def _donate_one_snapshot(cm, pool, kvpool, pt, ids=(1, 2, 3, 4, 5), boundary=4, uid=0):
+    """Cold admission + one x-boundary snapshot donation on pages 100..103, with a
+    recognizable KV payload in the fake pool."""
+    mr = cm.match_req(_pend(list(ids)))          # cold admission tracks the session
+    live, pp = pool.alloc(1)[0], tuple(pool.alloc(2))
+    pt[uid, :boundary] = torch.tensor([100, 101, 102, 103][:boundary], dtype=torch.int32)
+    original = {}
+    for j, page in enumerate(range(100, 100 + boundary)):
+        kvpool._kv_buffer[:, :, page] = float(page) * 1.5
+        original[page] = kvpool._kv_buffer[:, :, page].contiguous().cpu() \
+            .view(torch.uint8).numpy().tobytes()
+    req = Req(input_ids=torch.tensor(list(ids), dtype=torch.int32), table_idx=uid,
+              cached_len=boundary, output_len=1, uid=uid, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = live, pp
+    req.mamba_next_track_idx = 1
+    req.mamba_last_track_seqlen = boundary
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req, finished=False)            # donate the frozen slot at the boundary
+    cm.unlock(req.cache_handle)                  # request keeps running elsewhere: the
+    return original, pp[0], req                  # committed snapshot is unlocked/evictable
+
+
+def test_session_tier_intercepts_evict_mamba_victim_in_adaptive_set():
+    """A tip victim of a tracked session is offered to the store (bytes received) and the
+    core freeing is unchanged."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    original, donated, req = _donate_one_snapshot(cm, pool, kvpool, pt)
+    assert cm.tier_store is not None and cm._tier_on
+
+    frees_before = len(cm.free_slots)
+    cm.ensure_mamba_slots(pool.num_slots)        # pool pressure: the tip must go
+    assert len(cm.free_slots) == frees_before + 4        # core freeing unchanged
+    assert pool.num_free_slots == 12             # the snapshot slot came back
+
+    chain = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    hit = cm.tier_store.probe(chain)
+    assert hit is not None and hit[0] == 4       # the demoted tip is recoverable
+    pages, snaps = cm.tier_store.restore(hit[1])
+    assert len(pages) == 4 and len(snaps) == 1
+    for j, page in enumerate((100, 101, 102, 103)):
+        assert pages[j] == original[page]        # byte-identical KV demotion
+    from freetoken.scheduler.cache import _SlotSnapshot
+
+    assert snaps[0] == _SlotSnapshot(pool, donated).payload()   # snapshot bytes received
+
+
+def test_session_tier_victim_outside_adaptive_set_freed_as_today():
+    """With the store ON but the session untracked (no admission match), the victim is
+    freed exactly as today and the store stays empty."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm._tier_sessions.clear()                    # simulate an untracked session
+
+    frees_before = len(cm.free_slots)
+    cm.ensure_mamba_slots(pool.num_slots)
+    assert len(cm.free_slots) == frees_before + 4
+    assert pool.num_free_slots == 12
+    assert cm.tier_store.probe(
+        cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))) is None
+
+
+def test_session_tier_off_mode_store_never_called():
+    """No cfg (or a disabled cfg) -> no store at all; eviction behaves as today."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    for cfg in (None, SessionTierCfg()):
+        pool, kvpool = _pool(), _FakeKVPool()
+        pt = torch.zeros(4, 64, dtype=torch.int32)
+        cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                          session_tier_cfg=cfg)
+        assert cm.tier_store is None and not cm._tier_on
+        _donate_one_snapshot(cm, pool, kvpool, pt)
+        frees_before = len(cm.free_slots)
+        cm.ensure_mamba_slots(pool.num_slots)
+        assert len(cm.free_slots) == frees_before + 4 and pool.num_free_slots == 12
+
+
+def test_session_tier_restore_feeds_normal_insert_path():
+    """Cold match after the demotion: the store hit restores byte-identical KV pages + the
+    snapshot slot WITHOUT any re-prefill of those tokens, consuming exactly the free pages
+    and one slot the replaced re-prefill would."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    original, donated, req = _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)        # demote the tip: the tree is empty again
+    assert cm.prefix_cache.full_evictable == 0
+
+    frees_after_evict = len(cm.free_slots)
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))    # cold tree, warm store
+    assert mr.cuda_handle.cached_len == 4
+    assert mr.mamba_value is not None
+    assert mr.mamba_value >= 1                   # a real pool slot (never the padding sink)
+    matched = mr.cuda_handle.get_matched_indices()
+    # the restore takes free-list HEAD pages [0,1,2,3]: eviction appended [100..103] AFTER
+    # the untouched arange head, so this assert depends on that head-order (torch.cat append).
+    assert matched.tolist() == [0, 1, 2, 3]      # pages restored from the free-list head
+    for j in range(4):
+        assert kvpool._kv_buffer[:, :, j].contiguous().cpu() \
+            .view(torch.uint8).numpy().tobytes() == original[100 + j]
+    assert len(cm.free_slots) == frees_after_evict - 4   # budget: same as the re-prefill
+    assert pool.num_free_slots == 12 - 1                 # + one snapshot slot
+
+    # the normal path takes over: a commit of the restored prefix dedups against nothing new
+    # and the tree re-grows through plain insert()/cache_req (exercised by the handle shape).
+    assert mr.cuda_handle.node.is_root()         # no tree node yet: lock target is inert
+
+
+def test_session_tier_offer_pages_units_at_page_size_gt_1():
+    """B2 fails-before: at page_size>1 the offer seam must take PAGES (len(chain_keys));
+    pre-fix it took the TOKEN boundary_len and SessionTierStore.offer raised ValueError."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool(pages=16, page_size=8)
+    pt = torch.zeros(4, 128, dtype=torch.int32)
+    cm = CacheManager(16, 8, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    ids = list(range(1, 14))
+    mr = cm.match_req(_pend(ids))                # cold admission tracks the session (tokens)
+    live, pp = pool.alloc(1)[0], tuple(pool.alloc(2))
+    pt[0, :8] = 0                                # page 0 covers tokens 0..7
+    pt[0, 8:12] = 8                              # page 1 covers tokens 8..11
+    for pg in range(2):
+        kvpool._kv_buffer[:, :, pg] = float(pg) * 1.5
+    req = Req(input_ids=torch.tensor(ids, dtype=torch.int32), table_idx=0, cached_len=12,
+              output_len=1, uid=0, sampling_params=SamplingParams(), cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = live, pp
+    req.mamba_next_track_idx = 1
+    req.mamba_last_track_seqlen = 8              # finish-frozen donate at the aligned boundary
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req, finished=True)
+    cm.ensure_mamba_slots(pool.num_slots)        # tiered eviction: must not raise
+    chain = cm._chain_keys(torch.tensor(ids[:8], dtype=torch.int32))
+    hit = cm.tier_store.probe(chain)
+    assert hit is not None and hit[0] == 1       # probe depth is PAGES
+    pages, snaps = cm.tier_store.restore(hit[1])
+    assert len(pages) == 1 and len(snaps) == 1
+    mr2 = cm.match_req(_pend(list(range(1, 9)) + [99]))
+    assert mr2.cuda_handle.cached_len == 8 and mr2.mamba_value is not None
+
+
+def test_session_tier_adaptive_set_excludes_stale_grid_points():
+    """M5 fails-before: the under-divergence slot is ONE boundary (the deepest seen);
+    pre-fix every boundary <= divergence depth was offered (stale grid points)."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+    from freetoken.kvcache.utils import chain_page_key
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    k = [chain_page_key(None, (1,))]
+    for t in (2, 3, 4):
+        k.append(chain_page_key(k[-1], (t,)))
+    cm._tier_sessions[k[0]] = [4, 2, 0, None]    # tip 4 tok, divergence depth 2 tok
+
+    def vp(depth_pages, bl_tokens):
+        return VictimPath(k[depth_pages - 1], bl_tokens, tuple(k[:depth_pages]),
+                          torch.arange(depth_pages, dtype=torch.int32), None)
+
+    cm._tier_offer([vp(1, 4)])                   # tip
+    cm._tier_offer([vp(2, 2)])                   # deepest under-divergence boundary
+    cm._tier_offer([vp(1, 1)])                   # stale intermediate grid point
+    held = {seg.path_key for seg in cm.tier_store._segments.values()}
+    assert held == {k[0], k[1]}                  # exactly the adaptive set
+
+
+def test_abandon_restore_returns_pages_and_slot():
+    """B4 fails-before: a restored match refused at admission leaked its pages + slot;
+    abandon_restore returns both, idempotently, without double-freeing a COW-consumed slot."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)
+
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))    # restored: 4 pages + 1 slot held
+    assert mr.cuda_handle.cached_len == 4
+    pages_held, slots_held = len(cm.free_slots), pool.num_free_slots
+    cm.abandon_restore(mr.cuda_handle)           # admission refused
+    assert len(cm.free_slots) == pages_held + 4 and pool.num_free_slots == slots_held + 1
+    cm.abandon_restore(mr.cuda_handle)           # idempotent
+    assert len(cm.free_slots) == pages_held + 4 and pool.num_free_slots == slots_held + 1
+
+    mr2 = cm.match_req(_pend([1, 2, 3, 4, 9]))   # a second restore, this one COW-consumed
+    cm.tier_release_restore_slot(mr2.mamba_value)   # what _restore_linear_states does
+    pool.free(mr2.mamba_value)
+    pages_mid = len(cm.free_slots)
+    cm.abandon_restore(mr2.cuda_handle)          # late/edge abandon: pages only
+    assert len(cm.free_slots) == pages_mid + 4
+    assert pool.num_free_slots == slots_held + 1  # slot NOT double-freed
+
+
+def test_session_tier_restore_fallbacks_leak_nothing():
+    """m8: free-page shortage, slot shortage and a missing snapshot each fall back to the
+    normal path with zero page/slot leakage."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)        # tree empty, store warm (snapshot bound=4)
+    base_pages, base_slots = len(cm.free_slots), pool.num_free_slots
+
+    saved = cm.free_slots
+    cm.free_slots = saved[:2]                    # free-page shortage
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    assert len(cm.free_slots) == 2 and pool.num_free_slots == base_slots
+    cm.free_slots = saved
+
+    held = pool.alloc(pool.num_free_slots)       # slot shortage
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    assert len(cm.free_slots) == base_pages and pool.num_free_slots == 0
+    pool.free(held)
+
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+    from freetoken.kvcache.utils import chain_page_key
+
+    chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    st = cm._tier_sessions[chain4[0]]
+    st[1] = 2                                    # divergence depth 2 tokens
+    cm._tier_offer([VictimPath(chain4[1], 2, tuple(chain4[:2]),
+                               torch.arange(2, dtype=torch.int32), None)])  # KV-only seg
+    mr = cm.match_req(_pend([1, 2, 9]))          # probe hits the KV-only boundary
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None   # no snapshot there
+    assert len(cm.free_slots) == base_pages and pool.num_free_slots == base_slots
+
+
+def test_store_l2_offset_after_discard_reads_real_data(tmp_path):
+    """B3 fails-before: _discard shrank _ssd_used while the blob fd is O_APPEND (writes at
+    real EOF), so a post-discard offer recorded an offset BELOW EOF and restore returned
+    another segment's bytes/padding."""
+    from types import SimpleNamespace
+
+    from freetoken.kvcache.utils import chain_page_key
+    from freetoken.scheduler.session_tier import SessionTierStore
+
+    store = SessionTierStore(
+        SimpleNamespace(ram_bytes=0, dir=str(tmp_path), ssd_bytes=1 << 20))
+    content = {}
+    for i in (1, 2, 3):
+        k = chain_page_key(None, (i,))
+        content[k] = bytes([i]) * 4096
+        assert store.offer(bytes([i]) * 16, 1, [(k, content[k])])
+    assert store.evict_store(1) == 1            # discard seg 1: capacity accounting shrinks
+    k4 = chain_page_key(None, (4,))
+    content[k4] = bytes([4]) * 4096
+    assert store.offer(bytes([4]) * 16, 1, [(k4, content[k4])])   # appends at real EOF
+    hit = store.probe([k4])
+    assert hit is not None and hit[0] == 1
+    pages, _ = store.restore(hit[1])
+    assert pages[0] == content[k4]              # byte-identical after the discard
+
+
+# ------------------------------------------------- Review-2: N1 / N4
+
+
+def test_tier_admission_short_prompt_guard_page_size_gt_1():
+    """N1 fails-before: a prompt shorter than page_size raised IndexError in
+    _tier_admission on every admission while the tier was on."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool(pages=16, page_size=8)
+    pt = torch.zeros(4, 128, dtype=torch.int32)
+    cm = CacheManager(16, 8, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    mr = cm.match_req(_pend([1, 2, 3]))          # 3 tokens < page_size 8
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    assert cm._tier_sessions == {}               # nothing indexed, nothing crashed
+
+
+def test_tier_admission_bookkeeping_divergence_tip_promotion_cold():
+    """N4: driven through match flows only - a cold first match tracks the session with
+    zeros, a full match promotes the tip (old tip becomes the spare), a shallow match
+    records the divergence depth. Two snapshot boundaries (4 and 8) make a nonzero
+    shallow match possible (hybrid matches truncate to snapshot boundaries)."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(8, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    cm.match_req(_pend([1, 2, 3, 4]))            # cold: tracks the session, zeros
+    k1 = next(iter(cm._tier_sessions))
+    assert cm._tier_sessions[k1] == [0, 0, 0, None]
+
+    _donate_one_snapshot(cm, pool, kvpool, pt, ids=(1, 2, 3, 4, 5))     # boundary 4
+
+    # a second snapshot boundary at 8: finish-donate a req whose frozen mark is 8
+    mr2 = cm.match_req(_pend(list(range(1, 10))))   # stripped 8: truncated to boundary 4
+    live2, pp2 = pool.alloc(1)[0], tuple(pool.alloc(2))
+    pt[1, :4] = torch.tensor([100, 101, 102, 103], dtype=torch.int32)
+    pt[1, 4:8] = torch.tensor([104, 105, 106, 107], dtype=torch.int32)
+    req2 = Req(input_ids=torch.tensor(list(range(1, 10)), dtype=torch.int32), table_idx=1,
+               cached_len=8, output_len=1, uid=1, sampling_params=SamplingParams(),
+               cache_handle=mr2.cuda_handle)
+    req2.linear_slot_idx, req2.mamba_ping_pong = live2, pp2
+    req2.mamba_next_track_idx = 1
+    req2.mamba_last_track_seqlen = 8
+    cm.lock(mr2.cuda_handle)
+    cm.cache_req(req2, finished=True)            # donate at the boundary-8 node
+
+    cm.match_req(_pend(list(range(1, 10))))      # full match: cached_len 8 == len(ids) 8
+    assert cm._tier_sessions[k1] == [8, 0, 4, None]        # tip 8, old tip 4 = spare
+
+    cm.match_req(_pend([1, 2, 3, 4, 9]))         # shallow: truncated to boundary 4
+    assert cm._tier_sessions[k1] == [8, 4, 4, None]        # divergence depth 4 recorded
+
+    cm.match_req(_pend([9, 9, 9, 9]))            # a different session: tracked cold
+    assert len(cm._tier_sessions) == 2
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
