@@ -82,25 +82,40 @@ class _KVPageBytes:
     def __init__(self, pool):
         self._pool = pool
         buf = pool._kv_buffer
-        self._scales = [s for s in (getattr(pool, "_scale_buffer", None),
-                                    getattr(pool, "_block_scale_buffer", None))
-                        if s is not None]
-        for s in self._scales:
-            assert s.shape[2] == buf.shape[2] * buf.shape[3], (
-                "KV scale buffer does not span the pool's page grid")
+        self._ps = int(buf.shape[3])
+        self._ntok = int(buf.shape[2]) * self._ps
+        # Scale buffers are token-indexed (num_pages * page_size) but sit at a
+        # family-specific dim: MHAKV [kv, L, tokens, heads(, blocks)] dim 2, DSA/MLA
+        # [L, tokens(, blocks)] dim 1. Locate it by size; the assert keeps a wrong
+        # layout from silently storing garbage instead of raising at boot.
+        self._scales = []
+        for name in ("_scale_buffer", "_block_scale_buffer"):
+            s = getattr(pool, name, None)
+            if s is None:
+                continue
+            dim = next((d for d, n in enumerate(s.shape) if n == self._ntok), None)
+            assert dim is not None, (
+                f"{name} shape {tuple(s.shape)} does not span the pool's page grid")
+            self._scales.append((s, dim))
+
+    def _scale_page(self, s, dim, page):
+        idx = [slice(None)] * s.dim()
+        idx[dim] = slice(page * self._ps, (page + 1) * self._ps)
+        return s[tuple(idx)]
 
     def read_page(self, page: int) -> bytes:
         buf = self._pool._kv_buffer
-        span = slice(page * buf.shape[3], (page + 1) * buf.shape[3])
+        parts = [buf[:, :, page]]
+        parts += [self._scale_page(s, dim, page) for s, dim in self._scales]
         return b"".join(
-            t.contiguous().cpu().view(torch.uint8).numpy().tobytes()
-            for t in [buf[:, :, page]] + [s[:, :, span] for s in self._scales])
+            t.contiguous().cpu().view(torch.uint8).numpy().tobytes() for t in parts)
 
     def write_page(self, page: int, data: bytes) -> None:
         buf = self._pool._kv_buffer
-        span = slice(page * buf.shape[3], (page + 1) * buf.shape[3])
+        parts = [buf[:, :, page]]
+        parts += [self._scale_page(s, dim, page) for s, dim in self._scales]
         pos = 0
-        for t in [buf[:, :, page]] + [s[:, :, span] for s in self._scales]:
+        for t in parts:
             n = t.numel() * t.element_size()
             flat = torch.frombuffer(bytearray(data[pos:pos + n]), dtype=torch.uint8)
             t.copy_(flat.view(t.dtype).reshape(t.shape).to(t.device))
@@ -159,6 +174,12 @@ class CacheManager:
                 self.tier_store = store
                 self._page_bytes = _KVPageBytes(swa_pool)
                 self._tier_on = True
+                # _tier_snap_bound is process-local (offer-time); journal-replayed segments
+                # are invisible to try_restore's snapshot-at-boundary gate without this,
+                # so the first post-boot turn would fall back to a full re-prefill.
+                for seg in store._segments.values():
+                    if seg.snap_lens and seg.snap_lens[0]:
+                        self._tier_snap_bound[seg.path_key] = seg.boundary_len
             elif store.enabled:
                 logger.warning("session tier: no paged-KV byte codec for this pool family; "
                                "tier stays inert")
@@ -489,6 +510,21 @@ class CacheManager:
                 keep_live = not mamba_exist           # tree now owns linear_slot_idx
             else:
                 self.unlock(old_handle)
+                # A session-tier restore hands the admission its OWN fresh pages for the
+                # suffix [owned, cached_len) (owned..cached_len may span the whole prefix
+                # when the tree was empty): no prefill-chunk commit ran to adopt them when
+                # the restored request's prefill covered only the page tail. The non-aligned
+                # finish must still insert the page-aligned span so the tree owns those
+                # pages, donating nothing (the live slot is over-advanced past insert_len;
+                # the boundary snapshot lives in the tier store). Skipping the insert leaked
+                # the restored pages (hardware: 896-page leak -> integrity check kill).
+                # tier-restored handles only; with tier off this branch is unreachable and
+                # behavior is unchanged.
+                if (self._tier_on and old_handle.tier_restored and insert_len > 0
+                        and old_handle.cached_len <= insert_len):
+                    prefix_len, _mamba_exist = self.prefix_cache.insert(
+                        req.input_ids[:insert_len], page_indices[:insert_len], None)
+                    self._free(page_indices[free_upto:max(free_upto, prefix_len)])
                 self._free(page_indices[free_upto :])
             self._free_req_slots(req, keep_live=keep_live)
             return
@@ -736,10 +772,14 @@ class CacheManager:
     # ------------------------------------------------- session tiering (W2, additive)
 
     def shutdown_tier(self) -> int:
-        """Graceful-shutdown hook: flush live tier segments to L2, then compact the journal
-        (dead records dropped; crash-safe convergence via replay's payload-crc check)."""
+        """Graceful-shutdown hook: offer the LIVE tree's snapshot boundaries to the store
+        (they die with the process otherwise; the adaptive keep-set filters), then flush
+        live tier segments to L2 and compact the journal (dead records dropped; crash-safe
+        convergence via replay's payload-crc check)."""
         if self.tier_store is None:
             return 0
+        if self._tier_on and self.is_hybrid:
+            self._tier_offer(self.prefix_cache.snapshot_victim_paths())
         flushed = self.tier_store.flush_live()
         self.tier_store.compact()
         return flushed
@@ -831,6 +871,23 @@ class CacheManager:
         if hit is None:
             return None
         depth, handle = hit
+        if cached_len >= depth:
+            # The tree match already reaches the store's boundary: the normal path serves at
+            # least as well, and a restore here would only duplicate tree-owned pages and
+            # replace a deeper match with a shallower one (HW attempt-3: 253-page leak ->
+            # integrity kill on exactly this shape).
+            return None
+        ps = self.page_size
+        # Never duplicate tree-owned KV: restore only the missing suffix [owned, depth). The
+        # tree's own pages - live snapshots AND KV-only tombstones (incl. a prior restore's
+        # finish adoption) - stay in place, pinned via the walked node; the store's boundary
+        # snapshot always rides along (with an adopted KV-only span it is the only live
+        # snapshot at depth, so a snapshot-only restore revives the boundary).
+        owned_node, owned, owned_pages = self.prefix_cache.owned_prefix(ids[:depth * ps])
+        fresh = depth - owned
+        if (fresh > len(self.free_slots) or self.linear_state_pool.num_free_slots < 1
+                or depth == 0):
+            return None
         res = self.tier_store.restore(handle)
         if res is None:
             return None
@@ -838,15 +895,12 @@ class CacheManager:
         # Hybrid reuse needs the GDN state AT the matched boundary: a KV-only restore would
         # hand the continuation a prefix it cannot resume from (no checkpointed boundary).
         if (self._tier_snap_bound.get(handle.path_key) != depth or not snaps
-                or depth == 0 or len(pages) != depth):
+                or len(pages) != depth):
             return None
-        if len(self.free_slots) < depth or self.linear_state_pool.num_free_slots < 1:
-            return None
-        ps = self.page_size
-        allocated, self.free_slots = self.free_slots[:depth], self.free_slots[depth:]
+        allocated, self.free_slots = self.free_slots[:fresh], self.free_slots[fresh:]
         slot = self.linear_state_pool.alloc(1)[0]
         try:
-            for i, data in enumerate(pages):
+            for i, data in enumerate(pages[owned:]):
                 self._page_bytes.write_page(int(allocated[i]) // ps, data)
             _unpack_slot(self.linear_state_pool, slot, snaps[0])
         except Exception:
@@ -855,8 +909,9 @@ class CacheManager:
             return None
         from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
 
-        handle_h = HybridCacheHandle(depth * ps, self.prefix_cache.root,
-                                     self._page_to_token(allocated))
+        handle_h = HybridCacheHandle(
+            depth * ps, owned_node,
+            torch.cat([owned_pages, self._page_to_token(allocated)]), tier_restored=True)
         slot_owned = MatchResult(handle_h, mamba_value=slot)
         self._tier_restore_slots.add(slot)          # no tree owner: scheduler frees post-COW
         self._tier_pending_restore = (handle_h, allocated, slot)   # for abandon_restore

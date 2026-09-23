@@ -208,7 +208,8 @@ class SessionTierStore:
                     seg = self._segments.get(seg_id)
                     if seg is None or seg.boundary_len < d:
                         continue
-                    if best is None or seg.last_validation > best[0].last_validation:
+                    if best is None or (seg.boundary_len == d, seg.last_validation) > \
+                            (best[0].boundary_len == d, best[0].last_validation):
                         best = (seg, d)
                 if best is not None:
                     seg, d = best

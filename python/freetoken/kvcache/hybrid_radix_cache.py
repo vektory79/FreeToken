@@ -31,10 +31,13 @@ class HybridCacheHandle(BaseCacheHandle):
     """Lock handle for a matched hybrid prefix: the matched node (lock target) + the reusable
     KV page indices. ``cached_len`` is already truncated to the deepest live-snapshot boundary.
     Plugs into PrefillAdder (reads ``.cached_len`` / ``.get_matched_indices()``) like the plain
-    RadixCacheHandle; the restore slot rides on ``MatchResult.mamba_value``."""
+    RadixCacheHandle; the restore slot rides on ``MatchResult.mamba_value``. ``tier_restored``
+    marks a session-tier restore handle: its row pages below ``cached_len`` include fresh
+    (not yet tree-owned) pages the finish commit must adopt."""
 
     node: RadixTreeNode
     kv_indices: torch.Tensor
+    tier_restored: bool = False
 
     def get_matched_indices(self) -> torch.Tensor:
         return self.kv_indices
@@ -108,12 +111,29 @@ class HybridRadixCache:
             cur = cur.parent
         return HybridMatch(self.empty, 0, None, self.root)
 
+    def owned_prefix(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int, torch.Tensor]:
+        """(node, prefix_len, pages): the frontier of tree-owned KV along input_ids - live
+        snapshots and KV-only tombstones ALIKE keep their pages - plus the node ending at
+        that frontier and its collected page indices. The session-tier restore restores only
+        the missing suffix; the returned node pins the tree-owned prefix for the request."""
+        node, prefix_len = self._walk(input_ids)
+        return node, prefix_len, self._collect_kv(node)
+
+    def snapshot_victim_paths(self) -> List[VictimPath]:
+        """VictimPath for every LIVE snapshot-bearing node: the graceful-shutdown seam - the
+        tier store re-offers them before the process dies, else a session whose tip stayed
+        live in the tree loses it entirely and its post-reboot first turn falls back to a
+        long re-prefill (hardware: B restored a stale 16k boundary at 37 s instead of its
+        44k tip at ~4 s)."""
+        return [self._derive_victim_path(n, n.mamba_value) for n in self._snapshot_nodes()]
+
     def insert(self, input_ids: torch.Tensor, kv_indices: torch.Tensor,
-               mamba_value: int) -> Tuple[int, bool]:
+               mamba_value: Optional[int]) -> Tuple[int, bool]:
         """Insert the committed KV prefix and DONATE ``mamba_value`` at the (page-aligned) end
-        boundary node. Returns (matched_prefix_len, mamba_exist). If the boundary node already
-        owns a live snapshot, returns mamba_exist=True and does not attach (caller frees the
-        donated slot -- dedup)."""
+        boundary node. mamba_value=None inserts a KV-only node (no snapshot - the session-tier
+        restore's finish adoption uses this). Returns (matched_prefix_len, mamba_exist). If the
+        boundary node already owns a live snapshot, returns mamba_exist=True and does not attach
+        (caller frees the donated slot -- dedup)."""
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, kv_indices = input_ids[:insert_len], kv_indices[:insert_len]
         node, prefix_len = self._walk(input_ids)
@@ -132,9 +152,10 @@ class HybridRadixCache:
             node.snapshot_lru = time.monotonic_ns()
             return prefix_len, True                 # dedup: caller frees its donated slot
         node.mamba_value = mamba_value              # fills a fresh node or a tombstone
-        node.snapshot_lru = time.monotonic_ns()     # acquisition stamps the snapshot currency
-        if node.mamba_ref_count == 0:
-            self.mamba_evictable += 1
+        if mamba_value is not None:
+            node.snapshot_lru = time.monotonic_ns()  # acquisition stamps the snapshot currency
+            if node.mamba_ref_count == 0:
+                self.mamba_evictable += 1
         return prefix_len, False
 
     # ---------------------------------------------------------------- locking (dual)

@@ -1102,6 +1102,213 @@ def test_tier_admission_bookkeeping_divergence_tip_promotion_cold():
     assert len(cm._tier_sessions) == 2
 
 
+def test_session_tier_boot_replay_restores_snapshot_segment(tmp_path):
+    """Arm-3 boot restore: after a graceful shutdown (flush_live + compact) a FRESH
+    CacheManager over the same tier dir must restore the journal-replayed segment on the
+    first cold match. Fails-before: _tier_snap_bound is process-local and was never
+    rehydrated at boot, so try_restore always fell back to a full re-prefill."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cfg = SessionTierCfg(ram_bytes=1 << 22, dir=str(tmp_path))
+    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=cfg)
+    original, _donated, _req = _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)        # wash: the tip demotes into the store
+    assert cm.shutdown_tier() == 1               # graceful shutdown: flush L1 -> L2
+    assert any(s.in_l2 for s in cm.tier_store._segments.values())
+
+    pool2, kvpool2 = _pool(), _FakeKVPool()      # reboot: fresh manager, same tier dir
+    pt2 = torch.zeros(4, 64, dtype=torch.int32)
+    cm2 = CacheManager(64, 1, pt2, "hybrid_radix", linear_state_pool=pool2, swa_pool=kvpool2,
+                       session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22, dir=str(tmp_path)))
+    mr = cm2.match_req(_pend([1, 2, 3, 4, 9]))   # cold tree, warm L2: first post-boot turn
+    assert mr.cuda_handle.cached_len == 4 and mr.mamba_value is not None
+    # the restore lands on the fresh free-list HEAD pages [0..3], not the donor's indices
+    for j in range(4):
+        assert kvpool2._kv_buffer[:, :, j].contiguous().cpu() \
+            .view(torch.uint8).numpy().tobytes() == original[100 + j]
+
+
+def test_kv_page_bytes_scale_layouts_roundtrip():
+    """Arm-3 hardware: the real attention pool family is MHAKV (kv [2, L, page, ps, H, D],
+    fp8 scale [2, L, pages*ps, H]) AND DSA/MLA (kv [1, L, page, ps, 1, D], fp8 scale
+    [L, pages*ps]). Pre-fix the codec's scale assert indexed s.shape[2], which IndexError'd
+    on the 2-D DSA scale at boot (crash seen on hardware, run_arm3.sh first launch)."""
+    from freetoken.scheduler.cache import _KVPageBytes, SessionTierCfg
+
+    class _FakeMHAScale:
+        swa_paged = False
+
+        def __init__(self):
+            self._kv_buffer = torch.zeros(2, 2, 16, 4, 2, 4, dtype=torch.bfloat16)
+            self._scale_buffer = torch.zeros(2, 2, 16 * 4, 2, dtype=torch.float32)
+            self._block_scale_buffer = None
+
+    class _FakeDSA:
+        swa_paged = False
+
+        def __init__(self):
+            self._kv_buffer = torch.zeros(1, 2, 16, 4, 1, 8, dtype=torch.uint8)
+            self._scale_buffer = torch.zeros(2, 16 * 4, dtype=torch.float32)
+            self._block_scale_buffer = None
+
+    for pool in (_FakeMHAScale(), _FakeDSA()):
+        codec = _KVPageBytes(pool)
+        for page in (0, 7, 15):
+            n = len(codec.read_page(page))
+            blob = bytes((page * 31 + i) % 256 for i in range(n))
+            codec.write_page(page, blob)
+            assert codec.read_page(page) == blob
+
+    # the boot hook must not raise on the DSA-shaped pool (CacheManager tier init)
+    pool, kvpool = _pool(), _FakeDSA()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert cm._tier_on and cm._page_bytes is not None
+
+
+def test_session_tier_restored_finish_adopts_pages_nonaligned():
+    """Arm-3 hardware (896-page leak -> integrity kill): a restored request whose prefill
+    covered only the page tail finishes with a NON-page-aligned cached_len; the finish's
+    else branch skipped the insert entirely, so the restore's own fresh pages were neither
+    tree-owned nor freed. page_size 8, tail 1 token."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool(pages=16, page_size=8)
+    pt = torch.zeros(4, 128, dtype=torch.int32)
+    cm = CacheManager(16, 8, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    ids = list(range(1, 10))                     # 9 tokens: 8 aligned + 1 tail
+    mr = cm.match_req(_pend(ids))                # cold admission tracks the session
+    pages = cm._allocate(2)                      # page bases for [0:8) and the tail
+    pt[0, :8] = pages[0]
+    tail_page = int(pages[1])
+    pt[0, 8:9] = tail_page
+    for pg in range(2):
+        kvpool._kv_buffer[:, :, int(pages[pg]) // 8] = float(pg) * 1.5
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0, cached_len=9,
+              output_len=1, uid=0, sampling_params=SamplingParams(), cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req.mamba_next_track_idx = 1
+    req.mamba_last_track_seqlen = 8              # chunk-commit the x8 boundary + donate
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req, finished=False)
+    cm.cache_req(req, finished=True)             # finish the donor (tail freed, slots back)
+    cm.ensure_mamba_slots(pool.num_slots)        # wash: the tip demotes, tree empty
+    chain = cm._chain_keys(torch.tensor(ids[:8], dtype=torch.int32))
+    assert cm.tier_store.probe(chain) is not None
+
+    mr2 = cm.match_req(_pend(ids))               # restored admission: 8 tokens + 1 slot
+    assert mr2.cuda_handle.cached_len == 8 and mr2.mamba_value is not None
+    restored_pages = mr2.cuda_handle.get_matched_indices().clone()
+    req2 = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0, cached_len=9,
+               output_len=1, uid=1, sampling_params=SamplingParams(),
+               cache_handle=mr2.cuda_handle)
+    req2.linear_slot_idx = pool.alloc(1)[0]
+    req2.mamba_ping_pong = tuple(pool.alloc(2))
+    cm.lock(mr2.cuda_handle)
+    pt[0, :8] = restored_pages                   # what the admission writes (prefill.py)
+    pt[0, 8:9] = int(cm._allocate(1)[0])         # the tail page (really allocated)
+    cm.cache_req(req2, finished=True)
+    cm.check_integrity()                         # pre-fix: 1 restored page leaked
+    assert cm.prefix_cache.full_evictable == 8   # the tree owns the restored page now
+    m = cm.prefix_cache.match_prefix(torch.tensor(ids[:8], dtype=torch.int32))
+    assert m.cached_len == 0                     # KV-only node: reuse goes via the store
+
+
+def test_session_tier_restore_refuses_tree_owned_span():
+    """Arm-3 HW bug 4 (253-page leak -> integrity kill): the store's deepest boundary can be
+    SHALLOWER than the tree's surviving match and overlap KV-only tombstones (both keep their
+    pages). Pre-fix try_restore fired whenever cached_len < len(ids), replaced the DEEPER tree
+    match with a shallower restore, and the restored pages (duplicates of tree-owned KV)
+    leaked at the commit-time dedup. The restore must fire only when its span is wholly
+    novel; otherwise the normal (deeper) path serves the request."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    ids13 = list(range(1, 14))                   # 13 tokens; tree chain [0:11) (match 11)
+    pages = cm._allocate(11)
+    for pg in range(11):
+        kvpool._kv_buffer[:, :, int(pages[pg])] = float(pg) * 1.5
+
+    slots = [pool.alloc(1)[0] for _ in range(3)]
+    cm.prefix_cache.insert(torch.tensor(ids13[:4], dtype=torch.int32), pages[:4], slots[0])
+    cm.prefix_cache.insert(torch.tensor(ids13[:8], dtype=torch.int32), pages[:8], slots[1])
+    cm.prefix_cache.insert(torch.tensor(ids13[:11], dtype=torch.int32), pages[:11], slots[2])
+    cm.match_req(_pend(ids13))                   # tracks the session (admission bookkeeping)
+
+    er = cm.prefix_cache.evict_mamba(2, derive_paths=True)   # tombstone [0:4) and [4:8)
+    cm._tier_offer(er.victim_paths)              # store: boundaries 4 and 8 (snapshots live)
+    cm.linear_state_pool.free(er.mamba_slots)
+    cm._free(er.kv_indices)
+
+    mr = cm.match_req(_pend(ids13))              # tree match 11 vs store depth 8
+    assert mr.cuda_handle.cached_len == 11       # pre-fix: the shallower restore replaced it
+    assert mr.mamba_value not in cm._tier_restore_slots
+
+    req = Req(input_ids=torch.tensor(ids13 + [99], dtype=torch.int32), table_idx=0,
+              cached_len=13, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    pt[0, :11] = mr.cuda_handle.get_matched_indices()
+    pt[0, 11:13] = cm._allocate(2)
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req, finished=True)
+    cm.check_integrity()                         # pre-fix: 8 restored dup pages leaked
+    hit = cm.tier_store.probe(cm._chain_keys(torch.tensor(ids13[:12], dtype=torch.int32)))
+    assert hit is not None and hit[0] == 8       # the store segment is intact, just unused
+
+
+def test_session_tier_snapshot_only_rerestore_over_adopted_span():
+    """Arm-3 phase-D (byte-identity run): after a restored turn's finish adopted its pages as
+    KV-only nodes, a repeat of the same prompt can neither tree-match (no live snapshot) nor
+    full-restore (the span is tree-owned) - pre-fix it fell back to a full 57k re-prefill
+    (HW: cached=0, 77.5s, byte-different response). The restore must go snapshot-only: the
+    tree pages stay put and the store's boundary snapshot revives the tip."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    ids = [1, 2, 3, 4, 5]
+    mr = cm.match_req(_pend(ids))                # cold: tracks the session
+    pages = cm._allocate(4)
+    pt[0, :4] = pages
+    pt[0, 4:5] = cm._allocate(1)[0]
+    for pg in range(4):
+        kvpool._kv_buffer[:, :, int(pages[pg])] = float(pg) * 1.5
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0,
+              cached_len=5, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req.mamba_next_track_idx = 1
+    req.mamba_last_track_seqlen = 4
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req, finished=False)            # chunk commit [0:4) + snapshot donation
+    cm.cache_req(req, finished=True)             # non-aligned finish: normal path, tail freed
+    cm.ensure_mamba_slots(pool.num_slots)        # wash: tip -> store, tree empty
+
+    mr1 = cm.match_req(_pend(ids))               # full restore: fresh pages, node=root
+    assert mr1.cuda_handle.cached_len == 4 and mr1.cuda_handle.tier_restored
+    restored_pages = mr1.cuda_handle.get_matched_indices().clone()
+    req2 = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0,
+               cached_len=5, output_len=1, uid=1, sampling_params=SamplingParams(),
+               cache_handle=mr1.cuda_handle)
+    req2.linear_slot_idx, req2.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    cm.lock(mr1.cuda_handle)
+    pt[0, :4] = restored_pages                   # admission rows: the restore's fresh pages
+    pt[0, 4:5] = cm._allocate(1)[0]
+    cm.cache_req(req2, finished=True)            # adopts [0:5) as a KV-only node
+
+    free_before = len(cm.free_slots)
+    mr2 = cm.match_req(_pend(ids))               # KV-only span: no live match, no fresh pages
+    assert mr2.cuda_handle.cached_len == 4       # snapshot-only restore revives the boundary
+    assert mr2.mamba_value is not None and mr2.mamba_value in cm._tier_restore_slots
+    assert len(cm.free_slots) == free_before     # zero pages taken
+    cm.check_integrity()                         # ledger balanced
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
