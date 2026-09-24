@@ -1309,6 +1309,56 @@ def test_session_tier_snapshot_only_rerestore_over_adopted_span():
     cm.check_integrity()                         # ledger balanced
 
 
+# ------------------------------------------- S-wave: per-handle pending + QSA guard
+
+
+def test_pending_restore_is_per_handle():
+    """S-wave fails-before: _tier_pending_restore was a single slot, so a second restore
+    overwrote the first pending record and abandoning the FIRST admission leaked its 4
+    pages + GDN slot permanently. Per-handle records return exactly their own."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)
+
+    mr1 = cm.match_req(_pend([1, 2, 3, 4, 9]))   # restore #1
+    assert mr1.cuda_handle.cached_len == 4 and mr1.mamba_value is not None
+    mr2 = cm.match_req(_pend([1, 2, 3, 4, 9]))   # restore #2 overwrote the record (pre-fix)
+    assert mr2.cuda_handle.cached_len == 4 and mr2.mamba_value is not None
+    pages_held, slots_held = len(cm.free_slots), pool.num_free_slots
+    cm.abandon_restore(mr1.cuda_handle)          # refuse #1 AFTER #2 restored
+    assert len(cm.free_slots) == pages_held + 4 and pool.num_free_slots == slots_held + 1
+    cm.abandon_restore(mr1.cuda_handle)          # idempotent
+    assert len(cm.free_slots) == pages_held + 4 and pool.num_free_slots == slots_held + 1
+    cm.lock(mr2.cuda_handle)                     # admission #2: consumes only its own entry
+    cm.abandon_restore(mr2.cuda_handle)          # already consumed by lock: no double free
+    assert len(cm.free_slots) == pages_held + 4 and pool.num_free_slots == slots_held + 1
+    assert cm._tier_pending_restore == {}
+
+
+def test_tier_refuses_qsa_pool(monkeypatch):
+    """S-wave fails-before: QSAKVCache passes the _kv_buffer gate, so tier flags on a
+    qwen4_exp model activated the tier with an INCOMPLETE codec (no _cmp_k_buffer slab) -
+    silent corruption on the QSA layers. The guard refuses activation; tier = off-mode."""
+    from freetoken.kvcache.qsa_pool import QSAKVCache
+    from freetoken.scheduler import cache as cache_mod
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    qsa = QSAKVCache.__new__(QSAKVCache)         # capability probe only, no runtime init
+    qsa._kv_buffer = torch.zeros(2, 2, 4, 1, 2, 4, dtype=torch.bfloat16)
+    seen = []
+    monkeypatch.setattr(cache_mod.logger, "warning",
+                        lambda msg, *a: seen.append(msg % a if a else msg))
+    pool, pt = _pool(), torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=qsa,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert cm.tier_store is None and not cm._tier_on
+    assert any("session tier refused" in m for m in seen)
+    mr = cm.match_req(_pend([1, 2, 3]))          # hooks no-op exactly like off-mode
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

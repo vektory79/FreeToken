@@ -44,6 +44,19 @@ class SessionTierCfg:
         self.ssd_bytes = ssd_bytes
 
 
+def _tier_refusal_reason(pool) -> str | None:
+    """Interim QSA guard: refuse tier activation for pools whose restore codec is
+    INCOMPLETE. Remove this function once _KVPageBytes stores the QSA compressed-index
+    slab (_cmp_k_buffer) and _rope_positions - until then a restored QSA pool serves
+    stale slab rows, i.e. wrong block selection on the QSA layers (silent corruption)."""
+    from freetoken.kvcache.qsa_pool import QSAKVCache
+
+    if isinstance(pool, QSAKVCache):
+        return ("qwen4_exp QSA pool: the session-tier codec does not store the "
+                "compressed index slab (_cmp_k_buffer / _rope_positions)")
+    return None
+
+
 class _SlotSnapshot:
     """SnapshotSource view of one LinearStatePool slot: conv + recurrent + slot_states packed
     in pool-attribute order. The store materializes bytes inside offer(); the slot must still
@@ -163,26 +176,37 @@ class CacheManager:
         self._tier_sessions: dict = {}
         self._tier_snap_bound: dict = {}
         self._tier_restore_slots: set = set()
-        self._tier_pending_restore = None
+        # Pending restores keyed by id(handle) (the value keeps the handle alive, so an id
+        # is unique while present): a second restore must never overwrite the first's
+        # refusal record, else its pages + GDN slot leak (mr>1).
+        self._tier_pending_restore: dict[int, tuple] = {}
         self._page_bytes = None
         if self.is_hybrid and self.linear_state_pool is not None and session_tier_cfg is not None:
             from .session_tier import SessionTierStore
 
-            store = SessionTierStore(session_tier_cfg)
-            if store.enabled and getattr(swa_pool, "_kv_buffer", None) is not None:
-                store.replay_journal()   # boot hook: rebuild the L2 index from the journal
-                self.tier_store = store
-                self._page_bytes = _KVPageBytes(swa_pool)
-                self._tier_on = True
-                # _tier_snap_bound is process-local (offer-time); journal-replayed segments
-                # are invisible to try_restore's snapshot-at-boundary gate without this,
-                # so the first post-boot turn would fall back to a full re-prefill.
-                for seg in store._segments.values():
-                    if seg.snap_lens and seg.snap_lens[0]:
-                        self._tier_snap_bound[seg.path_key] = seg.boundary_len
-            elif store.enabled:
-                logger.warning("session tier: no paged-KV byte codec for this pool family; "
-                               "tier stays inert")
+            # Evaluate the QSA refusal BEFORE the store exists: a discarded SessionTierStore
+            # would still makedirs the tier dir, leak its two raw fds and transiently mlock
+            # the L1 pool.
+            refusal = (_tier_refusal_reason(swa_pool)
+                       if getattr(swa_pool, "_kv_buffer", None) is not None else None)
+            if refusal is not None:
+                logger.warning("session tier refused: %s; tier stays off", refusal)
+            else:
+                store = SessionTierStore(session_tier_cfg)
+                if store.enabled and getattr(swa_pool, "_kv_buffer", None) is not None:
+                    store.replay_journal()   # boot hook: rebuild the L2 index from the journal
+                    self.tier_store = store
+                    self._page_bytes = _KVPageBytes(swa_pool)
+                    self._tier_on = True
+                    # _tier_snap_bound is process-local (offer-time); journal-replayed segments
+                    # are invisible to try_restore's snapshot-at-boundary gate without this,
+                    # so the first post-boot turn would fall back to a full re-prefill.
+                    for seg in store._segments.values():
+                        if seg.snap_lens and seg.snap_lens[0]:
+                            self._tier_snap_bound[seg.path_key] = seg.boundary_len
+                elif store.enabled:
+                    logger.warning("session tier: no paged-KV byte codec for this pool family; "
+                                   "tier stays inert")
 
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
@@ -364,11 +388,9 @@ class CacheManager:
                 req.swa_evicted_seqlen = new_evicted
 
     def lock(self, handle: BaseCacheHandle) -> None:
-        # A locked handle means admission consumed the restored match: clear the pending
-        # restore deterministically here (abandon_restore only handles the refusal paths).
-        pending = self._tier_pending_restore
-        if pending is not None and pending[0] is handle:
-            self._tier_pending_restore = None
+        # A locked handle means admission consumed the restored match: clear only THIS
+        # handle's pending restore (abandon_restore only handles the refusal paths).
+        self._tier_pending_restore.pop(id(handle), None)
         if self.is_swa:
             # records the window boundary on the (frozen) handle for unlock/dec_lock.
             object.__setattr__(handle, "swa_uuid", self.prefix_cache.inc_lock(handle.node))
@@ -782,7 +804,19 @@ class CacheManager:
             self._tier_offer(self.prefix_cache.snapshot_victim_paths())
         flushed = self.tier_store.flush_live()
         self.tier_store.compact()
+        line = self.tier_store.stats_line()
+        if line:
+            logger.info("session tier final: %s", line)
         return flushed
+
+    def maybe_compact_tier(self) -> int:
+        """Idle-safe-point hook: watermark-gated blob compaction (no-op when off/below)."""
+        return self.tier_store.maybe_compact() if self.tier_store is not None else 0
+
+    def tier_stats_line(self) -> str:
+        """Compact metrics fragment for the periodic batch log; "" when the tier is off."""
+        line = self.tier_store.stats_line() if self.tier_store is not None else ""
+        return f"{line}, " if line else ""
 
     def tier_owns_restore_slot(self, slot: int) -> bool:
         return slot in self._tier_restore_slots
@@ -914,17 +948,18 @@ class CacheManager:
             torch.cat([owned_pages, self._page_to_token(allocated)]), tier_restored=True)
         slot_owned = MatchResult(handle_h, mamba_value=slot)
         self._tier_restore_slots.add(slot)          # no tree owner: scheduler frees post-COW
-        self._tier_pending_restore = (handle_h, allocated, slot)   # for abandon_restore
+        self._tier_pending_restore[id(handle_h)] = (handle_h, allocated, slot)
         return slot_owned
 
     def abandon_restore(self, handle) -> None:
-        """Return a restored-but-refused admission's pages and slot to their pools. Idempotent:
-        the pending entry is cleared, and a slot already released (admitted -> COW-consumed)
-        is not freed twice. No-op for any handle that was not a restored match."""
-        pending = self._tier_pending_restore
-        if pending is None or pending[0] is not handle:
+        """Return a restored-but-refused admission's pages and slot to their pools.
+        Per-handle pending records: a later restore never steals an earlier refusal.
+        Idempotent: the entry is consumed, and a slot already released (admitted ->
+        COW-consumed) is not freed twice. No-op for any handle that was not a restored
+        match."""
+        pending = self._tier_pending_restore.pop(id(handle), None)
+        if pending is None:
             return
-        self._tier_pending_restore = None
         _, allocated, slot = pending
         if slot in self._tier_restore_slots:
             self.tier_release_restore_slot(slot)

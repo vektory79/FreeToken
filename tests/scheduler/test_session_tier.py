@@ -371,3 +371,132 @@ def test_compact_drops_dead_records_and_converges_after_sigkill(tmp_path):
         assert got[0] == data[k]                           # byte-identical restores
     assert reborn.compact() == 1                           # the stale journal still lists it
     assert reborn.compact() == 0                           # idempotent
+
+
+# --------------------------------------------------------------------- metrics
+
+
+def test_metrics_counters_l1_path():
+    store = SessionTierStore(_cfg())                       # ram only, no L2
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2, 3)]
+    for i, (_, pages) in enumerate(chains[:2], start=1):
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(str(i)))
+    assert store.offer(b"p3", 3, chains[2][1]) is False    # L1 full, no L2
+    hit = store.probe(chains[0][0])
+    assert store.probe([chain_page_key(None, (77,))]) is None
+    store.note_match(b"p1", 3)
+    store.restore(hit[1])
+    snap = store.snapshot()
+    assert snap["offers_ok"] == 2 and snap["offers_rej"] == 1
+    assert snap["probe_hit"] == 1 and snap["probe_miss"] == 1
+    assert snap["note_match"] == 1
+    assert snap["restore_l1"] == 1 and snap["restore_l2"] == 0
+    assert snap["l1_used"] == 2 * (3 * PAGE + SNAP)
+    assert store.stats_line().startswith("session-tier: l1=")
+
+
+def test_metrics_counters_demote_discard_dead_bytes(tmp_path):
+    store = SessionTierStore(_cfg(d=str(tmp_path)))
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2, 3)]
+    for i, (_, pages) in enumerate(chains, start=1):
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(str(i)))
+    assert store.evict_store(4) == 4   # the 3rd offer already demoted p1: 2 more demotes
+    snap = store.snapshot()            # + 2 L2 true discards (p1, then p2)
+    assert snap["evictions"] == 4 and snap["demotions"] == 3 and snap["discards"] == 2
+    assert snap["dead_bytes"] == 2 * 4096 and snap["ssd_used"] == 1 * 4096
+    hit = store.probe(chains[2][0])    # p3 was demoted: restore counts by tier
+    assert hit is not None
+    store.restore(hit[1])
+    snap = store.snapshot()
+    assert snap["restore_l2"] == 1 and snap["restore_l1"] == 0
+
+
+# ------------------------------------------------------ scheduled compaction
+
+
+def test_maybe_compact_watermark_and_floor(tmp_path, monkeypatch):
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = tmp_path / "wm"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    for i in (1, 2, 3, 4):
+        k = chain_page_key(None, (i,))
+        assert store.offer(bytes([i]) * 16, 1, [(k, bytes([i]) * PAGE)])
+    assert store.evict_store(2) == 2       # L2-only mode: both are true discards
+    assert store._dead_bytes == 2 * 4096 and store._blob_eof == 4 * 4096   # 50% dead
+    size = (d / "blob.bin").stat().st_size
+    assert store.maybe_compact() == 0      # default floor (256 MiB) blocks the rewrite
+    assert (d / "blob.bin").stat().st_size == size
+    monkeypatch.setattr(st_mod, "_COMPACT_FLOOR_BYTES", 4096)
+    assert store.maybe_compact() == 2      # watermark + lowered floor: rewrite fires
+    assert store._dead_bytes == 0 and store._ssd_used == 2 * 4096
+    # live records keep their ORIGINAL offsets (holes at the head), so the truncated
+    # file ends at the last live record, not at _ssd_used
+    assert (d / "blob.bin").stat().st_size == 4 * 4096
+    assert store._blob_eof == 4 * 4096     # resynced to the truncated file's real EOF
+
+    monkeypatch.setattr(st_mod, "_COMPACT_DEAD_FRACTION", 0.5)
+    for i in (5, 6):
+        k = chain_page_key(None, (i,))
+        assert store.offer(bytes([i]) * 16, 1, [(k, bytes([i]) * PAGE)])
+    assert store.evict_store(1) == 1
+    assert store._dead_bytes == 4096 and store._blob_eof == 6 * 4096       # 17% < 50%
+    assert store.maybe_compact() == 0      # below the watermark: no trigger
+    monkeypatch.setattr(st_mod, "_COMPACT_DEAD_FRACTION", 0.1)
+    assert store.maybe_compact() == 1
+    assert store._dead_bytes == 0
+
+
+def test_compaction_cannot_interleave_a_locked_store(tmp_path, monkeypatch):
+    import threading
+
+    import freetoken.scheduler.session_tier as st_mod
+
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "ser")))
+    for i in (1, 2, 3):
+        k = chain_page_key(None, (i,))
+        assert store.offer(bytes([i]) * 16, 1, [(k, bytes([i]) * PAGE)])
+    assert store.evict_store(1) == 1
+    assert store._dead_bytes == 4096       # 33% dead: over the watermark
+    monkeypatch.setattr(st_mod, "_COMPACT_FLOOR_BYTES", 4096)
+    done = threading.Event()
+
+    def run():
+        store.maybe_compact()
+        done.set()
+
+    with store._lock:                      # e.g. concurrent offer/restore bookkeeping
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(0.3)
+        assert not done.is_set()           # blocked on the global lock, never interleaved
+    worker.join(10)
+    assert done.is_set() and store._dead_bytes == 0
+
+
+def test_compact_keeps_both_resurrected_records_after_crash_replay(tmp_path):
+    """F1 fails-before: survival keyed by path_key last-wins dropped the OLDER live
+    record when a crashed discard left two live segments on one path (discard leaves the
+    journal record + blob region intact; replay resurrects both) - the dropped segment
+    stayed indexed but its blob region became a hole, so restore returned zeros."""
+    d = tmp_path / "dup"
+    store = SessionTierStore(_cfg(d=str(d)))
+    keys1, pages1 = _chain([(1, 0), (1, 1), (1, 2)])
+    assert store.offer(b"path", 3, pages1, _snap("a"))
+    assert store.flush_live() == 1          # seg1 -> L2 (journal record R1)
+    assert store.evict_store(1) == 1        # seg1 discarded; R1 + blob region survive
+    keys2, pages2 = _chain([(5, 0), (5, 1), (5, 2)])
+    assert store.offer(b"path", 3, pages2, _snap("b"))   # re-offer same path: new seg2
+    assert store.flush_live() == 1          # seg2 -> L2 (R2); journal now has R1 + R2
+
+    # SIGKILL-style reboot: replay resurrects BOTH same-path segments
+    reborn = SessionTierStore(_cfg(d=str(d)))
+    assert reborn.replay_journal() == 2
+    assert [s.path_key for s in reborn._segments.values()].count(b"path") == 2
+    assert reborn.compact() == 0            # identity-keyed survival: nothing is dropped
+
+    # both resurrected segments probe AND restore byte-exact
+    h2 = reborn.probe(keys2)[1]             # seg2's page keys only match seg2
+    assert reborn.restore(h2) == ([data for _, data in pages2], [_snap("b")])
+    h1 = reborn.probe(keys1)[1]             # seg1 still indexed and readable
+    assert reborn.restore(h1) == ([data for _, data in pages1], [_snap("a")])

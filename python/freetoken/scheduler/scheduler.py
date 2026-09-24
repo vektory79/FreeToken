@@ -162,6 +162,10 @@ class Scheduler(SchedulerIOMixin):
         """Called when the scheduler is idle to perform background tasks."""
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
+        # Session-tier scheduled compaction rides the same idle safe point as rebuilds:
+        # the watermark check is two int compares; the blob rewrite is rare and runs under
+        # the store's global lock, so it cannot interleave with a restore.
+        self.cache_manager.maybe_compact_tier()
 
     @torch.inference_mode()
     def rebuild_cache(
@@ -439,7 +443,8 @@ class Scheduler(SchedulerIOMixin):
             page_size=self.config.page_size,
             mamba_slots=mamba_slots,
             swa_tokens=swa_tokens,
-        )
+            tier_fn=self.cache_manager.tier_stats_line,   # lazy: evaluated only in the
+        )                                                 # throttled/triggered log branches
         self.send_result(reply)
 
     def _match_stop_str(self, req: Req) -> str | None:

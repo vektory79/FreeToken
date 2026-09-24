@@ -34,6 +34,7 @@ class SchedulerStatusReporter:
         page_size: int,
         mamba_slots: tuple[int, int] | None = None,
         swa_tokens: tuple[int, int] | None = None,
+        tier_fn: Callable[[], str] | None = None,
     ) -> None:
         if batch.is_prefill:
             self._report_prefill(
@@ -44,6 +45,7 @@ class SchedulerStatusReporter:
                 kv_total_pages=kv_total_pages,
                 mamba_slots=mamba_slots,
                 swa_tokens=swa_tokens,
+                tier_fn=tier_fn,
             )
         elif batch.is_decode:
             self._report_decode(
@@ -55,6 +57,7 @@ class SchedulerStatusReporter:
                 page_size=page_size,
                 mamba_slots=mamba_slots,
                 swa_tokens=swa_tokens,
+                tier_fn=tier_fn,
             )
 
     def _report_prefill(
@@ -67,6 +70,7 @@ class SchedulerStatusReporter:
         kv_total_pages: int,
         mamba_slots: tuple[int, int] | None = None,
         swa_tokens: tuple[int, int] | None = None,
+        tier_fn: Callable[[], str] | None = None,
     ) -> None:
         now = self.clock()
         gap = now - self._last_prefill_time
@@ -85,6 +89,7 @@ class SchedulerStatusReporter:
             f"token usage: {_usage_ratio(kv_used_pages, kv_total_pages):.2f}, "
             f"{_swa_msg(swa_tokens)}"
             f"{_mamba_msg(mamba_slots)}"
+            f"{tier_fn() if tier_fn else ''}"
             f"#running-req: {running_reqs}, "
             f"#queue-req: {queue_reqs}, "
             f"input throughput (token/s): {input_throughput:.2f}"
@@ -101,11 +106,12 @@ class SchedulerStatusReporter:
         page_size: int,
         mamba_slots: tuple[int, int] | None = None,
         swa_tokens: tuple[int, int] | None = None,
+        tier_fn: Callable[[], str] | None = None,
     ) -> None:
         self._decode_forward_count += 1
         self._decode_generated_tokens += len(batch.reqs)
         if self._decode_forward_count % self.decode_log_interval != 0:
-            return
+            return   # tier_fn stays unevaluated for the discarded 39/40 batches
 
         now = self.clock()
         gap = now - self._last_decode_time
@@ -119,6 +125,7 @@ class SchedulerStatusReporter:
             f"token usage: {_usage_ratio(kv_used_pages, kv_total_pages):.2f}, "
             f"{_swa_msg(swa_tokens)}"
             f"{_mamba_msg(mamba_slots)}"
+            f"{tier_fn() if tier_fn else ''}"
             f"gen throughput (token/s): {gen_throughput:.2f}, "
             f"#queue-req: {queue_reqs}"
         )

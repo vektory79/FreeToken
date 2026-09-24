@@ -17,6 +17,7 @@ import struct
 import threading
 import time
 import zlib
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
@@ -30,6 +31,10 @@ _MAX_SNAPSHOTS = 3
 _DIGEST = 16
 _JOURNAL_NAME = "journal.log"
 _BLOB_NAME = "blob.bin"
+# Scheduled compaction (runtime, no CLI flag): rewrite the blob once dead bytes exceed
+# this share of the blob AND the blob is above the floor (no churn on small installs).
+_COMPACT_DEAD_FRACTION = 0.25
+_COMPACT_FLOOR_BYTES = 256 << 20
 
 
 class SnapshotSource(Protocol):
@@ -152,9 +157,19 @@ class SessionTierStore:
         # Off (inert) when ram is disabled AND dir is unset; a dir alone enables L2-only
         # mode (ssd_bytes 0 = unlimited cap - the GiB flag is a cap, not a gate).
         self.enabled = self.ram_bytes > 0 or self.dir is not None
+        # Counter + dead-byte ledger exist even when inert: the offer() wrapper stamps
+        # rejection counters on the disabled store before any early return. Pre-seeded so
+        # snapshot()/stats_line() always see every key.
+        self._dead_bytes = 0
+        self._counters: Counter = Counter(offers_ok=0, offers_rej=0, probe_hit=0,
+                                          probe_miss=0, note_match=0, restore_l1=0,
+                                          restore_l2=0, evictions=0, demotions=0,
+                                          discards=0)
+        # Lock exists even when inert: the offer() wrapper takes it around the rejection
+        # counter before any early return.
+        self._lock = threading.RLock()
         if not self.enabled:
             return
-        self._lock = threading.RLock()
         if self.ram_bytes > 0:
             try:
                 self._pool = _Pool(self.ram_bytes)
@@ -177,6 +192,8 @@ class SessionTierStore:
         self._journal_path = ""
         self._blob_fd = -1
         self._journal_fd = -1
+        # Blob bytes freed by L2 discards (regions read as zero holes) until compaction
+        # reclaims them; boot replay recomputes this from the recovered record set.
         if self.dir is not None:
             os.makedirs(self.dir, exist_ok=True)
             self._blob_path = os.path.join(self.dir, _BLOB_NAME)
@@ -214,7 +231,9 @@ class SessionTierStore:
                 if best is not None:
                     seg, d = best
                     seg.last_validation = now
+                    self._counters["probe_hit"] += 1
                     return d, TierHandle(seg.path_key, d, seg.seg_id)
+            self._counters["probe_miss"] += 1
             return None
 
     def note_match(self, path_key: bytes, depth: int) -> None:
@@ -227,6 +246,7 @@ class SessionTierStore:
             seg = self._by_path(path_key)
             if seg is not None:
                 seg.last_validation = now
+                self._counters["note_match"] += 1
                 _ = depth
 
     # ------------------------------------------------------------------ offer
@@ -235,6 +255,19 @@ class SessionTierStore:
               kv_pages: Sequence[tuple[bytes, bytes]],
               snapshot_slot: bytes | SnapshotSource | Sequence[bytes | SnapshotSource] | None = None
               ) -> bool:
+        # RLock is reentrant: _offer re-acquires it; the counter increment stays inside
+        # the locked region (Counter += is not atomic and offer may run concurrently).
+        with self._lock:
+            ok = self._offer(path_key, boundary_len, kv_pages, snapshot_slot)
+            self._counters["offers_ok" if ok else "offers_rej"] += 1
+        if ok:
+            self.maybe_compact()   # watermark gate: two int compares when below
+        return ok
+
+    def _offer(self, path_key: bytes, boundary_len: int,
+               kv_pages: Sequence[tuple[bytes, bytes]],
+               snapshot_slot: bytes | SnapshotSource | Sequence[bytes | SnapshotSource] | None = None
+               ) -> bool:
         """Store a segment. kv_pages are (chain_key, raw_bytes) pairs; snapshot_slot is
         raw snapshot bytes, a SnapshotSource handle, or a list of up to 3 of those.
         Returns False if the segment did not fit in either tier."""
@@ -397,6 +430,7 @@ class SessionTierStore:
             logger.warning("session tier: L2 cap reached, cannot demote seg %d", seg.seg_id)
             return False
         self._release_l1(seg)
+        self._counters["demotions"] += 1
         return True
 
     def _write_blob(self, seg: _Segment, payload: bytes | None) -> bool:
@@ -465,6 +499,8 @@ class SessionTierStore:
                     break
                 self._discard(min(l2, key=lambda s: (s.last_validation, s.seg_id)))
                 count += 1
+            self._counters["evictions"] += count   # under the lock: Counter += is not atomic
+        self.maybe_compact()   # discard pressure is the other watermark check point
         return count
 
     def _evict_oldest_l2(self, keep: int) -> None:
@@ -475,9 +511,12 @@ class SessionTierStore:
             l2.remove(victim)
 
     def _discard(self, seg: _Segment) -> None:
-        # Blob space is not reclaimed in phase 1 (append-only); compaction happens at
-        # the graceful-shutdown checkpoint.
-        self._ssd_used -= (seg.l2_n + _BLK - 1) // _BLK * _BLK
+        # Append-only blob: the discarded padded span becomes a zero hole, reclaimable
+        # only by compaction once the dead-byte watermark trips (maybe_compact).
+        padded = (seg.l2_n + _BLK - 1) // _BLK * _BLK
+        self._ssd_used -= padded
+        self._dead_bytes += padded
+        self._counters["discards"] += 1
         for i, key in enumerate(seg.page_keys):
             entries = self._index.get(key, [])
             self._index[key] = [e for e in entries if e[0] != seg.seg_id]
@@ -521,6 +560,9 @@ class SessionTierStore:
                     return None
                 with self._lock:
                     seg.last_validation = time.monotonic_ns()
+                    # counts ATTEMPTS: try_restore may still discard the result at its
+                    # boundary/snapshot gate (cache.py) - the bytes were read regardless.
+                    self._counters["restore_l1" if seg.in_l1 else "restore_l2"] += 1
                 return pages, snaps
         finally:
             with self._lock:
@@ -648,11 +690,34 @@ class SessionTierStore:
                 seg.last_validation = rec["ts"]
                 self._segments[seg.seg_id] = seg
                 self._touch_index(seg)
+            # Crash recovery can leave dead blob regions (holes from an interrupted
+            # compaction, discarded-on-other-boot records): recompute from the live set
+            # so the runtime watermark starts from the true count.
+            self._dead_bytes = max(0, self._ssd_used - sum(
+                (s.l2_n + _BLK - 1) // _BLK * _BLK
+                for s in self._segments.values() if s.in_l2))
         if records:
             logger.info("session tier: replayed %d journal records", len(records))
         return len(records)
 
     # ------------------------------------------------------------- log compaction
+
+    def maybe_compact(self) -> int:
+        """Watermark-gated runtime compaction: fires only when dead blob bytes exceed
+        the constant share of the blob AND the blob is above the floor; two int compares
+        (and no locking) on every below-watermark check point. Returns dead records
+        dropped (0 = no-op)."""
+        if not self.enabled or self._blob_fd < 0:
+            return 0
+        if self._blob_eof < _COMPACT_FLOOR_BYTES or \
+                self._dead_bytes <= self._blob_eof * _COMPACT_DEAD_FRACTION:
+            return 0
+        dropped = self.compact()
+        if dropped:
+            logger.info("session tier: compaction dropped %d dead records; "
+                        "l2 used %.2f GiB (blob eof %.2f GiB)",
+                        dropped, self._ssd_used / 2**30, self._blob_eof / 2**30)
+        return dropped
 
     def compact(self) -> int:
         """Shutdown-checkpoint log compaction (TASK.md Component 3): rewrite the blob with
@@ -661,23 +726,31 @@ class SessionTierStore:
         is fsync'ed and atomically renamed BEFORE the journal rewrite, so a SIGKILL between
         the two leaves the OLD journal against the NEW blob; replay's payload-crc check
         drops every dead record (its region reads as a zero hole), converging to exactly
-        the live segments. With zero dead records this is a no-op (returns 0)."""
+        the live segments. With zero dead records this is a no-op (returns 0).
+        Lock coverage: runs entirely under the store's global RLock, serializing against
+        offer/evict/discard. A restore's blob read happens outside that lock, but reads a
+        LIVE record, which keeps its ORIGINAL offset across the rewrite (only dead regions
+        become holes), and a mid-restore segment is refs-guarded against discard - a
+        reader can never see different bytes for its segment."""
         if not self.enabled or self._blob_fd < 0:
             return 0
         with self._lock:
             records = self._parse_journal()
-            live_paths = {seg.path_key.hex() for seg in self._segments.values() if seg.in_l2}
-            last_by_path: dict[str, dict] = {}
-            for rec in records:
-                if rec["path_key"] in live_paths:
-                    last_by_path[rec["path_key"]] = rec
-            if len(last_by_path) == len(records):
+            # Survival keyed by EXACT record identity (path, offset, length), NOT last-wins
+            # per path: a crashed discard + replay can leave TWO live segments on one
+            # path_key, and last-wins survival would hole the older live segment's blob
+            # region while it stays indexed (restore then returns zeros = corruption).
+            live = {(seg.path_key.hex(), seg.l2_off, seg.l2_n)
+                    for seg in self._segments.values() if seg.in_l2}
+            keep = [rec for rec in records
+                    if (rec["path_key"], rec["off"], rec["n"]) in live]
+            if len(keep) == len(records):
                 return 0                      # nothing dead: no-op (also covers empty journal)
             tmp = self._blob_path + ".compact"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             ro = os.open(self._blob_path, os.O_RDONLY)   # _blob_fd itself is write-only
             try:
-                for rec in last_by_path.values():
+                for rec in keep:
                     # copy the PADDED record span: the O_DIRECT reader reads block-aligned
                     # windows, so a truncated tail would break restores of the last segment
                     span = (rec["n"] + _BLK - 1) // _BLK * _BLK
@@ -690,10 +763,15 @@ class SessionTierStore:
             os.close(self._blob_fd)
             self._blob_fd = os.open(self._blob_path,
                                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-            self._rewrite_journal(list(last_by_path.values()))
+            self._rewrite_journal(keep)
             self._ssd_used = sum((r["n"] + _BLK - 1) // _BLK * _BLK
-                                 for r in last_by_path.values())
-            return len(records) - len(last_by_path)
+                                 for r in keep)
+            # Runtime compaction is new (phase 1 ran it shutdown-only): re-sync _blob_eof
+            # to the truncated file, or the next append's journal offset would point above
+            # its data. Dead accounting is fully reclaimed by the rewrite.
+            self._blob_eof = os.lseek(self._blob_fd, 0, os.SEEK_END)
+            self._dead_bytes = 0
+            return len(records) - len(keep)
 
     def _parse_journal(self) -> list[dict]:
         """Ordered, crc-checked journal records (same format replay rebuilds from)."""
@@ -722,3 +800,29 @@ class SessionTierStore:
             f.flush()
             os.fsync(f.fileno())
         os.rename(tmp, self._journal_path)
+
+    # ----------------------------------------------------------------- metrics
+
+    def snapshot(self) -> dict:
+        """Counter + byte-gauge snapshot for the metrics export; {} when off."""
+        if not self.enabled:
+            return {}
+        with self._lock:
+            snap = dict(self._counters)
+            snap.update(l1_used=self._l1_used, ssd_used=self._ssd_used,
+                        blob_eof=self._blob_eof, dead_bytes=self._dead_bytes,
+                        segments=len(self._segments))
+            return snap
+
+    def stats_line(self) -> str:
+        """Compact one-liner for the scheduler's periodic batch log; "" when off."""
+        snap = self.snapshot()
+        if not snap:
+            return ""
+        return (f"session-tier: l1={snap['l1_used'] / 2**20:.1f}MiB, "
+                f"l2={snap['ssd_used'] / 2**20:.1f}MiB, "
+                f"offers={snap['offers_ok']}/{snap['offers_rej']}, "
+                f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
+                f"restore={snap['restore_l1']}(l1)/{snap['restore_l2']}(l2), "
+                f"evict={snap['evictions']}, demote={snap['demotions']}, "
+                f"discard={snap['discards']}, dead={snap['dead_bytes'] / 2**20:.1f}MiB")
