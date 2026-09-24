@@ -474,6 +474,268 @@ def test_compaction_cannot_interleave_a_locked_store(tmp_path, monkeypatch):
     assert done.is_set() and store._dead_bytes == 0
 
 
+# ----------------------------------------------------------------- prefetch tickets
+
+
+def _settle(store, timeout=5.0):
+    """Wait until the prefetch reader finalized every queued staging item."""
+    deadline = time.monotonic() + timeout
+    while not store._tickets_settled():
+        assert time.monotonic() < deadline, "prefetch worker did not settle"
+        time.sleep(0.001)
+
+
+def test_ticket_lifecycle_begin_ready_adopt_byte_exact():
+    from freetoken.scheduler.session_tier import _Pool
+
+    store = SessionTierStore(_cfg())
+    keys, pages = _chain([(6, 0), (6, 1), (6, 2)])
+    assert store.offer(b"path", 3, pages, _snap("t"))
+    baseline = _Pool._locked_total
+    hit = store.probe(keys)
+    ticket = store.begin_restore(hit[1])
+    assert ticket is not None and ticket.boundary == 3
+    _settle(store)
+    assert ticket.state == "ready"
+    got = store.consume_ticket(ticket)
+    assert got is not None
+    adopted_pages, adopted_snaps = got
+    sync_pages, sync_snaps = store.restore(hit[1])   # the sync path is the reference
+    assert adopted_pages == sync_pages == [data for _, data in pages]
+    assert adopted_snaps == sync_snaps == [_snap("t")]
+    assert store._tickets == {}                      # consumed: nothing left staged
+    assert _Pool._locked_total == baseline           # staging unlocked (no leak)
+    assert store.snapshot()["prefetch_adopt"] == 1
+    # contract: the staging covers the FULL boundary - a shallower handle consumes the
+    # same boundary pages and the caller depth-truncates (exactly what restore does)
+    ticket2 = store.begin_restore(store.probe(keys[:2])[1])
+    _settle(store)
+    p2, s2 = store.consume_ticket(ticket2)
+    assert p2 == [data for _, data in pages] and s2 == [_snap("t")]
+    assert _Pool._locked_total == baseline
+
+
+def test_ticket_abandon_frees_staging_and_consumes_nothing():
+    from freetoken.scheduler.session_tier import _Pool
+
+    store = SessionTierStore(_cfg())
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"path", 2, pages, _snap("a"))
+    baseline = _Pool._locked_total
+    ticket = store.begin_restore(store.probe(keys)[1])
+    _settle(store)
+    store.abandon_ticket(ticket)
+    assert ticket.state == "abandoned" and store._tickets == {}
+    assert _Pool._locked_total == baseline           # staging freed, nothing consumed
+    assert store.consume_ticket(ticket) is None      # a dropped ticket is dead
+    assert store.abandon_ticket(ticket) is None      # idempotent
+    assert store.snapshot()["prefetch_abandon"] == 1
+
+
+def test_ticket_pending_abandon_is_finalized_by_worker(tmp_path, monkeypatch):
+    """Abandoning a STILL-READING ticket must not wait on the reader: the scheduler marks
+    it, the worker finalize frees the staging, and consume afterwards yields nothing."""
+    import threading
+
+    from freetoken.scheduler.session_tier import _Pool
+
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "pend")))
+    keys, pages = _chain([(8, 0), (8, 1)])
+    assert store.offer(b"path", 2, pages, _snap("s"))
+    baseline = _Pool._locked_total
+    entered, release = threading.Event(), threading.Event()
+    real = store._blob_read
+
+    def slow(blob, off, n):
+        entered.set()
+        assert release.wait(5)
+        return real(blob, off, n)
+
+    monkeypatch.setattr(store, "_blob_read", slow)
+    ticket = store.begin_restore(store.probe(keys)[1])
+    assert ticket is not None
+    assert entered.wait(5) and ticket.state == "pending"
+    store.abandon_ticket(ticket)                     # the scheduler never waits here
+    assert ticket.state == "abandoned" and store._tickets == {}
+    release.set()
+    _settle(store)
+    assert store.consume_ticket(ticket) is None
+    assert _Pool._locked_total == baseline           # freed by the worker finalize
+    assert store.snapshot()["prefetch_abandon"] == 1
+
+
+def test_ticket_failed_on_vanished_source(tmp_path, monkeypatch):
+    """A staging read that fails (source lost / IO error) marks the ticket failed, frees
+    the staging and leaves the sync restore intact as the fallback."""
+    from freetoken.scheduler.session_tier import _Pool
+
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "fail")))
+    keys, pages = _chain([(9, 0), (9, 1)])
+    assert store.offer(b"path", 2, pages)
+    baseline = _Pool._locked_total
+    hit = store.probe(keys)
+
+    def boom(blob, off, n):
+        raise OSError(5, "simulated source loss")
+
+    monkeypatch.setattr(store, "_blob_read", boom)
+    ticket = store.begin_restore(hit[1])
+    _settle(store)
+    assert ticket.state == "failed"
+    assert store.consume_ticket(ticket) is None      # adopt falls back to sync
+    assert store._tickets == {} and _Pool._locked_total == baseline
+    assert store.snapshot()["prefetch_fail"] == 1
+    monkeypatch.undo()
+    assert store.restore(hit[1]) == ([data for _, data in pages], [])
+
+
+def test_ticket_dropped_when_segment_discarded(tmp_path):
+    """A staged segment that gets truly discarded can never be probed again: the orphaned
+    staging is dropped with it (bytes were independent, but nothing will ever consume)."""
+    from freetoken.scheduler.session_tier import _Pool
+
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "disc")))
+    keys, pages = _chain([(10, 0), (10, 1)])
+    assert store.offer(b"path", 2, pages, _snap("d"))
+    baseline = _Pool._locked_total
+    ticket = store.begin_restore(store.probe(keys)[1])
+    _settle(store)
+    assert store.evict_store(1) == 1                 # true L2 discard of the staged segment
+    assert store._tickets == {}
+    assert _Pool._locked_total == baseline
+    assert store.consume_ticket(ticket) is None
+
+
+def test_ticket_cap_is_bounded():
+    from freetoken.scheduler.session_tier import _MAX_RESTORE_TICKETS, _Pool
+
+    assert _MAX_RESTORE_TICKETS == 2
+    store = SessionTierStore(_cfg())
+    chains = [_chain([(20 + i, 0), (20 + i, 1)]) for i in range(3)]
+    for i, (keys, pages) in enumerate(chains):
+        assert store.offer(f"p{i}".encode(), 2, pages)
+    baseline = _Pool._locked_total
+    t0 = store.begin_restore(store.probe(chains[0][0])[1])
+    t1 = store.begin_restore(store.probe(chains[1][0])[1])
+    assert t0 is not None and t1 is not None
+    assert store.begin_restore(store.probe(chains[2][0])[1]) is None   # cap
+    assert store.snapshot()["prefetch_rej_cap"] == 1
+    _settle(store)
+    store.abandon_ticket(t0)
+    t2 = store.begin_restore(store.probe(chains[2][0])[1])             # a freed slot reopens
+    assert t2 is not None
+    _settle(store)
+    for t in (t0, t1, t2):
+        store.abandon_ticket(t)
+    assert store._tickets == {} and _Pool._locked_total == baseline
+
+
+def test_ticket_off_mode_begin_restore_is_inert():
+    store = SessionTierStore(_cfg(ram=0, ssd=0, d=None))
+    assert store.begin_restore(TierHandle(b"p", 1, 7)) is None
+    assert store._tickets == {}
+
+
+def test_prefetch_probe_does_not_stamp_lru(tmp_path):
+    """The idle prefetch probe is speculative interest: it must NOT refresh the segment's
+    LRU currency (only real matches/note_match do) and it counts into its own counters."""
+    store = SessionTierStore(_cfg(d=str(tmp_path / "p1")))
+    ka, pa = _chain([(30, 0), (30, 1)])
+    kb, pb = _chain([(31, 0), (31, 1)])
+    assert store.offer(b"a", 2, pa)
+    assert store.offer(b"b", 2, pb)                  # b is the newer segment
+    store.probe(ka, stamp=False)                     # speculative: no refresh
+    assert store.evict_store(1) == 1
+    assert store._by_path(b"a").in_l2                # a was STILL the LRU victim
+    assert store._by_path(b"b").in_l1
+    snap = store.snapshot()
+    assert snap["prefetch_probe_hit"] == 1 and snap["probe_hit"] == 0
+    # contrast: a stamped probe refreshes a, so b dies instead
+    store2 = SessionTierStore(_cfg(d=str(tmp_path / "p2")))
+    assert store2.offer(b"a", 2, pa)
+    assert store2.offer(b"b", 2, pb)
+    store2.probe(ka)
+    assert store2.evict_store(1) == 1
+    assert store2._by_path(b"b").in_l2 and store2._by_path(b"a").in_l1
+
+
+def test_ticket_stress_two_threads(tmp_path, monkeypatch):
+    """Thread-safety of the staging path: one thread drives begin/settle/consume-or-abandon
+    while the other churns offer/probe/restore/evict/compact. Asserts are structural (they
+    hold under ANY interleaving): no exceptions, ticket conservation, refs back to zero,
+    staging accounting back to baseline."""
+    import random
+    import threading
+
+    import freetoken.scheduler.session_tier as st_mod
+    from freetoken.scheduler.session_tier import _Pool
+
+    monkeypatch.setattr(st_mod, "_COMPACT_FLOOR_BYTES", 4096)
+    store = SessionTierStore(_cfg(ram=RAM_BYTES * 8, ssd=64 * 4096,
+                                  d=str(tmp_path / "stress")))
+    chains = [_chain([(40 + i, 0), (40 + i, 1)]) for i in range(6)]
+    for i, (keys, pages) in enumerate(chains):
+        assert store.offer(f"s{i}".encode(), 2, pages, _snap(str(i)))
+    baseline = _Pool._locked_total
+    errs = []
+    rng_a, rng_b = random.Random(11), random.Random(13)
+
+    def driver():
+        try:
+            for _ in range(40):
+                keys = rng_a.choice(chains)[0][:rng_a.randint(1, 2)]
+                hit = store.probe(keys)
+                if hit is None:
+                    continue
+                t = store.begin_restore(hit[1])
+                if t is None:
+                    continue
+                assert t.ready.wait(5)
+                if rng_a.random() < 0.5:
+                    store.consume_ticket(t)
+                else:
+                    store.abandon_ticket(t)
+        except Exception as e:                   # noqa: BLE001 (collected, asserted below)
+            errs.append(e)
+
+    def churn():
+        try:
+            for i in range(30):
+                op = rng_b.choice(("probe", "restore", "evict", "offer", "compact"))
+                if op == "probe":
+                    store.probe(rng_b.choice(chains)[0])
+                elif op == "restore":
+                    hit = store.probe(rng_b.choice(chains)[0])
+                    if hit is not None:
+                        store.restore(hit[1])
+                elif op == "evict":
+                    store.evict_store(1)
+                elif op == "offer":
+                    j = rng_b.randrange(6)
+                    store.offer(f"s{j}".encode(), 2, chains[j][1], _snap(f"r{i}"))
+                else:
+                    store.maybe_compact()
+        except Exception as e:                   # noqa: BLE001
+            errs.append(e)
+
+    ta, tb = threading.Thread(target=driver), threading.Thread(target=churn)
+    ta.start()
+    tb.start()
+    ta.join(30)
+    tb.join(30)
+    assert not ta.is_alive() and not tb.is_alive()
+    assert errs == []
+    assert store._tickets == {}
+    snap = store.snapshot()                      # conservation: every begin settled one way
+    assert snap["prefetch_begin"] == (snap["prefetch_adopt"] + snap["prefetch_abandon"]
+                                      + snap["prefetch_fail"])
+    assert all(seg.refs == 0 for seg in store._segments.values())
+    # no staging residue: the pool's own demote accounting only ever shrinks below the
+    # construction baseline, and every ticket buffer was munlocked (== pins in the
+    # lifecycle/abandon tests, which do not demote)
+    assert _Pool._locked_total <= baseline
+
+
 def test_compact_keeps_both_resurrected_records_after_crash_replay(tmp_path):
     """F1 fails-before: survival keyed by path_key last-wins dropped the OLDER live
     record when a crashed discard left two live segments on one path (discard leaves the

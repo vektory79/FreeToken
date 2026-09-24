@@ -166,6 +166,9 @@ class Scheduler(SchedulerIOMixin):
         # the watermark check is two int compares; the blob rewrite is rare and runs under
         # the store's global lock, so it cannot interleave with a restore.
         self.cache_manager.maybe_compact_tier()
+        # Session-tier restore prefetch rides the same idle safe point: bounded ticket
+        # staging so the next admission of a washed session adopts instead of re-reading.
+        self.cache_manager.prefetch_tier_idle()
 
     @torch.inference_mode()
     def rebuild_cache(

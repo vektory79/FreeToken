@@ -3,13 +3,16 @@ from __future__ import annotations
 import heapq
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Tuple, TypeAlias
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, TypeAlias
 
 import torch
 from freetoken.core import get_global_ctx
 from freetoken.utils import align_down
 
 from .base import BaseCacheHandle, BasePrefixCache, InsertResult, MatchResult, SizeInfo
+
+if TYPE_CHECKING:
+    from .hybrid_radix_cache import VictimPath
 
 KEY_FN: TypeAlias = Callable[[torch.Tensor], Any]
 
@@ -129,6 +132,20 @@ class RadixCacheHandle(BaseCacheHandle):
         return torch.cat(value_list)
 
 
+@dataclass(frozen=True)
+class RestoredRadixHandle(RadixCacheHandle):
+    """Session-tier restore handle (KV-only managers): the restored prefix's page indices
+    are EXPLICIT because the fresh suffix pages are not tree-owned until the commit's
+    insert_prefix adopts them - get_matched_indices cannot walk the tree yet.
+    ``tier_restored`` mirrors HybridCacheHandle; lock_handle accepts the subclass as-is."""
+
+    kv_indices: torch.Tensor
+    tier_restored: bool = False
+
+    def get_matched_indices(self) -> torch.Tensor:
+        return self.kv_indices
+
+
 class RadixPrefixCache(BasePrefixCache):
     def __init__(self, device: torch.device, page_size: int | None = None):
         super().__init__()
@@ -167,6 +184,26 @@ class RadixPrefixCache(BasePrefixCache):
         node, prefix_len = self._tree_walk(input_ids)
         return MatchResult(RadixCacheHandle(prefix_len, node))
 
+    def owned_prefix(self, input_ids: torch.Tensor, *,
+                     stamp: bool = True) -> Tuple[RadixTreeNode, int, torch.Tensor]:
+        """(node, prefix_len, pages): the frontier of tree-owned KV along input_ids plus the
+        node ending at that frontier and its collected page indices. The session-tier
+        restore (KV-only managers) restores only the missing suffix; the returned node pins
+        the tree-owned prefix for the request. stamp=False is the idle prefetch walk: it
+        must not refresh node LRU currency (speculative interest must not outrank real
+        admissions); callers other than the prefetch path keep the default stamping.
+        Mirror of HybridRadixCache.owned_prefix."""
+        node, prefix_len = self._tree_walk(input_ids, stamp=stamp)
+        pages = (RadixCacheHandle(prefix_len, node).get_matched_indices()
+                 if not node.is_root() else self.empty_tensor)
+        return node, prefix_len, pages
+
+    def live_victim_paths(self) -> List["VictimPath"]:
+        """VictimPath for every live boundary (a plain radix node carries no secondary
+        currency, so every non-root node is one). The graceful-shutdown seam: the tier
+        store re-offers them before the process dies; the adaptive keep-set filters."""
+        return [self._derive_victim_path(n) for n in self._nodes()]
+
     def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor) -> InsertResult:
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, indices = input_ids[:insert_len], indices[:insert_len]
@@ -180,8 +217,17 @@ class RadixPrefixCache(BasePrefixCache):
         return InsertResult(prefix_len, RadixCacheHandle(insert_len, node))
 
     def evict(self, size: int) -> torch.Tensor:
+        return self._evict(size, derive_paths=False)[0]
+
+    def evict_paths(self, size: int) -> Tuple[torch.Tensor, List["VictimPath"]]:
+        """Session-tier eviction seam (KV-only managers; mirrors
+        HybridRadixCache.evict_full derive_paths): evict by LRU over unlocked leaves and
+        derive each popped victim's chain-key path. evict() stays the no-detail fast path."""
+        return self._evict(size, derive_paths=True)
+
+    def _evict(self, size: int, derive_paths: bool) -> Tuple[torch.Tensor, List["VictimPath"]]:
         if size == 0:
-            return self.empty_tensor
+            return self.empty_tensor, []
         assert (
             size <= self.evictable_size
         ), f"Cannot evict {size}, only {self.evictable_size} is evictable"
@@ -190,6 +236,7 @@ class RadixPrefixCache(BasePrefixCache):
         heapq.heapify(leave_nodes)
         evicted_indices: List[torch.Tensor] = []
         evicted_size = 0
+        victims: List["VictimPath"] = []
 
         while evicted_size < size:
             assert (
@@ -200,13 +247,50 @@ class RadixPrefixCache(BasePrefixCache):
             evicted_size += node.length
             evicted_indices.append(node.value)
             self.evictable_size -= node.length
+            if derive_paths:
+                # victim bytes are still pool-live here; the caller offers BEFORE freeing
+                victims.append(self._derive_victim_path(node))
             parent = node.parent
             del parent.children[self.key_fn(node._key)]
             # NOTE: root is always protected, so won't be evicted
             if parent.is_leaf() and parent.ref_count == 0:
                 heapq.heappush(leave_nodes, parent)
 
-        return torch.cat(evicted_indices)
+        return torch.cat(evicted_indices), victims
+
+    def _derive_victim_path(self, node: RadixTreeNode) -> "VictimPath":
+        """One chain_page_key call per page walking root -> node; the node's FIRST-page key
+        (the tree's dict key) is not enough - the store needs the full ancestor chain.
+        Computed on eviction/shutdown only. mamba_slot is None: a plain radix node carries
+        no snapshot currency."""
+        from freetoken.kvcache.utils import chain_page_key
+        from .hybrid_radix_cache import VictimPath
+
+        keys, pages = [], []
+        n = node
+        while not n.is_root():
+            keys.append(n._key)
+            pages.append(n.value)
+            n = n.parent
+        keys.reverse()
+        pages.reverse()
+        ps = self.page_size
+        prev = None
+        chain: List[bytes] = []
+        for k in keys:
+            for off in range(0, len(k), ps):
+                prev = chain_page_key(prev, tuple(k[off:off + ps].tolist()))
+                chain.append(prev)
+        return VictimPath(prev, sum(len(k) for k in keys), tuple(chain), torch.cat(pages), None)
+
+    def _nodes(self) -> List[RadixTreeNode]:
+        out, stack = [], [self.root_node]
+        while stack:
+            n = stack.pop()
+            if not n.is_root():
+                out.append(n)
+            stack.extend(n.children.values())
+        return out
 
     def reset(self) -> None:
         raise NotImplementedError("RadixManager.reset is not implemented")
@@ -236,11 +320,12 @@ class RadixPrefixCache(BasePrefixCache):
 
         return leave_nodes
 
-    def _tree_walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
+    def _tree_walk(self, input_ids: torch.Tensor,
+                   stamp: bool = True) -> Tuple[RadixTreeNode, int]:
         prefix_len = 0
         indice_len = len(input_ids)
         node = self.root_node
-        tic = time.monotonic_ns()
+        tic = time.monotonic_ns() if stamp else 0
 
         while prefix_len < indice_len:
             child_node = node.children.get(self.key_fn(input_ids[prefix_len:]))
@@ -256,11 +341,13 @@ class RadixPrefixCache(BasePrefixCache):
             # need to split the node if not fully matched
             if match_len != node.length:
                 node = node.split_at(match_len)
-                node.timestamp = tic
+                if stamp:
+                    node.timestamp = tic
                 return node, prefix_len
 
             # update timestamp for accessed node
-            node.timestamp = tic
+            if stamp:
+                node.timestamp = tic
 
         return node, prefix_len
 

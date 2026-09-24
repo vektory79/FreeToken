@@ -111,12 +111,15 @@ class HybridRadixCache:
             cur = cur.parent
         return HybridMatch(self.empty, 0, None, self.root)
 
-    def owned_prefix(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int, torch.Tensor]:
+    def owned_prefix(self, input_ids: torch.Tensor, *,
+                     stamp: bool = True) -> Tuple[RadixTreeNode, int, torch.Tensor]:
         """(node, prefix_len, pages): the frontier of tree-owned KV along input_ids - live
         snapshots and KV-only tombstones ALIKE keep their pages - plus the node ending at
         that frontier and its collected page indices. The session-tier restore restores only
-        the missing suffix; the returned node pins the tree-owned prefix for the request."""
-        node, prefix_len = self._walk(input_ids)
+        the missing suffix; the returned node pins the tree-owned prefix for the request.
+        stamp=False is the idle prefetch walk: it must not refresh node LRU currency
+        (speculative interest must not outrank real admissions)."""
+        node, prefix_len = self._walk(input_ids, stamp=stamp)
         return node, prefix_len, self._collect_kv(node)
 
     def snapshot_victim_paths(self) -> List[VictimPath]:
@@ -366,10 +369,10 @@ class HybridRadixCache:
             stack.extend(n.children.values())
         return out
 
-    def _walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
+    def _walk(self, input_ids: torch.Tensor, stamp: bool = True) -> Tuple[RadixTreeNode, int]:
         prefix_len, total = 0, len(input_ids)
         node = self.root
-        tic = time.monotonic_ns()
+        tic = time.monotonic_ns() if stamp else 0
         while prefix_len < total:
             child = node.children.get(self.key_fn(input_ids[prefix_len:]))
             if child is None:
@@ -379,9 +382,11 @@ class HybridRadixCache:
             prefix_len += match_len
             if match_len != node.length:
                 node = node.split_at(match_len)
-                node.timestamp = tic
+                if stamp:
+                    node.timestamp = tic
                 return node, prefix_len
-            node.timestamp = tic
+            if stamp:
+                node.timestamp = tic
         return node, prefix_len
 
 

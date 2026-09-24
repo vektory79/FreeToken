@@ -1309,7 +1309,7 @@ def test_session_tier_snapshot_only_rerestore_over_adopted_span():
     cm.check_integrity()                         # ledger balanced
 
 
-# ------------------------------------------- S-wave: per-handle pending + QSA guard
+# ----------------------------- S-wave: per-handle pending + QSA page codec
 
 
 def test_pending_restore_is_per_handle():
@@ -1337,26 +1337,1083 @@ def test_pending_restore_is_per_handle():
     assert cm._tier_pending_restore == {}
 
 
-def test_tier_refuses_qsa_pool(monkeypatch):
-    """S-wave fails-before: QSAKVCache passes the _kv_buffer gate, so tier flags on a
-    qwen4_exp model activated the tier with an INCOMPLETE codec (no _cmp_k_buffer slab) -
-    silent corruption on the QSA layers. The guard refuses activation; tier = off-mode."""
+def _qsa_pool(monkeypatch, *, mrope=False, num_pages=16, page_size=16, index_ratio=4):
+    """Real QSAKVCache (Qwen3.8-Flash-Next geometry scaled down): 4 sparse slabs, ratio 4,
+    so page_size 16 -> 4 slab rows per page. TP singleton like tests/kvcache/test_qsa_pool."""
+    from freetoken.distributed.info import DistributedInfo
     from freetoken.kvcache.qsa_pool import QSAKVCache
-    from freetoken.scheduler import cache as cache_mod
-    from freetoken.scheduler.cache import SessionTierCfg
 
-    qsa = QSAKVCache.__new__(QSAKVCache)         # capability probe only, no runtime init
-    qsa._kv_buffer = torch.zeros(2, 2, 4, 1, 2, 4, dtype=torch.bfloat16)
+    monkeypatch.setattr("freetoken.kvcache.mha_pool.get_tp_info",
+                        lambda: DistributedInfo(rank=0, size=1))
+    return QSAKVCache(
+        num_kv_heads=2, num_layers=8, head_dim=64, num_pages=num_pages,
+        page_size=page_size, dtype=torch.bfloat16, device=torch.device("cpu"),
+        index_head_dim=32, num_index_layers=4, index_ratio=index_ratio,
+        num_req_slots=4, mrope=mrope, layer_ids=(1, 3, 5, 7),
+    )
+
+
+def test_tier_activates_qsa_pool(monkeypatch):
+    """QSA codec wave: the interim blanket refusal is replaced by the complete codec, so a
+    healthy QSAKVCache (slab + rope tiers present) now ACTIVATES the tier. Fails-before by
+    construction: pre-change _tier_refusal_reason refused every QSA pool (the restored
+    pages would serve stale slab rows -> wrong block selection on the QSA layers)."""
+    from freetoken.scheduler.cache import SessionTierCfg, _tier_refusal_reason
+
+    qsa = _qsa_pool(monkeypatch, mrope=True)
+    assert _tier_refusal_reason(qsa) is None
+    pool, pt = _pool(), torch.zeros(4, 256, dtype=torch.int32)
+    cm = CacheManager(16, 16, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=qsa,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert cm._tier_on and cm.tier_store is not None
+    assert cm._page_bytes._cmp is qsa._cmp_k_buffer
+    assert cm._page_bytes._rope is qsa._rope_positions
+    mr = cm.match_req(_pend([1, 2, 3]))          # hooks stay inert exactly like off-mode
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+
+
+def test_qsa_refusal_narrows_to_uncoverable_variants(monkeypatch):
+    """The refusal is no longer keyed on the pool TYPE: a healthy QSA pool passes; only an
+    uncoverable layout refuses loudly with the tier off. page_size % index_ratio != 0 needs
+    no refusal branch - the QSA pool constructor rejects it (ValueError) before the tier
+    ever sees the pool; a detached slab is the defensive case this pin keeps loud."""
+    from freetoken.scheduler import cache as cache_mod
+    from freetoken.scheduler.cache import SessionTierCfg, _tier_refusal_reason
+
+    qsa = _qsa_pool(monkeypatch)
+    assert _tier_refusal_reason(qsa) is None
+    qsa._cmp_k_buffer = None                     # uncoverable variant (defensive)
+    assert _tier_refusal_reason(qsa) is not None
     seen = []
     monkeypatch.setattr(cache_mod.logger, "warning",
                         lambda msg, *a: seen.append(msg % a if a else msg))
-    pool, pt = _pool(), torch.zeros(4, 64, dtype=torch.int32)
-    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=qsa,
+    pool, pt = _pool(), torch.zeros(4, 256, dtype=torch.int32)
+    cm = CacheManager(16, 16, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=qsa,
                       session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
     assert cm.tier_store is None and not cm._tier_on
     assert any("session tier refused" in m for m in seen)
-    mr = cm.match_req(_pend([1, 2, 3]))          # hooks no-op exactly like off-mode
+
+
+def test_kv_page_bytes_qsa_layout_roundtrip(monkeypatch):
+    """The QSA page codec demotes the K/V page TOGETHER with its compressed-slab rows
+    [page*ps/ratio, (page+1)*ps/ratio) and its rope rows [page*ps, (page+1)*ps). The
+    per-request scratch rows (past cmp_scratch_base) must stay OUT of the page bytes: a
+    restored tenant rebuilds them in its own forwards. Non-mrope pools have no rope tier;
+    quantized pools add the generic scale buffers on top (fake variant, CUDA-free)."""
+    from freetoken.kvcache.qsa_pool import QSAKVCache
+    from freetoken.scheduler.cache import _KVPageBytes
+
+    for mrope in (True, False):
+        qsa = _qsa_pool(monkeypatch, mrope=mrope)
+        codec = _KVPageBytes(qsa)
+        n = len(codec.read_page(2))
+        kv = qsa._kv_buffer[:, :, 2].numel() * qsa._kv_buffer.element_size()
+        slab = qsa._cmp_k_buffer[:, 8:12, :].numel() * qsa._cmp_k_buffer.element_size()
+        rope = (16 * 3 * 4) if mrope else 0      # _rope_positions rows are int32
+        assert n == kv + slab + rope
+        original = codec.read_page(2)
+        blob = bytes((i * 37 + 5) % 256 for i in range(n))
+        codec.write_page(2, blob)
+        assert codec.read_page(2) == blob
+        # the write landed in page 2's slab rows only: groups of other pages and the
+        # scratch rows stay zero
+        assert qsa._cmp_k_buffer[:, :8, :].abs().sum().item() == 0
+        assert qsa._cmp_k_buffer[:, 12:, :].abs().sum().item() == 0
+        codec.write_page(2, original)
+        assert codec.read_page(2) == original
+
+    # quantized variant: fp8-style scale buffers locate at dim 2 exactly like the MHAKV
+    # family; the slab + rope append AFTER them (same order on read and write)
+    qsa = QSAKVCache.__new__(QSAKVCache)         # capability probe, no runtime init
+    qsa._index_ratio = 2
+    qsa._kv_buffer = torch.zeros(2, 2, 8, 4, 2, 4, dtype=torch.bfloat16)
+    qsa._scale_buffer = torch.zeros(2, 2, 32, 2, dtype=torch.float32)
+    qsa._block_scale_buffer = None
+    qsa._cmp_k_buffer = torch.zeros(3, 16 + 2, 6, dtype=torch.bfloat16)
+    qsa._rope_positions = torch.zeros(32, 3, dtype=torch.int32)
+    codec = _KVPageBytes(qsa)
+    n = len(codec.read_page(5))
+    assert n == (2 * 2 * 4 * 2 * 4 * 2 + 2 * 2 * 4 * 2 * 4 + 3 * 2 * 6 * 2 + 4 * 3 * 4)
+    blob = bytes((i * 11 + 3) % 256 for i in range(n))
+    codec.write_page(5, blob)
+    assert codec.read_page(5) == blob
+
+
+def test_kv_page_bytes_kpooldsa_layout_roundtrip():
+    """ITEM-3: the KpoolDSA page codec demotes the latent page + its 2-D fp8 scales
+    TOGETHER with the 1/ratio page-owned index-shadow rows [page*ps/ratio,
+    (page+1)*ps/ratio) per indexer layer. The per-request scratch rows (past
+    cmp_scratch_base) and the tail rings stay OUT of the page bytes: per-forward state a
+    restored tenant rebuilds (dsa_pool.KpoolDSAKVCache docstring). Fails-before by
+    construction: the W2 matrix class-refused KpoolDSAKVCache, so no codec existed."""
+    from freetoken.kvcache.dsa_pool import KpoolDSAKVCache
+    from freetoken.scheduler.cache import _KVPageBytes
+
+    kpool = KpoolDSAKVCache(latent_dim=16, num_layers=2, num_pages=8, page_size=4,
+                            dtype=torch.bfloat16, device=torch.device("cpu"),
+                            index_head_dim=6, num_index_layers=3, index_ratio=2,
+                            num_req_slots=4, kv_quant="fp8")
+    codec = _KVPageBytes(kpool)
+    n = len(codec.read_page(2))
+    kv = kpool._kv_buffer[:, :, 2].numel()                 # uint8 latents
+    scale = kpool._scale_buffer[:, 8:12].numel() * 4       # fp32 token rows
+    shadow = kpool._index_k_buffer[:, 4:6, :].numel() * 2  # bf16 shadow rows
+    assert n == kv + scale + shadow
+    original = codec.read_page(2)
+    blob = bytes((i * 41 + 7) % 256 for i in range(n))
+    codec.write_page(2, blob)
+    assert codec.read_page(2) == blob
+    # the write landed in page 2's shadow rows only: other rows, the scratch rows (past
+    # cmp_scratch_base = 16) and the tail rings stay zero
+    assert kpool._index_k_buffer[:, :4, :].abs().sum().item() == 0
+    assert kpool._index_k_buffer[:, 6:, :].abs().sum().item() == 0
+    assert kpool._tail_k.abs().sum().item() == 0 and kpool._tail_gate.abs().sum().item() == 0
+    codec.write_page(2, original)
+    assert codec.read_page(2) == original
+
+
+def test_session_tier_qsa_restore_roundtrip_bit_exact(monkeypatch):
+    """End-to-end QSA seam: an eviction offer reads kv+slab+rope bytes for the victim's
+    pages; a restored admission writes them back BIT-EXACTLY into fresh pages. Fails-before
+    by construction: pre-change the guard refused activation; with the old KV-only codec
+    the restored pages would serve a hostile next tenant's stale slab rows. The whole pool
+    is zeroed after the wash so any tier the codec forgets comes back as zeros, not as the
+    donor's surviving values."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    qsa = _qsa_pool(monkeypatch, mrope=True)
+    pool, pt = _pool(), torch.zeros(4, 256, dtype=torch.int32)
+    cm = CacheManager(16, 16, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=qsa,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert cm._tier_on                           # activation itself fails-before
+    ids = list(range(1, 65))                     # 64 tokens = 4 pages
+    mr = cm.match_req(_pend(ids))                # cold admission tracks the session
+    pages = cm._allocate(4)                      # token bases [0,16,32,48]: one per page
+    for p in range(4):
+        pt[0, p * 16:(p + 1) * 16] = int(pages[p])
+    rps = 16 // qsa.index_ratio                  # slab rows per page
+    for p in range(4):
+        qsa._kv_buffer[:, :, p] = float(p) * 1.5
+        qsa._cmp_k_buffer[:, p * rps:(p + 1) * rps, :] = float(p) + 0.25
+        qsa._rope_positions[p * 16:(p + 1) * 16, :] = torch.arange(
+            p * 16, (p + 1) * 16, dtype=torch.int32).unsqueeze(1)
+    kv_ref = [qsa._kv_buffer[:, :, p].clone() for p in range(4)]
+    slab_ref = [qsa._cmp_k_buffer[:, p * rps:(p + 1) * rps, :].clone() for p in range(4)]
+    rope_ref = [qsa._rope_positions[p * 16:(p + 1) * 16].clone() for p in range(4)]
+
+    live, pp = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0,
+              cached_len=64, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = live, pp
+    req.mamba_next_track_idx = 1
+    req.mamba_last_track_seqlen = 64             # donate the x64 snapshot
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req, finished=False)
+    cm.unlock(req.cache_handle)
+    cm.ensure_mamba_slots(pool.num_slots)        # wash: the tip demotes to the store
+    hit = cm.tier_store.probe(cm._chain_keys(torch.tensor(ids, dtype=torch.int32)))
+    assert hit is not None and hit[0] == 4       # 4 pages offered
+
+    # hostile next tenant: every tier of every page zeroed; the restore must rebuild ALL
+    # of them, not just the K/V page the phase-1 codec knew
+    qsa._kv_buffer.zero_()
+    qsa._cmp_k_buffer.zero_()
+    qsa._rope_positions.zero_()
+
+    mr2 = cm.match_req(_pend(ids + [99]))        # restored admission: 64 tokens + 1 slot
+    assert mr2.cuda_handle.cached_len == 64 and mr2.cuda_handle.tier_restored
+    assert mr2.mamba_value is not None           # the boundary snapshot rides along
+    matched = mr2.cuda_handle.get_matched_indices()
+    for p in range(4):
+        page = int(matched[p * 16]) // 16
+        assert torch.equal(qsa._kv_buffer[:, :, page], kv_ref[p])
+        assert torch.equal(qsa._cmp_k_buffer[:, page * rps:(page + 1) * rps, :], slab_ref[p])
+        assert torch.equal(qsa._rope_positions[page * 16:(page + 1) * 16], rope_ref[p])
+    # the restore's own scratch rows stay zero (per-request tier, rebuilt per forward)
+    assert qsa._cmp_k_buffer[:, qsa.cmp_scratch_base:, :].abs().sum().item() == 0
+
+
+# --------------------- W2 generic brief: KV-only tier on a plain radix manager
+
+
+def _kvonly_cm(kvpool, pt, ram=1 << 22, num_pages=64, page_size=1):
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    return CacheManager(num_pages, page_size, pt, "radix", swa_pool=kvpool,
+                        session_tier_cfg=SessionTierCfg(ram_bytes=ram))
+
+
+def _kv_bytes(kvpool, page: int) -> bytes:
+    return kvpool._kv_buffer[:, :, page].contiguous().cpu() \
+        .view(torch.uint8).numpy().tobytes()
+
+
+def _fill_pages(cm, kvpool, pt, ids, uid=0):
+    """Allocate len(ids) page bases, stamp recognizable bytes into the pool and the pt row
+    (ps==1: one token per page). Returns (page bases, {page: original bytes})."""
+    pages = cm._allocate(len(ids))
+    pt[uid, :len(ids)] = pages
+    originals = {}
+    for pg in pages:
+        pg = int(pg)
+        kvpool._kv_buffer[:, :, pg] = float(pg) * 1.5
+        originals[pg] = _kv_bytes(kvpool, pg)
+    return pages, originals
+
+
+def test_kvonly_tier_activates_on_plain_radix_and_stays_off_elsewhere():
+    """Generic brief: a plain radix manager (no LinearStatePool) with tier flags runs the
+    KV-only currency; naive has no tree (no boundaries to index) and stays off."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    assert cm._tier_on and cm.tier_store is not None and cm._page_bytes is not None
+    mr = cm.match_req(_pend([1, 2, 3]))          # hooks run on the plain path
     assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    assert len(cm._tier_sessions) == 1           # admission bookkeeping ran
+
+    naive = CacheManager(64, 1, pt, "naive", swa_pool=_FakeKVPool(),
+                         session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert naive.tier_store is None and not naive._tier_on
+
+
+def test_kvonly_refusal_matrix_loud(monkeypatch):
+    """Coverage matrix: only page-owned tiers byte-encode. BSA (index-key slab) holds a
+    tier the codec must not silently drop -> loud refusal; a pool without _kv_buffer
+    (Hybrid-SWA / DSV4 families) falls to the generic no-codec warning. KpoolDSA is
+    COVERED since the ITEM-3 codec branch (page-owned 1/ratio index shadow; scratch rows
+    and tail rings are per-forward state) - it activates like QSA."""
+    from freetoken.distributed.info import DistributedInfo
+    from freetoken.kvcache.bsa_pool import BSAKVCache
+    from freetoken.kvcache.dsa_pool import KpoolDSAKVCache
+    from freetoken.scheduler import cache as cache_mod
+    from freetoken.scheduler.cache import SessionTierCfg, _tier_refusal_reason
+
+    monkeypatch.setattr("freetoken.kvcache.mha_pool.get_tp_info",
+                        lambda: DistributedInfo(rank=0, size=1))
+    bsa = BSAKVCache(num_kv_heads=2, num_layers=2, head_dim=16, num_pages=4, page_size=1,
+                     dtype=torch.bfloat16, device=torch.device("cpu"),
+                     index_head_dim=8, num_index_layers=2)
+    kpool = KpoolDSAKVCache(latent_dim=16, num_layers=2, num_pages=4, page_size=1,
+                            dtype=torch.bfloat16, device=torch.device("cpu"),
+                            index_head_dim=8, num_index_layers=2,
+                            index_ratio=1, num_req_slots=4)
+    assert _tier_refusal_reason(bsa) is not None
+    assert _tier_refusal_reason(kpool) is None   # ITEM-3: covered by the codec branch
+    seen = []
+    monkeypatch.setattr(cache_mod.logger, "warning",
+                        lambda msg, *a: seen.append(msg % a if a else msg))
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "radix", swa_pool=bsa,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert cm.tier_store is None and not cm._tier_on
+    assert any("session tier refused" in m for m in seen)
+    seen.clear()
+    cm2 = CacheManager(64, 1, pt, "radix",
+                       swa_pool=SimpleNamespace(swa_paged=False),   # no _kv_buffer
+                       session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert cm2.tier_store is None and not cm2._tier_on
+    assert any("no paged-KV byte codec" in m for m in seen)
+
+
+def test_kvonly_adaptive_set_degenerates_to_tip():
+    """KV-only tip-only set: without snapshots the tip segment serves every shallower
+    resume (probe matches the common chain prefix; restore depth-truncates its pages), so
+    the hybrid under-divergence slot is pure overhead. Fails-before: no offer seam ran for
+    the plain path (store empty). Discriminates the rules: with a divergence at 4, the
+    hybrid keep-set would also keep the boundary-4 victim; tip-only must drop it."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 9))                      # 8 tokens = 2 tree nodes
+    cm.match_req(_pend(ids + [9]))               # tip 8 tracked
+    cm.match_req(_pend([1, 2, 3, 4, 99, 98]))    # divergence at 4 (st[1] = 4)
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids[:4], dtype=torch.int32), pages[:4])
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+
+    cm._allocate(61)                             # pressure: one eviction pops BOTH leaves
+                                                 # (B first, then exposed A as a leaf) and
+                                                 # auto-offers both through the same seam
+    chain8 = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    held = {seg.path_key for seg in cm.tier_store._segments.values()}
+    assert held == {chain8[-1]}                  # tip-only: the boundary-4 victim dropped
+
+    # justification: a resume diverging at 4 restores the shared [0:4) pages from the TIP
+    # segment - the under-divergence boundary would have stored the same bytes again
+    hit = cm.tier_store.probe(cm._chain_keys(torch.tensor(ids[:4], dtype=torch.int32)))
+    assert hit is not None and hit[0] == 4
+    got, snaps = cm.tier_store.restore(hit[1])
+    assert snaps == []
+    assert got == [originals[int(pg)] for pg in pages[:4]]
+
+
+def test_kvonly_restore_feeds_normal_insert_path():
+    """Cold tree + warm store: the store hit restores byte-identical KV pages WITHOUT a
+    re-prefill, the restored handle feeds the normal insert path (the commit's
+    insert_prefix adopts the pages and the tree re-grows), consuming exactly the free
+    pages the replaced re-prefill would. Fails-before: cached_len stayed 0 (no restore
+    on the plain path)."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids))                     # track the session (cold)
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)                      # wash: tree empty, store warm
+    assert cm.prefix_cache.size_info.total_size == 0
+
+    frees_before = len(cm.free_slots)
+    mr = cm.match_req(_pend(ids + [99]))
+    assert mr.cuda_handle.cached_len == 12
+    assert mr.mamba_value is None                # KV-only: no slot rides along
+    matched = mr.cuda_handle.get_matched_indices()
+    assert matched.numel() == 12
+    for j in range(12):
+        assert _kv_bytes(kvpool, int(matched[j])) == originals[int(pages[j])]
+    assert len(cm.free_slots) == frees_before - 12   # budget: same as the re-prefill
+
+    cm.lock(mr.cuda_handle)
+    pt[0, :12] = matched                         # what the admission writes (prefill.py)
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0,
+              cached_len=12, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    cm.cache_req(req, finished=True)
+    cm.check_integrity()                         # ledger balanced after the adoption
+    m = cm.prefix_cache.match_prefix(torch.tensor(ids, dtype=torch.int32))
+    assert m.cuda_handle.cached_len == 12        # the tree re-grew over the restored span
+
+
+def test_kvonly_restore_restores_only_the_unowned_suffix():
+    """owned_prefix interplay: the tree owns [0:4) (a live KV-only node) and the store's
+    boundary is deeper (8): the restore takes only the missing [4:8) fresh pages - the
+    tree's pages stay in place and ride the handle. Fails-before: no restore on the plain
+    path (cached_len 0)."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend([1, 2, 3, 4, 5]))         # cold admission tracks the session
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids[:4], dtype=torch.int32), pages[:4])
+    chain = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    cm._tier_offer([VictimPath(chain[7], 8, tuple(chain[:8]), pages[:8], None)])
+    cm._free(pages[4:])                          # the offer covered [0:8); drop the rest
+
+    mr = cm.match_req(_pend(ids + [99]))
+    assert mr.cuda_handle.cached_len == 8
+    matched = mr.cuda_handle.get_matched_indices()
+    assert matched[:4].tolist() == pages[:4].tolist()    # tree-owned prefix untouched
+    for j in range(4, 8):
+        assert _kv_bytes(kvpool, int(matched[j])) == originals[int(pages[j])]
+    assert len(cm.free_slots) == 64 - 4 - 4      # only 4 fresh pages taken
+
+    cm.lock(mr.cuda_handle)
+    pt[0, :8] = matched
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0,
+              cached_len=8, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    cm.cache_req(req, finished=True)
+    cm.check_integrity()
+    m = cm.prefix_cache.match_prefix(torch.tensor(ids[:8], dtype=torch.int32))
+    assert m.cuda_handle.cached_len == 8
+
+
+def test_kvonly_abandon_restore_returns_pages():
+    """A restored-but-refused KV-only admission returns its fresh pages (no slot); a
+    second restore is unaffected; lock() consumes the record so a late abandon is a
+    no-op. Fails-before: no restore ran (cached_len 0)."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids))
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)
+
+    mr = cm.match_req(_pend(ids + [99]))
+    assert mr.cuda_handle.cached_len == 12
+    held = len(cm.free_slots)                    # 52: the 12 restored pages are held
+    cm.abandon_restore(mr.cuda_handle)
+    assert len(cm.free_slots) == held + 12
+    assert cm._tier_pending_restore == {}
+    cm.abandon_restore(mr.cuda_handle)           # idempotent
+    assert len(cm.free_slots) == held + 12
+
+    mr2 = cm.match_req(_pend(ids + [99]))        # a second restore after the refusal
+    assert mr2.cuda_handle.cached_len == 12
+    pages_mid = len(cm.free_slots)
+    cm.lock(mr2.cuda_handle)                     # admission consumes the record
+    cm.abandon_restore(mr2.cuda_handle)          # no double return
+    assert len(cm.free_slots) == pages_mid
+    assert cm._tier_pending_restore == {}
+
+
+def test_kvonly_restore_refuses_tree_owned_span():
+    """Regression pin: the store's boundary can be SHALLOWER than the tree's surviving
+    match (both keep their pages); the restore must fire only when its span is wholly
+    novel, else restored duplicates of tree-owned KV leak at the commit-time dedup."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids13 = list(range(1, 14))
+    cm.match_req(_pend(ids13))                   # tracks the session
+    pages, originals = _fill_pages(cm, kvpool, pt, ids13[:11])
+    cm.prefix_cache.insert_prefix(torch.tensor(ids13[:11], dtype=torch.int32), pages)
+    chain = cm._chain_keys(torch.tensor(ids13, dtype=torch.int32))
+    cm._tier_offer([VictimPath(chain[7], 8, tuple(chain[:8]), pages[:8], None)])
+
+    held = len(cm.free_slots)                    # 53: the offer only read bytes
+    mr = cm.match_req(_pend(ids13 + [99]))
+    assert mr.cuda_handle.cached_len == 11       # the deeper tree match serves the request
+    assert len(cm.free_slots) == held            # nothing taken
+    assert cm._tier_pending_restore == {}
+    hit = cm.tier_store.probe(chain)
+    assert hit is not None and hit[0] == 8       # the store segment is intact, just unused
+
+
+def test_kvonly_restore_units_at_page_size_gt_1():
+    """ps>1 units: probe depth is PAGES, cached_len TOKENS; a partially tree-owned span
+    restores only the missing page. Pins both the plain-path wiring and the units fix
+    (pre-fix the gate compared tokens to pages and refused the restore)."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    kvpool = _FakeKVPool(pages=16, page_size=4)
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(16, 4, pt, "radix", swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    ids = list(range(1, 9))                      # 8 tokens = 2 pages
+    cm.match_req(_pend([1, 2, 3, 4, 5]))         # cold admission tracks the session
+    pages = cm._allocate(2)                      # page bases 0 and 4
+    pt[0, :4] = pages[0]
+    pt[0, 4:8] = pages[1]
+    for pg in range(2):
+        kvpool._kv_buffer[:, :, pg] = float(pg) * 1.5
+    originals = [_kv_bytes(kvpool, pg) for pg in range(2)]
+    cm.prefix_cache.insert_prefix(torch.tensor(ids[:4], dtype=torch.int32), pt[0, :4])
+    chain = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    cm._tier_offer([VictimPath(chain[-1], 8, tuple(chain), pt[0, :8], None)])
+    cm._free(pt[0, 4:8])                         # the offer covered both pages
+
+    mr = cm.match_req(_pend(ids + [99]))
+    assert mr.cuda_handle.cached_len == 8        # 2 pages, not 2 tokens
+    matched = mr.cuda_handle.get_matched_indices()
+    assert matched[:4].tolist() == pt[0, :4].tolist()    # tree-owned page untouched
+    assert _kv_bytes(kvpool, int(matched[4]) // 4) == originals[1]
+    assert len(cm.free_slots) == 16 - 1 - 1      # one fresh page taken
+
+    cm.lock(mr.cuda_handle)
+    pt[0, :8] = matched
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0,
+              cached_len=8, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    cm.cache_req(req, finished=True)
+    cm.check_integrity()
+    m = cm.prefix_cache.match_prefix(torch.tensor(ids, dtype=torch.int32))
+    assert m.cuda_handle.cached_len == 8
+
+
+def test_kvonly_off_mode_untouched():
+    """No tier cfg (or a disabled cfg) on a plain radix manager: zero new behavior - no
+    store, no admission bookkeeping, plain evict returns pages exactly as today."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    for cfg in (None, SessionTierCfg()):
+        kvpool = _FakeKVPool()
+        pt = torch.zeros(4, 64, dtype=torch.int32)
+        cm = CacheManager(64, 1, pt, "radix", swa_pool=kvpool, session_tier_cfg=cfg)
+        assert cm.tier_store is None and not cm._tier_on and cm._page_bytes is None
+        mr = cm.match_req(_pend([1, 2, 3]))
+        assert mr.cuda_handle.cached_len == 0
+        assert cm._tier_sessions == {}           # no admission bookkeeping
+        pages = cm._allocate(4)
+        cm.prefix_cache.insert_prefix(torch.tensor([1, 2, 3, 4], dtype=torch.int32), pages)
+        evicted = cm.prefix_cache.evict(1)       # plain evict: no derive seam
+        cm._free(evicted[::cm.page_size])
+        assert len(cm.free_slots) == 64          # full ledger, no store touched
+
+
+def test_kvonly_plain_pool_codec_roundtrip():
+    """The plain MHAKV family (kv + fp8-style scale sidecar) byte-encodes through the
+    same _KVPageBytes and activates a KV-only manager. Fails-before by construction: the
+    plain manager never activated, so the scale-bearing pool had no tier there."""
+    from freetoken.scheduler.cache import _KVPageBytes, SessionTierCfg
+
+    class _FakeMHAScale:
+        swa_paged = False
+
+        def __init__(self):
+            self._kv_buffer = torch.zeros(2, 2, 16, 4, 2, 4, dtype=torch.bfloat16)
+            self._scale_buffer = torch.zeros(2, 2, 16 * 4, 2, dtype=torch.float32)
+            self._block_scale_buffer = None
+
+    kvpool = _FakeMHAScale()
+    codec = _KVPageBytes(kvpool)
+    n = len(codec.read_page(3))
+    blob = bytes((i * 29 + 7) % 256 for i in range(n))
+    codec.write_page(3, blob)
+    assert codec.read_page(3) == blob
+
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(16, 4, pt, "radix", swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    assert cm._tier_on and cm._page_bytes is not None
+
+
+def test_kvonly_shutdown_offers_live_boundaries():
+    """The graceful-shutdown seam offers the KV-only tree's live tip per tracked session
+    (the hybrid seam offers its snapshot boundaries); without it the tip dies with the
+    process and the post-reboot first turn falls back to a full re-prefill. Fails-before:
+    the plain path never reached the shutdown offer (store stayed empty)."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 9))
+    cm.match_req(_pend(ids))                     # track the session (cold)
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+
+    assert cm.shutdown_tier() == 0               # L1-only store: nothing to flush to L2
+    chain8 = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    held = {seg.path_key for seg in cm.tier_store._segments.values()}
+    assert held == {chain8[-1]}                  # the live tip was offered before the flush
+    hit = cm.tier_store.probe(chain8)
+    assert hit is not None and hit[0] == 8
+    got, snaps = cm.tier_store.restore(hit[1])
+    assert got == [originals[int(pg)] for pg in pages] and snaps == []
+
+
+# ------------------------------------------------------- idle restore prefetch (phase 2)
+
+
+def _settle_tier(cm, timeout=5.0):
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    store = cm.tier_store
+    while not store._tickets_settled():
+        assert _time.monotonic() < deadline, "prefetch worker did not settle"
+        _time.sleep(0.001)
+
+
+def _washed_hybrid_cm():
+    """Donated tip washed out of the tree: tree empty, store warm, session tracked with
+    its last seen stripped ids [1, 2, 3, 4]."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    original, donated, _req = _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)            # tiered eviction: the tip goes
+    assert cm.prefix_cache.full_evictable == 0
+    return cm, pool, kvpool, original
+
+
+def test_prefetch_idle_stages_and_adopt_skips_sync_read():
+    """The idle hook stages the tracked session's tip (bytes + reservation); the next
+    admission ADOPTS the staging through the shared restore tail: byte-exact pages, the
+    RESERVED slot rides the match, and the sync store read never runs. Fails-before:
+    no prefetch seam existed (cached_len came from the sync restore instead)."""
+    cm, pool, kvpool, original = _washed_hybrid_cm()
+    key = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))[0]
+    free_before, slots_before = len(cm.free_slots), pool.num_free_slots
+    cm.prefetch_tier_idle()
+    entry = cm._tier_prefetch[key]
+    assert entry is not None and entry.res_slot is not None
+    _settle_tier(cm)
+    assert entry.ticket.state == "ready"
+    assert len(cm.free_slots) == free_before - 4     # reservation carved at prefetch START
+    assert pool.num_free_slots == slots_before - 1   # the snapshot slot is reserved too
+    assert cm._tier_reserved_pages == 4
+
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))        # admission adopts the staging
+    assert mr.cuda_handle.cached_len == 4
+    assert mr.mamba_value == entry.res_slot          # the RESERVED slot, not a fresh alloc
+    matched = mr.cuda_handle.get_matched_indices()
+    assert matched.tolist() == [0, 1, 2, 3]          # the reserved head pages
+    for j in range(4):
+        assert kvpool._kv_buffer[:, :, j].contiguous().cpu() \
+            .view(torch.uint8).numpy().tobytes() == original[100 + j]
+    snap = cm.tier_store.snapshot()
+    assert snap["prefetch_adopt"] == 1
+    assert snap["restore_l1"] == 0 and snap["restore_l2"] == 0   # the sync read never ran
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert len(cm.free_slots) == free_before - 4     # converted, not re-spent
+    assert pool.num_free_slots == slots_before - 1
+    assert mr.cuda_handle.node.is_root()
+
+
+def test_prefetch_adopt_then_abandon_returns_pages_and_slot():
+    """abandon_restore on an ADOPTED match returns the reserved pages and slot exactly
+    like the sync path's B4 pin - and never double-returns (the entry was consumed)."""
+    cm, pool, kvpool, _original = _washed_hybrid_cm()
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    free_staged, slots_staged = len(cm.free_slots), pool.num_free_slots
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))
+    assert mr.cuda_handle.cached_len == 4            # adopted
+    cm.abandon_restore(mr.cuda_handle)               # admission refused
+    assert len(cm.free_slots) == free_staged + 4
+    assert pool.num_free_slots == slots_staged + 1
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert cm._tier_pending_restore == {}
+    cm.abandon_restore(mr.cuda_handle)               # idempotent
+    assert len(cm.free_slots) == free_staged + 4 and pool.num_free_slots == slots_staged + 1
+
+
+def test_prefetch_reservation_returned_on_direct_drop():
+    """Dropping a ticket without an admission (supersede/reap/shutdown path) returns the
+    whole reservation and frees the staging - nothing consumed."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids + [99]))                  # seen ids cover the full 12-page tip
+    pages, _originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)                          # wash: tree empty, store warm
+    key = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))[0]
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    assert key in cm._tier_prefetch
+    assert len(cm.free_slots) == 64 - 12 and cm._tier_reserved_pages == 12
+    cm._tier_prefetch_drop(key)
+    assert len(cm.free_slots) == 64 and cm._tier_reserved_pages == 0
+    assert cm._tier_prefetch == {} and cm.tier_store._tickets == {}
+    assert cm.tier_store.snapshot()["prefetch_abandon"] == 1
+
+
+def test_prefetch_kvonly_adopt_byte_exact_and_ledger_balanced():
+    """KV-only adopt: staged pages land byte-exact, the handle feeds the normal insert
+    path, and the exact idle ledger stays balanced WHILE the reservation is live (the
+    reserved pages sit outside free_slots until adopt)."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids + [99]))
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    assert len(cm._tier_prefetch) == 1 and cm._tier_reserved_pages == 12
+    cm.check_integrity()                             # the ledger term carries the reservation
+
+    mr = cm.match_req(_pend(ids + [99]))
+    assert mr.cuda_handle.cached_len == 12 and mr.mamba_value is None
+    matched = mr.cuda_handle.get_matched_indices()
+    for j in range(12):
+        assert _kv_bytes(kvpool, int(matched[j])) == originals[int(pages[j])]
+    snap = cm.tier_store.snapshot()
+    assert snap["prefetch_adopt"] == 1
+    assert snap["restore_l1"] == 0 and snap["restore_l2"] == 0
+    assert len(cm.free_slots) == 52   # the reservation was converted, not re-spent
+    assert cm._tier_reserved_pages == 0 and cm._tier_prefetch == {}
+
+    cm.lock(mr.cuda_handle)
+    pt[0, :12] = matched
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0,
+              cached_len=12, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    cm.cache_req(req, finished=True)
+    cm.check_integrity()                             # balanced after the adoption too
+    m = cm.prefix_cache.match_prefix(torch.tensor(ids, dtype=torch.int32))
+    assert m.cuda_handle.cached_len == 12            # the tree re-grew over the restored span
+
+
+def test_prefetch_reoffer_supersedes_ticket():
+    """A same-prefix re-offer supersedes a live staging: ticket dropped, staging freed,
+    reservation returned, nothing consumed."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    cm, pool, kvpool, _original = _washed_hybrid_cm()
+    key = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))[0]
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    assert key in cm._tier_prefetch
+    free_staged, slots_staged = len(cm.free_slots), pool.num_free_slots
+    chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    vp = VictimPath(chain4[-1], 4, tuple(chain4), torch.arange(4, dtype=torch.int32), None)
+    cm._tier_offer([vp])                             # same prefix re-offered
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert len(cm.free_slots) == free_staged + 4 and pool.num_free_slots == slots_staged + 1
+    assert cm.tier_store._tickets == {}
+    # the next idle re-stages from the refreshed segment
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    assert key in cm._tier_prefetch
+
+
+def test_prefetch_skipped_when_tree_owns_the_tip():
+    """No speculative waste: while the tree still owns the boundary (the next turn would
+    be a tree hit, not a restore) the idle hook stages nothing and reserves nothing."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)       # tip is LIVE in the tree
+    free_before, slots_before = len(cm.free_slots), pool.num_free_slots
+    cm.prefetch_tier_idle()
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert len(cm.free_slots) == free_before and pool.num_free_slots == slots_before
+    assert cm.tier_store.snapshot()["prefetch_begin"] == 0
+
+
+def test_prefetch_starvation_guard_skips_and_off_mode_noops():
+    """The reserve guard keeps at least half of the then-free pages for live allocation
+    (a speculative staging can never pinch admission to zero); the off-mode hook is an
+    early return with zero behavior change."""
+    cm, pool, kvpool, _original = _washed_hybrid_cm()
+    saved = cm.free_slots
+    cm.free_slots = saved[:6]                        # fresh(4) * 2 > 6: guard trips
+    cm.prefetch_tier_idle()
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert len(cm.free_slots) == 6
+    cm.free_slots = saved
+
+    cm2 = CacheManager(64, 1, torch.zeros(4, 64, dtype=torch.int32), "hybrid_radix",
+                       linear_state_pool=_pool(), swa_pool=_FakeKVPool(),
+                       session_tier_cfg=None)
+    assert cm2._tier_on is False
+    cm2.prefetch_tier_idle()                         # a no-op, never touches anything
+
+
+# ------------------------------------------- review findings F1-F6 (async prefetch TP)
+
+
+def test_kv_page_bytes_refreshed_after_pool_rebuild():
+    """F1 fails-before: a runtime KV resize reallocates the pool's tensors (engine
+    rebuild_from_config -> CacheManager.rebuild); the codec captured _scale_buffer refs at
+    init, so pre-fix restore wrote the scale rows into the DEAD tensor while the live pool
+    served zeros, and a post-rebuild offer read stale scale bytes. The rebuild must refresh
+    _page_bytes."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    class _FakeMHAScalePool:
+        swa_paged = False
+
+        def __init__(self, pages=8):
+            self._kv_buffer = torch.zeros(2, 2, pages, 1, 2, 4, dtype=torch.bfloat16)
+            self._scale_buffer = torch.zeros(2, 2, pages, 2, dtype=torch.float32)
+
+    kvpool = _FakeMHAScalePool(pages=8)
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "radix", swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    ids = list(range(1, 5))
+    cm.match_req(_pend(ids + [9]))               # track the session
+    got = cm._allocate(4)
+    pt[0, :4] = got
+    for pg in got.tolist():
+        kvpool._kv_buffer[:, :, int(pg)] = float(pg) * 1.5
+        kvpool._scale_buffer[:, :, int(pg)] = float(pg) + 0.25
+    old_kv, old_scale = kvpool._kv_buffer.clone(), kvpool._scale_buffer.clone()
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), got)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)                      # bytes read through the PRE-rebuild tensors
+
+    # engine-style runtime resize: the pool swaps in NEW tensors (same shapes)
+    kvpool._kv_buffer = torch.zeros_like(kvpool._kv_buffer)
+    kvpool._scale_buffer = torch.zeros_like(kvpool._scale_buffer)
+    cm.rebuild(64, pt)
+
+    mr = cm.match_req(_pend(ids + [9]))          # tree empty: the store restores
+    assert mr.cuda_handle.cached_len == 4
+    matched = mr.cuda_handle.get_matched_indices()
+    for j, pg in enumerate(got.tolist()):
+        pg = int(pg)
+        assert torch.equal(kvpool._kv_buffer[:, :, int(matched[j])], old_kv[:, :, pg])
+        # stale-ref corruption leaves the LIVE scale rows zero (written into the dead tensor)
+        assert torch.equal(kvpool._scale_buffer[:, :, int(matched[j])], old_scale[:, :, pg])
+    # and a post-rebuild OFFER reads the live tensors (not the stale refs)
+    parts = [kvpool._kv_buffer[:, :, 5], kvpool._scale_buffer[:, :, 5]]
+    direct = b"".join(p.contiguous().cpu().view(torch.uint8).numpy().tobytes() for p in parts)
+    assert cm._page_bytes.read_page(5) == direct
+
+
+def test_prefetch_reap_returns_reservation_after_discard(tmp_path):
+    """F2 fails-before: the store's _discard marks the staged ticket abandoned but the
+    manager entry kept holding its reservation - the idle reap only matched "failed", so
+    the reserved pages leaked forever. The reap must release both states."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "radix", swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22,
+                                                      dir=str(tmp_path / "tier")))
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids + [99]))
+    pages, _originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)
+    key = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))[0]
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    assert len(cm.free_slots) == 52 and cm._tier_reserved_pages == 12
+
+    assert cm.tier_store.evict_store(1) == 1     # demote the staged segment to L2
+    assert cm.tier_store.evict_store(1) == 1     # true discard: the ticket is invalidated
+    assert key in cm._tier_prefetch              # the entry still holds the reservation
+    cm.prefetch_tier_idle()                      # the idle reap returns it (no re-offer)
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert len(cm.free_slots) == 64
+    assert cm.tier_store._tickets == {}
+
+
+def test_prefetch_walk_does_not_refresh_tree_lru():
+    """F5 fails-before: the idle prefetch's owned_prefix walk re-stamped the tree's shared
+    nodes on every idle pass (speculative interest outranking real admissions); with the
+    no-stamp walk the node's timestamp is untouched by prefetch_tier_idle."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids + [99]))
+    pages, _originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids[:8], dtype=torch.int32), pages[:8])
+    chain = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    cm._tier_offer([VictimPath(chain[-1], 12, tuple(chain), pages, None)])
+    cm._free(pages[8:])
+    node, owned, _ = cm.prefix_cache.owned_prefix(torch.tensor(ids, dtype=torch.int32))
+    assert owned == 8
+    before = node.timestamp
+    cm.prefetch_tier_idle()                      # the speculative walk runs in here
+    _settle_tier(cm)
+    key = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))[0]
+    assert key in cm._tier_prefetch              # the walk ran (probe hit, entry staged)
+    assert node.timestamp == before              # ...but did not refresh the node's LRU
+
+
+def test_prefetch_adopt_surplus_when_tree_grew():
+    """F6a: the tree GREW over the prefix between begin_restore and adopt - the adopt
+    consumes only the fresh pages it needs and returns the surplus reservation."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids + [99]))
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)                      # wash: tree empty, store warm (boundary 12)
+    key = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))[0]
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    assert len(cm.free_slots) == 52 and cm._tier_reserved_pages == 12
+
+    tree_pages = cm._allocate(4)                 # the tree (re)grows over [0:4)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids[:4], dtype=torch.int32), tree_pages)
+
+    mr = cm.match_req(_pend(ids + [99]))         # adopt: fresh 8 of the 12 reserved
+    assert mr.cuda_handle.cached_len == 12
+    matched = mr.cuda_handle.get_matched_indices()
+    assert matched[:4].tolist() == tree_pages.tolist()    # tree-owned prefix rides
+    for j in range(4, 12):
+        assert _kv_bytes(kvpool, int(matched[j])) == originals[int(pages[j])]
+    assert len(cm.free_slots) == 48 + 4          # 4 tree pages - 12 reserved + 4 surplus
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert cm.tier_store.snapshot()["prefetch_adopt"] == 1
+
+
+def test_prefetch_topup_when_tree_shrank():
+    """F6b: the tree SHRANK between begin_restore and adopt (its owned pages washed) - the
+    adopt tops up the missing pages from the free list and stays byte-exact."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids + [99]))
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids[:4], dtype=torch.int32), pages[:4])
+    chain = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    cm._tier_offer([VictimPath(chain[-1], 12, tuple(chain), pages, None)])
+    cm._free(pages[4:])
+    cm.prefetch_tier_idle()                      # fresh = 12 - 4 = 8 reserved
+    _settle_tier(cm)
+    assert cm._tier_reserved_pages == 8 and len(cm.free_slots) == 64 - 4 - 8
+
+    evicted = cm.prefix_cache.evict(4)           # the tree shrinks back to empty
+    cm._free(evicted[::cm.page_size])
+    mr = cm.match_req(_pend(ids + [99]))         # adopt: fresh 12 > reserved 8 -> top up 4
+    assert mr.cuda_handle.cached_len == 12
+    matched = mr.cuda_handle.get_matched_indices()
+    for j in range(12):
+        assert _kv_bytes(kvpool, int(matched[j])) == originals[int(pages[j])]
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    assert len(cm.free_slots) == 64 - 4 - 8 - 4 + 4   # the 4 topped-up pages are spent
+
+
+def test_tier_seen_ids_ring_cap():
+    """F6c fails-before: the last-seen-ids ring holds at most 64 sessions; the oldest is
+    evicted (and any prefetch entry for it released) instead of growing unbounded."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    for i in range(66):
+        cm.match_req(_pend([1000 + i, 1001 + i]))   # distinct first-page chain keys
+    assert len(cm._tier_seen_ids) == 64
+    oldest = cm._chain_keys(torch.tensor([1000, 1001], dtype=torch.int32))[0]
+    assert oldest not in cm._tier_seen_ids
+    newest = cm._chain_keys(torch.tensor([1064, 1065], dtype=torch.int32))[0]
+    assert newest in cm._tier_seen_ids
+
+
+def test_bug1_restored_decode_page_crossing_no_leak():
+    """BUG-1 fails-before: a tier-restored request whose DECODE allocates a page beyond the
+    restored span (finish cached_len non-aligned AND past the restored boundary + tail
+    page). The non-aligned finish's tier-restored insert adopted [free_upto, insert_len)
+    but the trailing free still started at the OLD restored boundary - the just-adopted
+    span went back on the free list while tree-owned: free + cache == num_pages + 1 and
+    the idle integrity check killed the scheduler (Qwen3.8, 62400-token restore, 64-token
+    decode)."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool(pages=16, page_size=8)
+    pt = torch.zeros(4, 128, dtype=torch.int32)
+    cm = CacheManager(16, 8, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    ids = list(range(1, 10))                     # 8 aligned + 1 tail token (the prompt)
+    mr = cm.match_req(_pend(ids))
+    pages = cm._allocate(2)
+    pt[0, :8] = pages[0]
+    pt[0, 8:9] = int(pages[1])
+    for pg in range(2):
+        kvpool._kv_buffer[:, :, int(pages[pg]) // 8] = float(pg) * 1.5
+    req = Req(input_ids=torch.tensor(ids + [99], dtype=torch.int32), table_idx=0, cached_len=9,
+              output_len=1, uid=0, sampling_params=SamplingParams(), cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req.mamba_next_track_idx = 1
+    req.mamba_last_track_seqlen = 8
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req, finished=False)
+    cm.cache_req(req, finished=True)
+    cm.ensure_mamba_slots(pool.num_slots)        # wash: store warm at boundary 8
+    chain = cm._chain_keys(torch.tensor(ids[:8], dtype=torch.int32))
+    assert cm.tier_store.probe(chain) is not None
+
+    mr2 = cm.match_req(_pend(ids))               # restored admission: boundary 8 restored
+    assert mr2.cuda_handle.cached_len == 8 and mr2.mamba_value is not None
+    restored_pages = mr2.cuda_handle.get_matched_indices().clone()
+    # the prompt tail (1 token -> page 1) + decode crossing into page 2: finish at 17
+    ids17 = ids + [90 + i for i in range(9)]     # 17 tokens of device content
+    req2 = Req(input_ids=torch.tensor(ids17 + [99], dtype=torch.int32), table_idx=0, cached_len=17,
+               output_len=9, uid=1, sampling_params=SamplingParams(),
+               cache_handle=mr2.cuda_handle)
+    req2.linear_slot_idx = pool.alloc(1)[0]
+    req2.mamba_ping_pong = tuple(pool.alloc(2))
+    cm.lock(mr2.cuda_handle)
+    pt[0, :8] = restored_pages                   # the restored span (prefill.py)
+    pt[0, 8:9] = int(cm._allocate(1)[0])         # the prompt-tail page
+    pt[0, 9:10] = int(cm._allocate(1)[0])        # the DECODE page (the crossing)
+    cm.cache_req(req2, finished=True)
+    cm.check_integrity()                         # pre-fix: free + cache == num_pages + 1
+    assert cm.prefix_cache.full_evictable == 16  # restored page + tail page tree-owned
+    assert len(cm.free_slots) == 14              # 16 pages - the 2 tree-owned (16 tokens)
+    m = cm.prefix_cache.match_prefix(torch.tensor(ids[:16], dtype=torch.int32))
+    assert m.cached_len == 0                     # KV-only node: reuse goes via the store
+    _, owned, _ = cm.prefix_cache.owned_prefix(torch.tensor(ids17[:16], dtype=torch.int32))
+    assert owned == 16                           # the tree owns the adopted span
+
+
+def test_bug3_refused_restore_leaves_tree_ledger_and_store_intact():
+    """BUG-3 fails-before probe: resume-1-A restores fine; resume-1-B probe-HITs the store
+    (shared system prefix) but its restore is REFUSED (fresh > free). The refusal must not
+    disturb A's tree span, the ledger, or the store; B's subsequent admission may wash A
+    under pressure, but only through the offer seam (A stays recoverable)."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(num_slots=8), _FakeKVPool(pages=16)
+    pt = torch.zeros(4, 16, dtype=torch.int32)
+    cm = CacheManager(16, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    A = [1, 2, 3, 4, 5, 6, 7, 8]                 # 8 pages
+    B = [1, 2, 3, 4] + [9] * 12                  # 16 pages sharing A's [1..4] prefix
+
+    # fill: A's tip donated + washed into the store (snapshot bound 8)
+    mr_a = cm.match_req(_pend(A + [50]))
+    pages_a = cm._allocate(8)
+    pt[0, :8] = pages_a
+    req_a = Req(input_ids=torch.tensor(A + [50], dtype=torch.int32), table_idx=0, cached_len=8,
+                output_len=1, uid=0, sampling_params=SamplingParams(), cache_handle=mr_a.cuda_handle)
+    req_a.linear_slot_idx, req_a.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req_a.mamba_next_track_idx = 1
+    req_a.mamba_last_track_seqlen = 8
+    cm.lock(mr_a.cuda_handle)
+    cm.cache_req(req_a, finished=False)
+    cm.cache_req(req_a, finished=True)
+    cm.ensure_mamba_slots(pool.num_slots)        # wash A: offered with its snapshot
+    chain_a = cm._chain_keys(torch.tensor(A, dtype=torch.int32))
+    assert cm.tier_store.probe(chain_a) is not None
+    assert cm.prefix_cache.full_evictable == 0   # tree empty (post-reboot equivalent)
+
+    # B's tip into the store too (as the fill left it): tracked + offered with a live slot
+    cm.match_req(_pend(B + [51]))                # tracks B (st[0] = 16)
+    pages_b = cm._allocate(16)
+    slot_b = pool.alloc(1)[0]
+    chain_b = cm._chain_keys(torch.tensor(B, dtype=torch.int32))
+    cm._tier_offer([VictimPath(chain_b[-1], 16, tuple(chain_b), pages_b, slot_b)])
+    cm._free(pages_b)
+    pool.free([slot_b])
+    base_free = len(cm.free_slots)
+
+    # resume-1-A: restore succeeds, A back in the tree
+    mr2 = cm.match_req(_pend(A + [50]))
+    assert mr2.cuda_handle.cached_len == 8 and mr2.mamba_value is not None
+    restored = mr2.cuda_handle.get_matched_indices().clone()
+    req2 = Req(input_ids=torch.tensor(A + [50], dtype=torch.int32), table_idx=0, cached_len=8,
+               output_len=1, uid=1, sampling_params=SamplingParams(), cache_handle=mr2.cuda_handle)
+    req2.linear_slot_idx = pool.alloc(1)[0]
+    req2.mamba_ping_pong = tuple(pool.alloc(2))
+    cm.lock(mr2.cuda_handle)
+    pt[0, :8] = restored
+    cm.cache_req(req2, finished=True)            # A finishes: span adopted, unlocked
+    assert cm.prefix_cache.full_evictable == 8
+
+    # resume-1-B: probe HIT at depth 16, owned 4, fresh 12 > free 8 -> the free-page refusal
+    free_before = len(cm.free_slots)
+    mr_b = cm.match_req(_pend(B + [51]))         # the refusal under test
+    hit = cm.tier_store.probe(chain_b)
+    assert hit is not None and hit[0] == 16      # the probe DID hit (precondition)
+    assert mr_b.cuda_handle.cached_len == 0      # refused: the normal path took over
+    assert cm.prefix_cache.match_prefix(torch.tensor(A, dtype=torch.int32)).cached_len == 8
+    cm.check_integrity()                         # ledger untouched by the refusal
+    assert len(cm.free_slots) == free_before
+    assert cm._tier_pending_restore == {}
+
+    # B's admission washes A under pressure - only via the offer seam: A stays recoverable
+    cm.ensure_mamba_slots(pool.num_slots)        # the arm's admission pressure
+    cm.check_integrity()
+    hit_a = cm.tier_store.probe(chain_a)
+    assert hit_a is not None and hit_a[0] == 8   # A recoverable from the store
+    got, snaps = cm.tier_store.restore(hit_a[1])
+    assert len(got) == 8 and len(snaps) == 1     # A's span + snapshot intact in the store
 
 
 if __name__ == "__main__":

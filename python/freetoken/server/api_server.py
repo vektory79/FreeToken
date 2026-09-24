@@ -58,9 +58,13 @@ _MODEL_SAMPLING: Dict[str, Any] = {}
 _SHUTTING_DOWN = threading.Event()
 BACKEND_DEATH_EXIT_GRACE_S = 10.0
 # Graceful-stop escalation budget per worker: how long it may act on the SIGINT relay
-# (its KeyboardInterrupt teardown -> Engine.shutdown()) and then on SIGTERM, before SIGKILL.
-WORKER_SIGINT_GRACE_S = 10.0
-WORKER_SIGTERM_GRACE_S = 5.0
+# (its KeyboardInterrupt teardown -> Engine.shutdown(), which includes the session-tier
+# shutdown flush - multi-GiB blob writes on big installs) and then on SIGTERM, before
+# SIGKILL. Env-overridable (the FREETOKEN_* pattern, cf. FREETOKEN_SWA_EVICTION_INTERVAL):
+# a truncated flush loses the deepest tier boundaries + the `flushed` log line (hardware
+# arms needed 120 s for a ~12 GiB blob).
+WORKER_SIGINT_GRACE_S = float(os.environ.get("FREETOKEN_WORKER_SIGINT_GRACE_S", "10"))
+WORKER_SIGTERM_GRACE_S = float(os.environ.get("FREETOKEN_WORKER_SIGTERM_GRACE_S", "5"))
 # One-shot reap guard: the uvicorn lifespan and the shell teardown can both reach the stop
 # helper (the shell's 15s uvicorn-thread join < worst-case escalation); first caller wins.
 _BACKEND_REAP_STARTED = threading.Event()

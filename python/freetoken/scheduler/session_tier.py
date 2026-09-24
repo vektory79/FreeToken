@@ -19,6 +19,7 @@ import time
 import zlib
 from collections import Counter
 from dataclasses import dataclass, field
+from queue import SimpleQueue
 from typing import Protocol, Sequence
 
 from freetoken.kvcache.utils import chain_page_key  # noqa: F401  (re-exported)
@@ -35,6 +36,14 @@ _BLOB_NAME = "blob.bin"
 # this share of the blob AND the blob is above the floor (no churn on small installs).
 _COMPACT_DEAD_FRACTION = 0.25
 _COMPACT_FLOOR_BYTES = 256 << 20
+# Speculative restore prefetch (phase 2, no CLI flag): at most this many concurrent
+# staging tickets, each holding one mlocked host buffer with the segment bytes until
+# adopt/abandon. The scheduler's idle hook (via the cache manager) is the only caller.
+_MAX_RESTORE_TICKETS = 2
+# Guards the cumulative mlock accounting (_Pool._locked_total): it is mutated from the
+# scheduler thread (pool construction, staging alloc, free_block) AND the reader thread
+# (staging close at ticket finalize).
+_LOCKED_TOTAL_LOCK = threading.Lock()
 
 
 class SnapshotSource(Protocol):
@@ -103,20 +112,21 @@ class _Pool:
 
     @staticmethod
     def _os_lock(addr: int, nbytes: int) -> None:
-        want = _Pool._locked_total + nbytes + (256 << 20)
-        soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
-        if soft != resource.RLIM_INFINITY and soft < want:
-            new_soft = want if hard == resource.RLIM_INFINITY else min(want, hard)
-            if new_soft > soft:
-                try:
-                    resource.setrlimit(resource.RLIMIT_MEMLOCK, (new_soft, hard))
-                except (OSError, ValueError):
-                    pass  # keep the old limit; mlock below reports the real ceiling
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.mlock(ctypes.c_void_p(addr), ctypes.c_size_t(nbytes)):
-            err = ctypes.get_errno()
-            raise OSError(err, f"mlock({nbytes / 2**30:.1f} GiB): {os.strerror(err)}")
-        _Pool._locked_total += nbytes
+        with _LOCKED_TOTAL_LOCK:
+            want = _Pool._locked_total + nbytes + (256 << 20)
+            soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+            if soft != resource.RLIM_INFINITY and soft < want:
+                new_soft = want if hard == resource.RLIM_INFINITY else min(want, hard)
+                if new_soft > soft:
+                    try:
+                        resource.setrlimit(resource.RLIMIT_MEMLOCK, (new_soft, hard))
+                    except (OSError, ValueError):
+                        pass  # keep the old limit; mlock below reports the real ceiling
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.mlock(ctypes.c_void_p(addr), ctypes.c_size_t(nbytes)):
+                err = ctypes.get_errno()
+                raise OSError(err, f"mlock({nbytes / 2**30:.1f} GiB): {os.strerror(err)}")
+            _Pool._locked_total += nbytes
 
     def alloc(self, nbytes: int) -> int:
         for i, (off, size) in enumerate(self.free):
@@ -130,7 +140,8 @@ class _Pool:
     def free_block(self, off: int, nbytes: int) -> None:
         # The region stays mlock'ed for the pool's lifetime; this only unwinds the
         # cumulative locked-growth accounting future _Pool constructions quota against.
-        _Pool._locked_total -= nbytes
+        with _LOCKED_TOTAL_LOCK:
+            _Pool._locked_total -= nbytes
         spans = sorted(self.free + [[off, nbytes]])
         out: list[list[int]] = []
         for off2, size2 in spans:
@@ -145,6 +156,57 @@ class _Pool:
 
     def read(self, off: int, nbytes: int) -> bytes:
         return bytes(self.mm[off:off + nbytes])
+
+
+class _LockedBuffer:
+    """One mlocked anonymous staging region (LOCKED-style: the L1 pool's _os_lock quota
+    bookkeeping, grown the same way). Construct and close OFF the reader thread - the
+    quota accounting in _os_lock is not thread-safe (host_banks precedent)."""
+
+    def __init__(self, nbytes: int):
+        self.size = max(1, nbytes)
+        self.mm = mmap.mmap(-1, self.size)
+        try:
+            _Pool._os_lock(ctypes.addressof(ctypes.c_char.from_buffer(self.mm)), self.size)
+        except BaseException:
+            self.mm.close()
+            raise
+        self.mv = memoryview(self.mm)
+
+    def close(self) -> None:
+        try:
+            self.mv.release()
+        except BufferError:
+            pass
+        try:
+            ctypes.CDLL(None, use_errno=True).munlock(
+                ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.mm))),
+                ctypes.c_size_t(self.size))
+        except OSError:
+            pass                     # the munmap below releases the OS lock regardless
+        with _LOCKED_TOTAL_LOCK:
+            _Pool._locked_total -= self.size
+        self.mm.close()
+
+
+@dataclass
+class RestoreTicket:
+    """One staged segment read (prefetch): the reader thread fills an mlocked host buffer
+    with the segment's pages + snapshots; adopt consumes byte-identical slices, abandon
+    frees the staging untouched. Every state transition happens under the store's global
+    lock (pending -> ready | failed | abandoned); ready is the consumer's handoff signal."""
+
+    handle: TierHandle
+    seg_id: int
+    boundary: int                    # staged page count: any adopt depth <= boundary fits
+    ready: threading.Event
+    state: str = "pending"
+    error: str | None = None
+    _finalized: bool = False
+    _buf: _LockedBuffer | None = None
+    _mv: memoryview | None = None
+    _page_spans: list = field(default_factory=list)   # [(staging off, nbytes)] per page
+    _snap_spans: list = field(default_factory=list)
 
 
 class SessionTierStore:
@@ -164,10 +226,18 @@ class SessionTierStore:
         self._counters: Counter = Counter(offers_ok=0, offers_rej=0, probe_hit=0,
                                           probe_miss=0, note_match=0, restore_l1=0,
                                           restore_l2=0, evictions=0, demotions=0,
-                                          discards=0)
+                                          discards=0, prefetch_begin=0, prefetch_adopt=0,
+                                          prefetch_abandon=0, prefetch_fail=0,
+                                          prefetch_rej_cap=0, prefetch_probe_hit=0,
+                                          prefetch_probe_miss=0)
         # Lock exists even when inert: the offer() wrapper takes it around the rejection
         # counter before any early return.
         self._lock = threading.RLock()
+        # Prefetch staging (phase 2): present even when inert (every hook early-returns).
+        self._tickets: dict[int, RestoreTicket] = {}
+        self._work: SimpleQueue = SimpleQueue()
+        self._worker: threading.Thread | None = None
+        self._inflight = 0
         if not self.enabled:
             return
         if self.ram_bytes > 0:
@@ -210,12 +280,17 @@ class SessionTierStore:
 
     # ------------------------------------------------------------------ probe
 
-    def probe(self, page_hashes: Sequence[bytes]) -> tuple[int, TierHandle] | None:
+    def probe(self, page_hashes: Sequence[bytes], *,
+              stamp: bool = True) -> tuple[int, TierHandle] | None:
         """Deepest match: walk the prompt's chain keys back to front; an equal key at
-        depth d implies an equal prefix [0:d]. Ties go to the most recently validated."""
+        depth d implies an equal prefix [0:d]. Ties go to the most recently validated.
+        stamp=False is the idle prefetch probe: no LRU refresh (speculative interest must
+        not outrank real matches) and its own counters."""
         if not self.enabled:
             return None
         now = time.monotonic_ns()
+        hit_key = "probe_hit" if stamp else "prefetch_probe_hit"
+        miss_key = "probe_miss" if stamp else "prefetch_probe_miss"
         with self._lock:
             best = None
             for d in range(len(page_hashes), 0, -1):
@@ -230,10 +305,11 @@ class SessionTierStore:
                         best = (seg, d)
                 if best is not None:
                     seg, d = best
-                    seg.last_validation = now
-                    self._counters["probe_hit"] += 1
+                    if stamp:
+                        seg.last_validation = now
+                    self._counters[hit_key] += 1
                     return d, TierHandle(seg.path_key, d, seg.seg_id)
-            self._counters["probe_miss"] += 1
+            self._counters[miss_key] += 1
             return None
 
     def note_match(self, path_key: bytes, depth: int) -> None:
@@ -523,6 +599,14 @@ class SessionTierStore:
             if not self._index[key]:
                 del self._index[key]
         del self._segments[seg.seg_id]
+        # A staged ticket for a discarded segment can never be probed again: drop it with
+        # the segment (a pending ticket is impossible here - the reader holds refs and a
+        # discard requires refs==0).
+        for t in [t for t in self._tickets.values() if t.seg_id == seg.seg_id]:
+            self._tickets.pop(id(t), None)
+            self._close_staging(t)
+            t.state = "abandoned"
+            self._counters["prefetch_abandon"] += 1
 
     # ----------------------------------------------------------------- restore
 
@@ -593,6 +677,198 @@ class SessionTierStore:
             return bytes(buf[off - pad_off:off - pad_off + nbytes])
         finally:
             buf.close()
+
+    # -------------------------------------------------------- prefetch staging (phase 2)
+
+    @staticmethod
+    def _close_staging(t: RestoreTicket) -> None:
+        if t._buf is not None:
+            t._buf.close()
+        t._buf = None
+        t._mv = None
+
+    def begin_restore(self, handle: TierHandle) -> RestoreTicket | None:
+        """Stage the segment's bytes on the background reader thread into an mlocked host
+        buffer. The caller owns the reservation discipline (KV pages / snapshot slot);
+        this only stages bytes. Returns None (staging nothing) when the ticket cap is
+        reached, the segment is gone, or the staging allocation fails; never raises.
+        Locks: refs (taken here, released at the read's finalize) keeps the segment
+        un-evictable mid-read; the read itself runs under seg.lock without the global
+        lock, exactly like the sync restore's copy phase. Staging is allocated on the
+        CALLER thread (mlock quota bookkeeping is not thread-safe)."""
+        if not self.enabled or handle is None:
+            return None
+        with self._lock:
+            if len(self._tickets) >= _MAX_RESTORE_TICKETS:
+                self._counters["prefetch_rej_cap"] += 1
+                return None
+            seg = self._segments.get(handle._seg_id)
+            if seg is None:
+                return None
+            depth = min(handle.depth, seg.boundary_len)
+            if depth == 0 or not (seg.in_l1 or seg.in_l2):
+                return None
+            seg.refs += 1
+            page_lens, snap_lens = list(seg.page_lens), list(seg.snap_lens)
+        ticket = RestoreTicket(handle=TierHandle(handle.path_key, depth, handle._seg_id),
+                               seg_id=handle._seg_id, boundary=len(page_lens),
+                               ready=threading.Event())
+        try:
+            ticket._buf = _LockedBuffer(sum(page_lens) + sum(snap_lens))
+            ticket._mv = ticket._buf.mv
+        except OSError as e:
+            with self._lock:
+                seg.refs -= 1
+            logger.warning("session tier: prefetch staging alloc failed (%s); skipped", e)
+            return None
+        off = 0
+        for ln in page_lens:
+            ticket._page_spans.append((off, ln))
+            off += ln
+        for ln in snap_lens:
+            ticket._snap_spans.append((off, ln))
+            off += ln
+        with self._lock:
+            self._tickets[id(ticket)] = ticket
+            self._counters["prefetch_begin"] += 1
+            self._ensure_worker()
+            self._inflight += 1
+            self._work.put(ticket)
+        return ticket
+
+    def _ensure_worker(self) -> None:
+        if self._worker is None:
+            self._worker = threading.Thread(target=self._worker_loop,
+                                            name="session-tier-prefetch", daemon=True)
+            self._worker.start()
+
+    def _worker_loop(self) -> None:
+        while True:
+            ticket = self._work.get()
+            try:
+                self._stage_ticket(ticket)
+            except Exception as e:                   # belt and braces: the reader never dies
+                logger.warning("session tier: prefetch worker error (%s)", e)
+                self._finalize_ticket(ticket, False, str(e))
+            finally:
+                with self._lock:
+                    self._inflight -= 1
+
+    def _stage_ticket(self, t: RestoreTicket) -> None:
+        """Reader-thread body: copy the segment bytes into the staging buffer, then
+        finalize under the global lock. Byte sources are exactly the sync restore's (L1
+        pool offsets / _blob_read), so a consumed staging is byte-identical by
+        construction. A same-boundary re-offer may swap the L1 snapshot offsets mid-read
+        (attach is not refs-guarded) - the content at an unchanged boundary is identical,
+        the same benign exposure the sync restore already has."""
+        ok, err = True, None
+        try:
+            seg = self._segments.get(t.seg_id)       # refs keeps the entry alive
+            if seg is None:
+                raise RuntimeError("segment vanished before the staging read")
+            with seg.lock:
+                if t.state == "pending":
+                    if seg.in_l1:
+                        for (off, ln), l1_off in zip(t._page_spans, seg.l1_page_offs):
+                            if ln:
+                                t._mv[off:off + ln] = self._pool.mm[l1_off:l1_off + ln]
+                        for (off, ln), l1_off in zip(t._snap_spans, seg.l1_snap_offs):
+                            if ln:
+                                t._mv[off:off + ln] = self._pool.mm[l1_off:l1_off + ln]
+                    elif seg.in_l2:
+                        raw = self._blob_read(seg.blob, seg.l2_off, seg.l2_n)
+                        pos = 0
+                        for off, ln in t._page_spans + t._snap_spans:
+                            if ln:
+                                t._mv[off:off + ln] = raw[pos:pos + ln]
+                            pos += ln
+                    else:
+                        raise RuntimeError("segment has no bytes in either tier")
+        except Exception as e:                       # noqa: BLE001 (finalized as failed)
+            ok, err = False, str(e)
+        self._finalize_ticket(t, ok, err)
+
+    def _finalize_ticket(self, t: RestoreTicket, ok: bool, err: str | None) -> None:
+        """Once-only ticket finalize: refs release + state + staging disposition, then the
+        ready handoff. Both the reader's normal path and the worker's belt-and-braces
+        except-path land here, so a double finalize (and a double refs decrement) is
+        structurally impossible."""
+        with self._lock:
+            if t._finalized:
+                return
+            t._finalized = True
+            seg = self._segments.get(t.seg_id)
+            if seg is not None:
+                seg.refs -= 1
+            still = self._tickets.get(id(t)) is t
+            if not ok:
+                if still:
+                    self._tickets.pop(id(t), None)
+                self._close_staging(t)
+                t.state, t.error = "failed", err
+                self._counters["prefetch_fail"] += 1
+            elif t.state == "abandoned":
+                if still:                            # dropped while reading
+                    self._tickets.pop(id(t), None)
+                self._close_staging(t)
+            else:
+                t.state = "ready"
+        t.ready.set()
+
+    def consume_ticket(self, ticket: RestoreTicket) -> tuple[list[bytes], list[bytes]] | None:
+        """Adopt a staged ticket: wait for the read, then hand out the staged bytes in the
+        same (pages, snaps) shape restore() returns and release the staging. None when the
+        ticket is gone or the staging failed - the caller falls back to the sync restore.
+        The last_validation stamp rides the consume (same currency as restore()); the
+        pages cover the FULL staged boundary - the caller depth-truncates like it does
+        for restore()."""
+        ticket.ready.wait()                          # the reader always finishes (or fails)
+        with self._lock:
+            if self._tickets.pop(id(ticket), None) is not ticket:
+                return None
+            if ticket.state != "ready" or ticket._mv is None:
+                return None
+            pages = [bytes(ticket._mv[o:o + n]) for o, n in ticket._page_spans]
+            snaps = [bytes(ticket._mv[o:o + n]) for o, n in ticket._snap_spans]
+            self._close_staging(ticket)
+            seg = self._segments.get(ticket.seg_id)
+            if seg is not None:
+                seg.last_validation = time.monotonic_ns()
+            self._counters["prefetch_adopt"] += 1
+            return pages, snaps
+
+    def abandon_ticket(self, ticket: RestoreTicket) -> None:
+        """Drop a staged ticket WITHOUT consuming it: staging freed, nothing handed out,
+        nothing stamped. Idempotent. A still-reading ticket hands its staging to the
+        reader's finalize - the scheduler never waits on abandon."""
+        with self._lock:
+            if self._tickets.pop(id(ticket), None) is not ticket:
+                return
+            if ticket.state == "pending":
+                ticket.state = "abandoned"           # the finalize owns the staging now
+            else:
+                self._close_staging(ticket)
+                ticket.state = "abandoned"
+            self._counters["prefetch_abandon"] += 1
+
+    def drop_tickets(self) -> int:
+        """Abandon every live staging ticket (shutdown / replay safety net): staging freed,
+        nothing consumed. Returns how many were dropped."""
+        with self._lock:
+            dropped = list(self._tickets.values())
+            self._tickets.clear()
+            for t in dropped:
+                if t.state == "pending":
+                    t.state = "abandoned"            # the finalize owns the staging now
+                else:
+                    self._close_staging(t)
+                    t.state = "abandoned"
+                self._counters["prefetch_abandon"] += 1
+            return len(dropped)
+
+    def _tickets_settled(self) -> bool:
+        """Test hook: every queued staging item has been finalized."""
+        return self._work.empty() and self._inflight == 0
 
     # --------------------------------------------------------------- lifecycle
 
@@ -674,6 +950,10 @@ class SessionTierStore:
             if dropped:
                 logger.info("session tier: replay dropped %d dead/torn records", dropped)
         with self._lock:
+            for t in list(self._tickets.values()):   # boot replay: no ticket survives it
+                self._tickets.pop(id(t), None)
+                self._close_staging(t)
+                t.state = "abandoned"
             keep_l1 = {sid: seg for sid, seg in self._segments.items() if seg.in_l1}
             self._segments = dict(keep_l1)
             self._index = {}
@@ -811,7 +1091,7 @@ class SessionTierStore:
             snap = dict(self._counters)
             snap.update(l1_used=self._l1_used, ssd_used=self._ssd_used,
                         blob_eof=self._blob_eof, dead_bytes=self._dead_bytes,
-                        segments=len(self._segments))
+                        segments=len(self._segments), tickets=len(self._tickets))
             return snap
 
     def stats_line(self) -> str:
@@ -824,5 +1104,7 @@ class SessionTierStore:
                 f"offers={snap['offers_ok']}/{snap['offers_rej']}, "
                 f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
                 f"restore={snap['restore_l1']}(l1)/{snap['restore_l2']}(l2), "
-                f"evict={snap['evictions']}, demote={snap['demotions']}, "
-                f"discard={snap['discards']}, dead={snap['dead_bytes'] / 2**20:.1f}MiB")
+                        f"evict={snap['evictions']}, demote={snap['demotions']}, "
+                        f"discard={snap['discards']}, dead={snap['dead_bytes'] / 2**20:.1f}MiB, "
+                        f"pf={snap['prefetch_adopt']}/{snap['prefetch_begin']}/"
+                        f"{snap['prefetch_abandon']}")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Tuple
@@ -31,6 +32,14 @@ _SWA_EVICTION_INTERVAL = _swa_eviction_interval()
 # the client drops reasoning (Qwen's "\ key\n": the re-render diverges 2 tokens BEFORE P).
 _SWA_RETAIN_GAP = 16
 
+# Session-tier restore prefetch (phase 2 brief): internal constants, no CLI flags. The
+# ticket cap bounds staged RAM (~one mlocked segment copy each); the reserve guard keeps
+# at least half of the then-free pages available to live allocation; the ring bounds the
+# last-seen-ids bookkeeping the idle hook re-probes.
+_TIER_PREFETCH_TICKETS = 2
+_TIER_PREFETCH_RESERVE_GUARD = 2
+_TIER_PREFETCH_SESSIONS = 64
+
 
 class SessionTierCfg:
     """Raw sizes for the session-tier store; GiB flags are converted by the caller.
@@ -45,15 +54,27 @@ class SessionTierCfg:
 
 
 def _tier_refusal_reason(pool) -> str | None:
-    """Interim QSA guard: refuse tier activation for pools whose restore codec is
-    INCOMPLETE. Remove this function once _KVPageBytes stores the QSA compressed-index
-    slab (_cmp_k_buffer) and _rope_positions - until then a restored QSA pool serves
-    stale slab rows, i.e. wrong block selection on the QSA layers (silent corruption)."""
+    """Refuse tier activation only for pools the page codec cannot cover. Covered: MHAKV
+    kv+scales, DSA/MLA latent+2-D scales, QSA (slab+rope branch below; hybrid-linear only),
+    and KpoolDSA (latent+2-D scales + the 1/ratio page-owned index shadow; scratch rows and
+    tail rings are per-forward state a restored tenant rebuilds). Uncovered -> one loud
+    refusal here: QSA variants with an uncoverable layout and the BSA index-key slab (not
+    page-owned). Pools without _kv_buffer (Hybrid-SWA, DSV4) never reach this - the generic
+    no-codec warning at activation covers them. page_size % index_ratio != 0 cannot occur
+    (the pool constructors reject it at boot); a pool with its slab tiers detached is the
+    defensive case."""
     from freetoken.kvcache.qsa_pool import QSAKVCache
 
     if isinstance(pool, QSAKVCache):
-        return ("qwen4_exp QSA pool: the session-tier codec does not store the "
-                "compressed index slab (_cmp_k_buffer / _rope_positions)")
+        ps = int(pool._kv_buffer.shape[3])
+        if ps % pool.index_ratio != 0 or pool._cmp_k_buffer is None:
+            return (f"qwen4_exp QSA pool uncoverable by the page codec "
+                    f"(page_size {ps}, index_ratio {pool.index_ratio})")
+    from freetoken.kvcache.bsa_pool import BSAKVCache
+
+    if isinstance(pool, BSAKVCache):
+        return (f"{type(pool).__name__} index tiers are not page-owned; the KV page codec "
+                "cannot byte-encode this family")
     return None
 
 
@@ -89,8 +110,10 @@ def _unpack_slot(pool, slot: int, data: bytes) -> None:
 
 class _KVPageBytes:
     """Byte codec over the paged KV pool (MHAKVCache-family ``_kv_buffer`` layout), scale
-    buffers included so a restored page is byte-identical. W2 scope: hybrid-linear models
-    route through this pool family; others keep the tier inert (never offered, never probed)."""
+    buffers included so a restored page is byte-identical; QSA pools append the compressed
+    index slab and rope rows. Hybrid-linear AND plain radix managers route through this
+    pool family; uncovered families keep the tier inert via _tier_refusal_reason / the
+    no-codec warning at activation (never offered, never probed)."""
 
     def __init__(self, pool):
         self._pool = pool
@@ -110,23 +133,62 @@ class _KVPageBytes:
             assert dim is not None, (
                 f"{name} shape {tuple(s.shape)} does not span the pool's page grid")
             self._scales.append((s, dim))
+        # QSA pools add two page-owned index tiers the size-based locator above cannot
+        # find: the compressed slab's token dim is ntok/ratio + req_slots and the rope rows
+        # ride every token. Keyed on the pool TYPE, never on sizes. The slab's scratch rows
+        # (past cmp_scratch_base) and the pending ring are per-request-slot - a restored
+        # tenant starts at a page boundary and rebuilds them in its own forwards - so only
+        # the shadow rows [page*ps/ratio, (page+1)*ps/ratio) and the rope rows demote.
+        self._cmp = None
+        self._cmp_rows = 0
+        self._rope = None
+        self._idx = None
+        self._idx_rows = 0
+        from freetoken.kvcache.qsa_pool import QSAKVCache
+
+        if isinstance(pool, QSAKVCache):
+            assert self._ps % pool.index_ratio == 0, "QSA group must not straddle a page"
+            self._cmp = pool._cmp_k_buffer
+            self._cmp_rows = self._ps // pool.index_ratio
+            self._rope = pool._rope_positions
+        # KpoolDSA (GLM DSA indexer): the index slab is a 1/ratio page-owned SHADOW of the
+        # KV pages, rows [page*ps/ratio, (page+1)*ps/ratio) per indexer layer. The scratch
+        # rows past the shadow and the tail rings are per-request / per-forward state a
+        # restored tenant rebuilds in its own forwards (dsa_pool.KpoolDSAKVCache), so only
+        # the shadow demotes - the phase-1 GLM hardware arms ran restores on this family.
+        from freetoken.kvcache.dsa_pool import KpoolDSAKVCache
+
+        if isinstance(pool, KpoolDSAKVCache):
+            assert self._ps % pool._index_ratio == 0, "KpoolDSA group must not straddle a page"
+            self._idx = pool._index_k_buffer
+            self._idx_rows = self._ps // pool._index_ratio
 
     def _scale_page(self, s, dim, page):
         idx = [slice(None)] * s.dim()
         idx[dim] = slice(page * self._ps, (page + 1) * self._ps)
         return s[tuple(idx)]
 
-    def read_page(self, page: int) -> bytes:
+    def _page_parts(self, page: int) -> list:
         buf = self._pool._kv_buffer
         parts = [buf[:, :, page]]
         parts += [self._scale_page(s, dim, page) for s, dim in self._scales]
+        if self._cmp is not None:
+            lo = page * self._cmp_rows
+            parts.append(self._cmp[:, lo:lo + self._cmp_rows, :])
+        if self._rope is not None:
+            parts.append(self._rope[page * self._ps:(page + 1) * self._ps])
+        if self._idx is not None:
+            lo = page * self._idx_rows
+            parts.append(self._idx[:, lo:lo + self._idx_rows, :])
+        return parts
+
+    def read_page(self, page: int) -> bytes:
+        parts = self._page_parts(page)
         return b"".join(
             t.contiguous().cpu().view(torch.uint8).numpy().tobytes() for t in parts)
 
     def write_page(self, page: int, data: bytes) -> None:
-        buf = self._pool._kv_buffer
-        parts = [buf[:, :, page]]
-        parts += [self._scale_page(s, dim, page) for s, dim in self._scales]
+        parts = self._page_parts(page)
         pos = 0
         for t in parts:
             n = t.numel() * t.element_size()
@@ -134,6 +196,22 @@ class _KVPageBytes:
             t.copy_(flat.view(t.dtype).reshape(t.shape).to(t.device))
             pos += n
         assert pos == len(data), "KV page byte length mismatch"
+
+
+class _PrefetchEntry:
+    """One live prefetch: the store ticket (staged bytes) plus the reservation carved at
+    prefetch START (fresh page bases + one hybrid snapshot slot). Reserved pages sit
+    outside free_slots until adopt (surplus returned) / drop (everything returned)."""
+
+    __slots__ = ("key", "path_key", "ticket", "reserved", "res_slot", "res_fresh")
+
+    def __init__(self, key, path_key, ticket, reserved, res_slot):
+        self.key = key
+        self.path_key = path_key
+        self.ticket = ticket
+        self.reserved = reserved
+        self.res_slot = res_slot
+        self.res_fresh = len(reserved)
 
 
 class CacheManager:
@@ -169,8 +247,14 @@ class CacheManager:
         self.page_table = page_table
         self.page_size = page_size
         self.cache_type = type
-        # Session tiering (W2): inert unless a hybrid manager gets an enabled cfg AND a byte
-        # codec for its KV pool; off == bit-identical behavior (every hook early-returns).
+        # Session tiering (W2): inert unless the manager type carries it and the cfg is on;
+        # off == bit-identical behavior (every hook early-returns). Hybrid managers run the
+        # snapshot currency (GDN state at boundaries); plain radix managers run the KV-only
+        # currency (no linear state: a session segment IS its KV path). naive has no tree
+        # (nothing to index); swa_radix restores cannot rebuild the full->swa mapping once
+        # the out-of-window swa KV is freed - both stay off by construction here.
+        tier_capable = ((self.is_hybrid and self.linear_state_pool is not None)
+                        or self.cache_type == "radix")
         self.tier_store = None
         self._tier_on = False
         self._tier_sessions: dict = {}
@@ -180,10 +264,22 @@ class CacheManager:
         # is unique while present): a second restore must never overwrite the first's
         # refusal record, else its pages + GDN slot leak (mr>1).
         self._tier_pending_restore: dict[int, tuple] = {}
+        # Idle restore prefetch (phase 2): staged tickets per session key + the last seen
+        # stripped ids the idle hook re-probes; _tier_reserved_pages counts pages held
+        # outside free_slots by live reservations (the exact idle ledger carries it).
+        self._tier_prefetch: dict = {}
+        self._tier_seen_ids: dict = {}
+        self._tier_seen_tick = itertools.count()
+        self._tier_reserved_pages = 0
         self._page_bytes = None
-        if self.is_hybrid and self.linear_state_pool is not None and session_tier_cfg is not None:
+        if tier_capable and session_tier_cfg is not None:
             from .session_tier import SessionTierStore
 
+            # Coverage matrix (W2): the codec byte-encodes exactly the pools whose tiers are
+            # all page-owned - MHAKV kv+scales, DSA/MLA latent+2-D scales, QSA (+ slab/rope
+            # branch, hybrid-linear only). BSA and Kpool-DSA hold non-page-owned index tiers
+            # -> loud refusal; Hybrid-SWA / DSV4 carry no _kv_buffer -> generic no-codec
+            # warning. A future family either gets a codec branch here or a clear refusal.
             # Evaluate the QSA refusal BEFORE the store exists: a discarded SessionTierStore
             # would still makedirs the tier dir, leak its two raw fds and transiently mlock
             # the L1 pool.
@@ -244,16 +340,22 @@ class CacheManager:
             from freetoken.kvcache.swa_radix_cache import SWACacheHandle
             m = self.prefix_cache.match_prefix(ids)
             return MatchResult(SWACacheHandle(m.cached_len, m.node, m.kv_indices))
+        m = self.prefix_cache.match_prefix(ids)
+        # Chain-key tier bookkeeping is pool-agnostic (token-chain based, no pool access):
+        # plain radix managers run it too (W2 KV-only). Hooks early-return when the tier is
+        # off, so naive (never tier-capable) behaves exactly as before. HybridRadixCache
+        # returns its own HybridMatch (cached_len/node fields); the plain caches return
+        # MatchResult (fields on the handle).
+        cached_len = m.cached_len if self.is_hybrid else m.cuda_handle.cached_len
+        self._tier_admission(ids, cached_len)
+        restored = self.try_restore(ids, cached_len)
+        if restored is not None:
+            return restored
         if self.is_hybrid:
             from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
-            m = self.prefix_cache.match_prefix(ids)
-            self._tier_admission(ids, m.cached_len)
-            restored = self.try_restore(ids, m.cached_len)
-            if restored is not None:
-                return restored
             return MatchResult(
                 HybridCacheHandle(m.cached_len, m.node, m.kv_indices), mamba_value=m.mamba_value)
-        return self.prefix_cache.match_prefix(ids)
+        return m
 
     @property
     def available_size(self) -> int:
@@ -547,6 +649,12 @@ class CacheManager:
                     prefix_len, _mamba_exist = self.prefix_cache.insert(
                         req.input_ids[:insert_len], page_indices[:insert_len], None)
                     self._free(page_indices[free_upto:max(free_upto, prefix_len)])
+                    # BUG-1: the insert just made [free_upto, insert_len) tree-owned; the
+                    # trailing free below starts at the OLD restored boundary and would
+                    # double-free that span (tree-owned AND on the free list -> the exact
+                    # +1 page the idle integrity check kills on). Decode pages crossing a
+                    # page boundary past a restored span reproduce it deterministically.
+                    free_upto = max(free_upto, insert_len)
                 self._free(page_indices[free_upto :])
             self._free_req_slots(req, keep_live=keep_live)
             return
@@ -712,10 +820,13 @@ class CacheManager:
         else:
             self.prefix_cache.check_integrity()
             cache_pages = self.prefix_cache.size_info.total_size // self.page_size
-        if len(self.free_slots) + cache_pages != self.num_pages:
+        # Prefetch reservations sit outside free_slots until adopt/drop - carried by the
+        # ledger so the exact idle check stays balanced while a staging is live.
+        if len(self.free_slots) + self._tier_reserved_pages + cache_pages != self.num_pages:
             raise RuntimeError(
                 "CacheManager integrity check failed:"
                 f" free_pages({len(self.free_slots)}) +"
+                f" reserved_pages({self._tier_reserved_pages}) +"
                 f" cache_pages({cache_pages}) != num_pages({self.num_pages})"
             )
         if self.page_size > 1:
@@ -728,12 +839,23 @@ class CacheManager:
         cache (RadixPrefixCache.reset() is an unimplemented stub) rather than mutating
         the old one.
         """
+        # Prefetch reservations pin OLD pool page ids; rebuild is idle-only and replaces
+        # the free list - release the tickets (staging + reservations) first.
+        for key in list(self._tier_prefetch):
+            self._tier_prefetch_drop(key)
         device = page_table.device
         self.device = device
         self.num_pages = num_pages
         self.page_table = page_table
         self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * self.page_size
         self.prefix_cache = self._make_prefix_cache(device, self.page_size, self.cache_type)
+        if self._page_bytes is not None:
+            # The pool family reallocates its tensors on a runtime resize (the engine's
+            # rebuild_from_config runs before this); the codec captured _scales/_cmp/_rope
+            # refs at init, so a stale codec would mix fresh KV with stale slab/scale bytes
+            # on offers and write restores into dead tensors. Rebuild is idle-only, so no
+            # offer/restore can run mid-refresh.
+            self._page_bytes = _KVPageBytes(self.swa_pool)
         # The discarded hybrid tree owned donated GDN-snapshot slots; rebuild is idle-only, so
         # reclaim the whole LinearStatePool free-list (else those slots leak -> admission hangs).
         if self.is_hybrid:
@@ -773,7 +895,13 @@ class CacheManager:
                 if er.mamba_slots:
                     self.linear_state_pool.free(er.mamba_slots)
             else:
-                evicted = self.prefix_cache.evict(need)
+                if self._tier_on:
+                    evicted, victims = self.prefix_cache.evict_paths(need)
+                    # offer BEFORE the free: the victim bytes are read through the pool
+                    # pages, still intact until a freed page is reused (hybrid seam parity)
+                    self._tier_offer(victims)
+                else:
+                    evicted = self.prefix_cache.evict(need)
             self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
             assert len(self.free_slots) >= needed_pages, "Eviction did not free enough space."
         allocated = self.free_slots[:needed_pages]
@@ -794,14 +922,21 @@ class CacheManager:
     # ------------------------------------------------- session tiering (W2, additive)
 
     def shutdown_tier(self) -> int:
-        """Graceful-shutdown hook: offer the LIVE tree's snapshot boundaries to the store
-        (they die with the process otherwise; the adaptive keep-set filters), then flush
-        live tier segments to L2 and compact the journal (dead records dropped; crash-safe
-        convergence via replay's payload-crc check)."""
+        """Graceful-shutdown hook: offer the LIVE tree's boundaries to the store (they die
+        with the process otherwise; the adaptive keep-set filters), then flush live tier
+        segments to L2 and compact the journal (dead records dropped; crash-safe
+        convergence via replay's payload-crc check). Hybrid offers its snapshot-bearing
+        boundaries; a KV-only tree offers every live boundary (its tip per session)."""
         if self.tier_store is None:
             return 0
-        if self._tier_on and self.is_hybrid:
-            self._tier_offer(self.prefix_cache.snapshot_victim_paths())
+        if self._tier_on:
+            if self.is_hybrid:
+                self._tier_offer(self.prefix_cache.snapshot_victim_paths())
+            else:
+                self._tier_offer(self.prefix_cache.live_victim_paths())
+        for key in list(self._tier_prefetch):    # staging freed, reservations returned
+            self._tier_prefetch_drop(key)
+        self.tier_store.drop_tickets()           # safety net for anything untracked
         flushed = self.tier_store.flush_live()
         self.tier_store.compact()
         line = self.tier_store.stats_line()
@@ -855,12 +990,25 @@ class CacheManager:
             st[2], st[0] = st[0], cached_len        # the old tip becomes the newest non-tip
         if cached_len > 0:                          # a cold match only tracks the session
             self.tier_store.note_match(chain[cached_len // self.page_size - 1], cached_len)
+        # Idle-prefetch candidate: the LAST seen stripped ids per session (a tensor view,
+        # bounded by the ring cap) - the idle hook re-probes this chain and re-walks
+        # owned_prefix against the live tree to decide whether a staging is still useful.
+        self._tier_seen_ids[chain[0]] = (ids, next(self._tier_seen_tick))
+        if len(self._tier_seen_ids) > _TIER_PREFETCH_SESSIONS:
+            oldest = min(self._tier_seen_ids, key=lambda k: self._tier_seen_ids[k][1])
+            if oldest != chain[0]:
+                del self._tier_seen_ids[oldest]
+                self._tier_prefetch_drop(oldest)    # no ids left to re-evaluate: release it
 
     def _tier_offer(self, victims) -> None:
-        """Keep/drop each evicted victim against the adaptive set {tip, the DEEPEST boundary
-        <= divergence depth, newest non-tip} of its tracked session; kept victims are offered
-        to the store (bytes materialized via the page codec / SnapshotSource closure) BEFORE
-        the caller frees the originals -- demotion never changes what the core frees.
+        """Keep/drop each evicted victim against the adaptive set of its tracked session:
+        hybrid keeps {tip, the DEEPEST boundary <= divergence depth, newest non-tip}; a
+        KV-only manager keeps {tip} only - without snapshots the tip segment serves every
+        shallower resume (probe matches the common chain prefix; restore depth-truncates
+        its pages), while the hybrid under-divergence slot exists because a snapshot must
+        sit AT the resume depth. Kept victims are offered to the store (bytes materialized
+        via the page codec / SnapshotSource closure) BEFORE the caller frees the originals
+        -- demotion never changes what the core frees.
         Session bookkeeping (st = [tip, div, spare, under]) and victim boundary_len are in
         TOKENS; offer() takes PAGES (len(vp.chain_keys)) and _tier_snap_bound stores PAGES
         (what try_restore's probe depth is counted in)."""
@@ -873,7 +1021,10 @@ class CacheManager:
                 st[2], st[0] = st[0], vp.boundary_len
             elif st[0] > vp.boundary_len > st[2]:
                 st[2] = vp.boundary_len
-            if vp.boundary_len <= st[1] and (st[3] is None or vp.boundary_len >= st[3]):
+            if not self.is_hybrid:
+                if vp.boundary_len != st[0]:
+                    continue                    # stale grid point: the tip already covers it
+            elif vp.boundary_len <= st[1] and (st[3] is None or vp.boundary_len >= st[3]):
                 st[3] = vp.boundary_len                     # deepest under-divergence slot
             elif vp.boundary_len == st[0] or vp.boundary_len == st[2]:
                 pass                                        # tip / newest non-tip slot
@@ -883,21 +1034,30 @@ class CacheManager:
                         for i, key in enumerate(vp.chain_keys)]
             snaps = (_SlotSnapshot(self.linear_state_pool, vp.mamba_slot)
                      if vp.mamba_slot is not None else None)
-            if self.tier_store.offer(vp.path_key, len(vp.chain_keys), kv_pages, snaps) \
-                    and snaps is not None:
+            ok = self.tier_store.offer(vp.path_key, len(vp.chain_keys), kv_pages, snaps)
+            if ok and snaps is not None:
                 self._tier_snap_bound[vp.path_key] = len(vp.chain_keys)   # pages
-            elif vp.mamba_slot is not None:
+            elif not ok and vp.mamba_slot is not None:
                 self._tier_snap_bound.pop(vp.path_key, None)   # dropped offer: stale bound
+            if ok:
+                # a same-prefix (re-)offer supersedes a live staging of it: the ticket is
+                # dropped unconsumed and the next idle point re-stages fresh bytes
+                self._tier_prefetch_invalidate(vp.path_key)
 
     def try_restore(self, ids, cached_len: int) -> MatchResult | None:
         """Synchronous session-tier restore on a shallow/cold admission match, before the
         re-prefill fall-through: probe the store with the request's page-hash chain; on a hit
-        memcpy the page bytes into free KV pages and the snapshot bytes into a fresh
-        LinearStatePool slot and hand the normal insert()/cache_req path a prefetched match
-        (mamba_value rides the existing COW machinery). Budget rule: the restore consumes the
-        free pages + one slot the replaced re-prefill would (no extra over-admit; the padding
-        sink is never touched -- slots come from the pool's own free list). Anything missing
-        (free pages, slot, snapshot at the matched depth) falls back to the normal path."""
+        memcpy the page bytes into free KV pages - and, hybrid only, the snapshot bytes into
+        a fresh LinearStatePool slot - and hand the normal insert()/cache_req path a
+        prefetched match (the hybrid mamba_value rides the existing COW machinery; a KV-only
+        restore just hands the continuation paged KV, no state to revive). Budget rule: the
+        restore consumes the free pages + one slot (hybrid) the replaced re-prefill would
+        (no extra over-admit; the padding sink is never touched - slots come from the pool's
+        own free list). Anything missing (free pages, slot, snapshot at the matched depth)
+        falls back to the normal path. When an idle prefetch has STAGED this session's
+        segment, the admission adopts the staged bytes through the same tail instead of
+        reading the store synchronously (the reservation made at prefetch START replaces
+        the free-list gate); every refusal releases it and falls through unchanged."""
         if not self._tier_on or cached_len >= len(ids):
             return None
         chain = self._chain_keys(ids)
@@ -905,58 +1065,136 @@ class CacheManager:
         if hit is None:
             return None
         depth, handle = hit
-        if cached_len >= depth:
+        ps = self.page_size
+        if cached_len >= depth * ps:
             # The tree match already reaches the store's boundary: the normal path serves at
             # least as well, and a restore here would only duplicate tree-owned pages and
             # replace a deeper match with a shallower one (HW attempt-3: 253-page leak ->
-            # integrity kill on exactly this shape).
+            # integrity kill on exactly this shape). Units: depth is PAGES, cached_len TOKENS.
             return None
-        ps = self.page_size
         # Never duplicate tree-owned KV: restore only the missing suffix [owned, depth). The
         # tree's own pages - live snapshots AND KV-only tombstones (incl. a prior restore's
         # finish adoption) - stay in place, pinned via the walked node; the store's boundary
         # snapshot always rides along (with an adopted KV-only span it is the only live
         # snapshot at depth, so a snapshot-only restore revives the boundary).
         owned_node, owned, owned_pages = self.prefix_cache.owned_prefix(ids[:depth * ps])
-        fresh = depth - owned
-        if (fresh > len(self.free_slots) or self.linear_state_pool.num_free_slots < 1
-                or depth == 0):
+        owned_pg = owned // ps
+        fresh = depth - owned_pg
+        if depth == 0:
+            return None
+        entry = self._tier_prefetch.get(chain[0])
+        if (entry is not None and entry.path_key == handle.path_key
+                and entry.ticket.boundary >= depth):
+            # Prefetch adopt: the staged bytes replace the store read; the reservation
+            # made at prefetch START replaces the free-list gate. A refusal drops the
+            # ticket (nothing consumed) and falls through to the sync path below.
+            res = self._adopt_prefetch(entry, depth, handle, owned_pg, fresh,
+                                       owned_node, owned_pages)
+            if res is not None:
+                return res
+        if (fresh > len(self.free_slots)
+                or (self.is_hybrid and self.linear_state_pool.num_free_slots < 1)):
             return None
         res = self.tier_store.restore(handle)
         if res is None:
             return None
         pages, snaps = res
-        # Hybrid reuse needs the GDN state AT the matched boundary: a KV-only restore would
-        # hand the continuation a prefix it cannot resume from (no checkpointed boundary).
-        if (self._tier_snap_bound.get(handle.path_key) != depth or not snaps
-                or len(pages) != depth):
-            return None
-        allocated, self.free_slots = self.free_slots[:fresh], self.free_slots[fresh:]
-        slot = self.linear_state_pool.alloc(1)[0]
-        try:
-            for i, data in enumerate(pages[owned:]):
-                self._page_bytes.write_page(int(allocated[i]) // ps, data)
-            _unpack_slot(self.linear_state_pool, slot, snaps[0])
-        except Exception:
-            self.linear_state_pool.free(slot)
+        allocated = self.free_slots[:fresh]
+        self.free_slots = self.free_slots[fresh:]
+        slot = self.linear_state_pool.alloc(1)[0] if self.is_hybrid else None
+        out = self._restore_tail(depth, handle, pages, snaps, owned_node, owned_pg,
+                                 owned_pages, allocated, slot)
+        if out is None:
+            if slot is not None:
+                self.linear_state_pool.free(slot)
             self.free_slots = torch.cat([allocated, self.free_slots])
             return None
-        from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
+        return out
 
-        handle_h = HybridCacheHandle(
-            depth * ps, owned_node,
-            torch.cat([owned_pages, self._page_to_token(allocated)]), tier_restored=True)
-        slot_owned = MatchResult(handle_h, mamba_value=slot)
-        self._tier_restore_slots.add(slot)          # no tree owner: scheduler frees post-COW
-        self._tier_pending_restore[id(handle_h)] = (handle_h, allocated, slot)
-        return slot_owned
+    def _restore_tail(self, depth, handle, pages, snaps, owned_node, owned_pg,
+                      owned_pages, allocated, slot) -> MatchResult | None:
+        """Shared restore tail of the sync path and the prefetch adopt: the bytes are in
+        hand (a sync restore() result or a consumed staging); run the boundary gates,
+        write the fresh pages and unpack the boundary snapshot. Any refusal or write
+        failure returns None - the CALLER returns `allocated` (and the slot, if it was a
+        reservation) to the pools, so both paths share gate order and byte semantics by
+        construction."""
+        if len(pages) != depth:
+            return None
+        if self.is_hybrid and (self._tier_snap_bound.get(handle.path_key) != depth
+                               or not snaps):
+            # Hybrid reuse needs the GDN state AT the matched boundary: a KV-only restore
+            # would hand the continuation a prefix it cannot resume from (no checkpointed
+            # boundary). A KV-only manager has no such state: the restored pages feed the
+            # normal insert path and the continuation prefill computes on top of them.
+            return None
+        try:
+            for i, data in enumerate(pages[owned_pg:]):
+                self._page_bytes.write_page(int(allocated[i]) // self.page_size, data)
+            if self.is_hybrid:
+                _unpack_slot(self.linear_state_pool, slot, snaps[0])
+        except Exception:
+            return None
+        kv_indices = torch.cat([owned_pages, self._page_to_token(allocated)])
+        if self.is_hybrid:
+            from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
+
+            handle_h = HybridCacheHandle(
+                depth * self.page_size, owned_node, kv_indices, tier_restored=True)
+            self._tier_restore_slots.add(slot)          # no tree owner: scheduler frees post-COW
+            self._tier_pending_restore[id(handle_h)] = (handle_h, allocated, slot)
+            return MatchResult(handle_h, mamba_value=slot)
+        from freetoken.kvcache.radix_cache import RestoredRadixHandle
+
+        handle_h = RestoredRadixHandle(
+            depth * self.page_size, owned_node, kv_indices, tier_restored=True)
+        # No slot rides a KV-only restore; abandon_restore skips the slot free (None is
+        # never in _tier_restore_slots) and returns exactly this handle's fresh pages.
+        self._tier_pending_restore[id(handle_h)] = (handle_h, allocated, None)
+        return MatchResult(handle_h)
+
+    def _adopt_prefetch(self, entry, depth, handle, owned_pg, fresh,
+                        owned_node, owned_pages) -> MatchResult | None:
+        """Consume a staged ticket at admission through the shared tail. Reservation
+        accounting: pages beyond the tree's current owned prefix go back (surplus), a
+        tree that SHRANK since the idle prefetch tops up from the free list, and ANY
+        refusal releases the whole reservation (drop = the abandon_restore mirror)."""
+        got = self.tier_store.consume_ticket(entry.ticket)
+        if got is None:
+            self._tier_prefetch_drop(entry.key)      # failed staging: reservation back
+            return None
+        pages, snaps = got
+        pages = pages[:depth]                        # staging holds the full boundary
+        surplus = None
+        if fresh <= entry.res_fresh:
+            allocated, surplus = entry.reserved[:fresh], entry.reserved[fresh:]
+        else:
+            extra = fresh - entry.res_fresh          # the tree shrank since the prefetch
+            if extra > len(self.free_slots):
+                self._tier_prefetch_drop(entry.key)
+                return None
+            allocated = torch.cat([entry.reserved, self.free_slots[:extra]])
+            self.free_slots = self.free_slots[extra:]
+            entry.reserved = allocated               # the drop path returns what is held
+            # res_fresh stays the ORIGINAL reservation: it is the ledger currency (the
+            # topped-up pages were spent from free_slots, never charged to the ledger).
+        out = self._restore_tail(depth, handle, pages, snaps, owned_node, owned_pg,
+                                 owned_pages, allocated, entry.res_slot)
+        if out is None:
+            self._tier_prefetch_drop(entry.key)
+            return None
+        self._tier_prefetch.pop(entry.key, None)     # consumed; the store ticket is spent
+        self._tier_reserved_pages -= entry.res_fresh
+        if surplus is not None and len(surplus) > 0:
+            self.free_slots = torch.cat([self.free_slots, surplus])
+        return out
 
     def abandon_restore(self, handle) -> None:
         """Return a restored-but-refused admission's pages and slot to their pools.
         Per-handle pending records: a later restore never steals an earlier refusal.
         Idempotent: the entry is consumed, and a slot already released (admitted ->
-        COW-consumed) is not freed twice. No-op for any handle that was not a restored
-        match."""
+        COW-consumed) is not freed twice. KV-only restores record a None slot (nothing to
+        free). No-op for any handle that was not a restored match."""
         pending = self._tier_pending_restore.pop(id(handle), None)
         if pending is None:
             return
@@ -965,6 +1203,94 @@ class CacheManager:
             self.tier_release_restore_slot(slot)
             self.linear_state_pool.free(slot)
         self.free_slots = torch.cat([self.free_slots, allocated])
+
+    # ------------------------------------------------- idle restore prefetch (phase 2)
+
+    def prefetch_tier_idle(self) -> None:
+        """Idle safe point (scheduler run_when_idle): speculatively stage the tier tip of
+        the most recently seen tracked sessions so the session's NEXT admission adopts
+        staged bytes instead of a synchronous store read. Bounded by construction: at
+        most _TIER_PREFETCH_TICKETS live tickets, reservations keep half of the then-free
+        pages for live allocation, and a fully busy loop never reaches this hook.
+        Reading ticket.state without the store lock is benign staleness (a late
+        transition is picked up on the next idle pass)."""
+        if not self._tier_on:
+            return
+        for key in list(self._tier_prefetch):        # reap dead stagings (source vanished
+            if self._tier_prefetch[key].ticket.state in ("failed", "abandoned"):
+                self._tier_prefetch_drop(key)        # or segment discarded: return the slot
+        ordered = sorted(self._tier_seen_ids.items(), key=lambda kv: -kv[1][1])
+        for key, (ids, _) in ordered:
+            if len(self._tier_prefetch) >= _TIER_PREFETCH_TICKETS:
+                break
+            if key in self._tier_prefetch:
+                continue
+            self._tier_prefetch_begin(key, ids)
+
+    def _tier_prefetch_begin(self, key, ids) -> None:
+        """Stage one session's tier tip: probe (no LRU stamp), skip when the tree still
+        owns the boundary (the next turn would be a tree hit, not a restore), reserve,
+        then begin the staging. Any failure returns the reservation - the sync restore at
+        admission remains the fallback and the byte-exactness reference."""
+        chain = self._chain_keys(ids)
+        if not chain:
+            return
+        hit = self.tier_store.probe(chain, stamp=False)
+        if hit is None:
+            return
+        depth, handle = hit
+        ps = self.page_size
+        # stamp=False: the speculative walk must not refresh the tree's node LRU currency
+        # (repeated idle passes would otherwise outrank real admissions); only `owned` is
+        # used here, so no other walk side effect matters.
+        _, owned, _ = self.prefix_cache.owned_prefix(ids[:depth * ps], stamp=False)
+        fresh = depth - owned // ps
+        if fresh <= 0:
+            return
+        if self.is_hybrid and self.linear_state_pool.num_free_slots < 2:
+            return                                   # keep one slot live for admission
+        reserved = self._tier_prefetch_reserve(fresh)
+        if reserved is None:
+            return
+        slot = self.linear_state_pool.alloc(1)[0] if self.is_hybrid else None
+        ticket = self.tier_store.begin_restore(handle)
+        if ticket is None:
+            if slot is not None:
+                self.linear_state_pool.free(slot)
+            self.free_slots = torch.cat([reserved, self.free_slots])
+            return
+        self._tier_reserved_pages += len(reserved)
+        self._tier_prefetch[key] = _PrefetchEntry(key, handle.path_key, ticket,
+                                                  reserved, slot)
+
+    def _tier_prefetch_reserve(self, fresh: int):
+        """Carve the reservation out of the free list; None (nothing carved) when the
+        starvation guard trips - live allocation always keeps at least half of the
+        then-free pages, so a speculative staging can never pinch admission to zero."""
+        free_n = len(self.free_slots)
+        if fresh <= 0 or fresh * _TIER_PREFETCH_RESERVE_GUARD > free_n:
+            return None
+        reserved, self.free_slots = self.free_slots[:fresh], self.free_slots[fresh:]
+        return reserved
+
+    def _tier_prefetch_drop(self, key) -> None:
+        """Abandon a ticket: staging freed (nothing consumed) and the reservation
+        returned - the abandon_restore mirror for tickets. Idempotent."""
+        entry = self._tier_prefetch.pop(key, None)
+        if entry is None:
+            return
+        self._tier_reserved_pages -= entry.res_fresh
+        if entry.res_slot is not None:
+            self.linear_state_pool.free(entry.res_slot)
+        self.tier_store.abandon_ticket(entry.ticket)
+        self.free_slots = torch.cat([self.free_slots, entry.reserved])
+
+    def _tier_prefetch_invalidate(self, path_key: bytes) -> None:
+        """A successful (re-)offer of path_key supersedes any live staging of it: the
+        staging is freed unconsumed; the next idle point re-stages fresh bytes."""
+        for key, entry in list(self._tier_prefetch.items()):
+            if entry.path_key == path_key:
+                self._tier_prefetch_drop(key)
 
 
 def _write_page_table(
