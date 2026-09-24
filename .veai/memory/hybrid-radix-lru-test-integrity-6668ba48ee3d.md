@@ -1,9 +1,9 @@
 ---
 name: "hybrid-radix-lru-test-integrity"
-description: "HybridRadixCache tests: vacuous asserts, single-revert probes, det-clock, padding sink, full_evictable suffix-pages"
+description: "HybridRadixCache test integrity rules + tiering store tests carry own det-clock fixture"
 type: project
-lastUpdated: 2026-09-22T20:42
-lastRecall: 2026-09-22T20:40
+lastUpdated: 2026-09-23T10:08
+lastRecall: 2026-09-24T00:06
 ---
 
 # Test integrity for hybrid radix LRU tests (Fix-3 wave lessons, 2026-09-21)
@@ -25,3 +25,6 @@ How to apply: any new test asserting eviction order, LRU survival, or timestamp 
 ## Interleave-baseline additions (2026-09-22)
 - Two new scenario tests in tests/kvcache/radix/test_hybrid_radix.py (file 28 passed; package radix+scheduler 260/1 skipped): `test_interleaved_conversations_wash_out_the_older_trace` pins the CURRENT cross-conversation policy as the measured baseline (victims leave FIFO A0 -> A1(tip) -> B0; the older conversation's resume collapses to cached=0/second=None and its KV is cascade-freed) - a future pin-tip protection policy must flip the A-resume assert to retention; `test_interleave_with_enough_snapshot_pool_keeps_both_traces` is the no-pressure contrast (both tips retained).
 - Counter gotcha: `full_evictable` counts NODE lengths = each node's SUFFIX pages only (insert of ids(9,10) onto existing ids(9) adds 1 page, not 2); a tombstoned INTERNAL node keeps its KV (counter unchanged); a leaf victim frees its KV plus the exposed tombstone ancestors (cascade). Draft assert 5*PAGE was wrong; correct was 3*PAGE (three 1-page B nodes, B0 tombstoned). Computing expected counters from token spans overcounts - derive them from the node list.
+
+## Addition (2026-09-22, session-cache-tiering W3)
+tests/scheduler/test_session_tier.py carries its own `_deterministic_clock` autouse fixture (itertools.count over time.monotonic_ns) - the det-clock pattern is no longer exclusive to tests/kvcache/radix; when porting ordering asserts into other tests/scheduler files, copy this fixture rather than trusting the real clock.

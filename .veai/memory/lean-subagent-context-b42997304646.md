@@ -3,7 +3,7 @@ name: "lean-subagent-context"
 description: "Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)"
 type: feedback
 lastUpdated: 2026-09-14T21:23
-lastRecall: 2026-09-20T18:28
+lastRecall: 2026-09-23T01:21
 ---
 
 # Минимальный контекст для субагентов

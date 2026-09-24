@@ -47,5 +47,9 @@
 - [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md
 - [hybrid-interleave-snapshot-washout](hybrid-interleave-snapshot-washout-dce37ef61e12.md) — HybridRadixCache cross-convo snapshot wash: evict_mamba FIFO; pool=4*mr+max(4,ceil(ratio*mr))+1; ratio flag; wash tests
 - [process-hygiene-protocol](process-hygiene-protocol-74ae16a3c293.md) — Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment
-- [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-48113b8cd115.md) — HybridRadixCache tests: vacuous asserts, single-revert probes, det-clock, padding sink, full_evictable suffix-pages
 - [ft-interleave-cache-wash-repro](ft-interleave-cache-wash-repro-0065e2ed9c34.md) — Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x
+- [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-6668ba48ee3d.md) — HybridRadixCache test integrity rules + tiering store tests carry own det-clock fixture
+- [sandbox-path-absence-trap](sandbox-path-absence-trap-3f7778c9bdfc.md) — Delegated agents' list_dir is sandboxed to project root; outside paths falsely reported absent - verify via IDE terminal
+- [ft-qwen38-flashnext-tier-fit](ft-qwen38-flashnext-tier-fit-545891f65e1f.md) — Qwen3.8 qwen4_exp hybrid: QSAKVCache passes tier gate, codec incomplete -> corruption risk; phase-2 scoping S/M/L
+- [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-43255b68e674.md) — Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands
+- [ft-tier-phase2-swave](ft-tier-phase2-swave-983b7399926c.md) — Tier phase-2 S-wave committed 2348da5: mr>1 leak fix, QSA guard, log-line metrics, watermark compaction; briefs pending
