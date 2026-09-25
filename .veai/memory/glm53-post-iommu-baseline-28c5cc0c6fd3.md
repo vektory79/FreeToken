@@ -3,7 +3,7 @@ name: "glm53-post-iommu-baseline"
 description: "GLM-5.3 NVFP4 post-iommu baseline: 1M/512k budget recipes, chunk-size prefill lever; 09-14 fail-fast transient"
 type: project
 lastUpdated: 2026-09-19T03:12
-lastRecall: 2026-09-22T11:22
+lastRecall: 2026-09-24T14:15
 ---
 
 # GLM-5.3-Flash-NVFP4 hybrid on RTX 5090: post-iommu=pt re-baseline (2026-09-12)

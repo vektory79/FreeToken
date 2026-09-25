@@ -3,7 +3,7 @@ name: "hybrid-interleave-snapshot-washout"
 description: "HybridRadixCache cross-convo snapshot wash: evict_mamba FIFO; pool=4*mr+max(4,ceil(ratio*mr))+1; ratio flag; wash tests"
 type: project
 lastUpdated: 2026-09-22T20:42
-lastRecall: 2026-09-23T15:20
+lastRecall: 2026-09-24T14:15
 ---
 
 # Cross-conversation snapshot wash-out (orchestrator/subagent interleave) - diagnosed 2026-09-22

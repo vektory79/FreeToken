@@ -1,9 +1,9 @@
 ---
 name: "lean-subagent-context"
-description: "Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)"
+description: "Cloud LLM: do not resume big-context subagents (costly); prefer fresh narrow agents; resume only for tiny deltas"
 type: feedback
-lastUpdated: 2026-09-14T21:23
-lastRecall: 2026-09-23T01:21
+lastUpdated: 2026-09-25T01:23
+lastRecall: 2026-09-25T01:24
 ---
 
 # Минимальный контекст для субагентов
@@ -16,3 +16,6 @@ lastRecall: 2026-09-23T01:21
 1. В `context` класть только конкретные пути, якоря (file:line) и решения - детали отдавать ТОЧНЫМ ПУТЁМ к артефакту (например, .tasks/.../research/*.md), а не пересказом текста.
 2. Предпочитать свежий узкий агент вместо relaunch тяжёлого прогона; resume_id использовать только когда субагент уже держит в контексте нужные файлы и дельта задачи мала.
 3. Не дублировать в промпте содержимое файлов, которые субагент обязан прочитать сам по пути; дублировать только то, без чего он не найдёт правильную точку входа.
+
+## UPDATE 2026-09-23 (user decision, cloud-LLM cost)
+When working on the CLOUD LLM (local rig LLM switched off), do NOT resume/continue subagents with a large accumulated context - resume replays the whole prior conversation and is expensive on provider credits. How to apply: on the cloud model, prefer a FRESH narrow subagent with only the needed context (exact file paths, anchors, decisions) over resuming a long-running one, even when the resumed agent "already knows" the files; resume only when the delta is tiny. On the LOCAL LLM (no per-token cost concern) the resume-vs-fresh tradeoff is softer, but keep the lean-context discipline anyway.

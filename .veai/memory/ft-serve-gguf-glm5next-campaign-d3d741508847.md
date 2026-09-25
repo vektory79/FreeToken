@@ -3,7 +3,7 @@ name: "ft-serve-gguf-glm5next-campaign"
 description: "GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)"
 type: project
 lastUpdated: 2026-09-16T15:11
-lastRecall: 2026-09-22T18:39
+lastRecall: 2026-09-24T14:15
 ---
 
 # GGUF glm5next (Path A): campaign record - see PLAN.md for the full record

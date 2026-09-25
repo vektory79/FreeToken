@@ -1,7 +1,6 @@
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
 - [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
 - [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-30a075828b64.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts
-- [lean-subagent-context](lean-subagent-context-b42997304646.md) — Delegate subagents with minimal fresh context; never relaunch heavy-context subagent runs (cost concern)
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-35ff08215256.md) — ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions
 - [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-e072d0274c3d.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
 - [benchbw-profile-clobber-trap](benchbw-profile-clobber-trap-6b9f0d04e5e9.md) — benchbw writes the FULL per-GPU profile per run: single-dtype run clobbers other formats' fractions; no TTL/fingerprint
@@ -52,4 +51,5 @@
 - [sandbox-path-absence-trap](sandbox-path-absence-trap-3f7778c9bdfc.md) — Delegated agents' list_dir is sandboxed to project root; outside paths falsely reported absent - verify via IDE terminal
 - [ft-qwen38-flashnext-tier-fit](ft-qwen38-flashnext-tier-fit-545891f65e1f.md) — Qwen3.8 qwen4_exp hybrid: QSAKVCache passes tier gate, codec incomplete -> corruption risk; phase-2 scoping S/M/L
 - [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-43255b68e674.md) — Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands
-- [ft-tier-phase2-swave](ft-tier-phase2-swave-983b7399926c.md) — Tier phase-2 S-wave committed 2348da5: mr>1 leak fix, QSA guard, log-line metrics, watermark compaction; briefs pending
+- [lean-subagent-context](lean-subagent-context-32151731dde8.md) — Cloud LLM: do not resume big-context subagents (costly); prefer fresh narrow agents; resume only for tiny deltas
+- [ft-tier-phase2-swave](ft-tier-phase2-swave-2650fa06467b.md) — Tier campaign committed d77d15e..9503cb4; HW verdicts 3 models; next brief offer-supersede ready

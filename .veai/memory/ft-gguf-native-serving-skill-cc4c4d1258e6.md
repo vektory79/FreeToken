@@ -3,7 +3,7 @@ name: "ft-gguf-native-serving-skill"
 description: "gguf-native-serving skill ledger: TRAPS T01-T63; fix3 self-update committed a20519e; campaign validated"
 type: project
 lastUpdated: 2026-09-21T19:06
-lastRecall: 2026-09-22T18:41
+lastRecall: 2026-09-24T14:20
 ---
 
 # GGUF native serving skill: reusable methodology for any model family
