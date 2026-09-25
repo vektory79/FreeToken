@@ -32,6 +32,13 @@
   stage-raw, quality-этапы.
   Якорь: тайл 32, +67.2% @8128 = 556.43 tok/s (коммит 1706aae);
   production-дефолт MOE_MTILE=32.
+- [session-cache-tiering-arms.md](session-cache-tiering-arms.md) — ярусный кеш
+  сессий: якорные числа железных рук по трём моделям (GLM-5.3 GGUF,
+  Qwen3.8-Flash-Next, Qwen3.8-27B dense-hybrid), общий tier-хвост конфига и
+  каверния кодеков.
+  Якоря: restore после рестарта 4.19-4.32 с (GLM 0.82/400k, tier 10/100);
+  медиана хода 4.3 с на 2x40k (27B dense-hybrid 0.85/4096); запланированный
+  компакт 23.8 -> 14.75 GiB на буте (27B, tier 10/100).
 
 ## Исторические якоря serving'а
 

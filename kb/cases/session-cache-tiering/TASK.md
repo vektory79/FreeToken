@@ -1,7 +1,9 @@
 # TASK: ярусный кеш сессий - вытеснение сегментов в RAM и SSD буферы фиксированного размера
 
-Status: PLANNED (бриф составлен 2026-09-22 на вектории vektory79 @ d82274c; решения обсуждения
-зафиксированы в [session-cache-tiering.md](../../topics/session-cache-tiering.md)).
+Status: EXECUTED (фазы 1-2 выполнены и подтверждены железом 2026-09-22/23; бриф составлен
+2026-09-22 на ветке vektory79 @ d82274c; решения обсуждения и результаты -
+в [session-cache-tiering.md](../../topics/session-cache-tiering.md),
+числа рук - в [session-cache-tiering-arms.md](../../baselines/session-cache-tiering-arms.md)).
 Read CONTRIBUTING.md first - он обязателен; фичевые изменения сопровождаются тестами на новое
 поведение, конфиги - без комментариев в коде.
 
@@ -74,7 +76,7 @@ topics-статье) - дедуп общих префиксов субагент
   Группировка в "пути/сессии" - по корневой цепочке ключей страниц; для сессий с общим
   системным префиксом группировка грубее - документировать как осознанное приближение
   (уточняется при реализации, см. amendments-практику в
-  [fix3-snapshot-lru-refresh/TASK.md](fix3-snapshot-lru-refresh/TASK.md)).
+[fix3-snapshot-lru-refresh/TASK.md](../fix3-snapshot-lru-refresh/TASK.md)).
 - Restore-интеграция: при shallow/cold матче admission пробует стор; восстановленные страницы
   и снапшот возвращаются в игру штатным insert()/cache_req-путём; бюджет admission прежний
   (restore потребляет те же страницы/слот, что и замещаемый re-prefill).
@@ -109,7 +111,8 @@ CPU:
 4. Off-режим: с выключенным флагом весь существующий гейт без диффов поведения
    (`uv run pytest tests/kvcache/radix tests/scheduler -m "not slow"`).
 
-Железо (RTX 5090, пакет `.tasks/interleave-cache-repro/`, серийно):
+Железо (RTX 5090, серийно; пакет рук репликации промывки лежал в git-ignored рабочем
+каталоге кампании и после чистого клона считается утраченным):
 
 5. Arm 3 (персистентность): прогон Arm-сценария -> shutdown -> boot -> первый ход каждой
    сессии = HIT (`#cached-token` > 0, wall ~restore-латентность, не re-prefill).
@@ -129,8 +132,8 @@ CPU:
   включая буферы квантовочных масштабов;
 - (c) нарушений целостности кеша нет во время железных прогонов (page accounting чист).
 
-Обоснование (измерено, журнал вне репозитория:
-[.tasks/session-cache-tiering/arm3_console.log](../../../.tasks/session-cache-tiering/arm3_console.log)):
+Обоснование (измерено в железной руке Arm 3; журнал прогона лежал в git-ignored
+рабочем каталоге кампании и после чистого клона считается утраченным):
 greedy-декод на этом движке не бит-детерминирован ни между чанкингами prefill, ни между
 бутами. Arm-3: расхождение cold-prefill против restore-пути внутри одного бута - с символа
 36; restore-путь бут A против бута C (идентичный путь) - с символа 94 (~22 одинаковых
@@ -159,7 +162,7 @@ greedy-декод на этом движке не бит-детерминиро�
 - Дизайн и экономика: [session-cache-tiering.md](../../topics/session-cache-tiering.md)
 - Механизм промывки: [interleave-cache-wash.md](../../topics/interleave-cache-wash.md)
 - Переиспользование и фикс-3 контекст: [radix-cache-reuse.md](../../topics/radix-cache-reuse.md),
-  [fix3-snapshot-lru-refresh/TASK.md](fix3-snapshot-lru-refresh/TASK.md)
+[fix3-snapshot-lru-refresh/TASK.md](../fix3-snapshot-lru-refresh/TASK.md)
 - VRAM-торг: [vram-budget.md](../../topics/vram-budget.md),
   [vram-headroom.md](../../methods/vram-headroom.md)
 - Прецеденты инфраструктуры: pinned banks (MoE offload), FTW fast path O_DIRECT

@@ -9,6 +9,9 @@
 - **A/B** — сравнение двух конфигураций движка, отличающихся ровно одной
   переменной (один boot на значение), с medians-by-chunk метриками; базовый
   протокол всех измерений kb — [ab-nsplit.md](methods/ab-nsplit.md).
+- **adopt (усыновление)** — встраивание выровненной части восстановленного из
+  стора отрезка страниц в radix-дерево ядра (без слота снапшота) —
+  [session-cache-tiering.md](topics/session-cache-tiering.md).
 
 ## B
 
@@ -18,6 +21,9 @@
 
 ## C
 
+- **chain page key** — ключ страницы в SessionTierStore: blake2b над кортежем
+  token-id (не над KV-байтами), считается вызывающей стороной, без D2H на
+  горячем пути — [session-cache-tiering.md](topics/session-cache-tiering.md).
 - **chunked prefill** — разбиение длинного промпта на чанки фиксированной длины
   (`--max-prefill-length`), главный источник багов переиспользования кэша —
   [TASK.md](cases/fix3-snapshot-lru-refresh/TASK.md).
@@ -66,19 +72,34 @@
 
 ## N
 
+- **note_match** — операция и счётчик метрик SessionTierStore: освежение
+  last_validation сегмента при матче (курс общий со snapshot_lru VRAM) —
+  [session-cache-tiering.md](topics/session-cache-tiering.md).
 - **nsys** — профилировщик NVIDIA; step-0-метод опирается на его экспорт —
   [step0-profile.md](methods/step0-profile.md).
 - **NVFP4** — 4-битный FP-формат KV/весов; лимитировал 1M-контекст на 32 ГБ —
   [failfast-report.md](incidents/nvfp4-1m-capacity/failfast-report.md).
+
+## O
+
+- **offer** — понижение сегмента сессии (KV-путь + снапшоты на границах) в
+  SessionTierStore при вытеснении из VRAM —
+  [session-cache-tiering.md](topics/session-cache-tiering.md).
 
 ## R
 
 - **radix cache** — префиксный radix-кэш повторного использования KV;
   баги трекинга длины при chunked prefill — чейны fix-1/fix-3 —
   [TASK.md](cases/fix1-radix-track-seqlen/TASK.md).
+- **RestoreTicket** — асинхронный тикет предвыборки сегмента из стора; cap
+  _MAX_RESTORE_TICKETS=2, 0 отключает механизм —
+  [session-cache-tiering.md](topics/session-cache-tiering.md).
 
 ## S
 
+- **SessionTierStore** — внешний контент-адресный стор сегментов сессий
+  (scheduler/session_tier.py): offer/probe/restore/evict/flush + append-only
+  журнал на SSD — [session-cache-tiering.md](topics/session-cache-tiering.md).
 - **sqlite-профиль** — экспорт nsys-профиля в SQLite, запросимый SQL без
   повторного GPU-прогона; исходные .nsys-rep/.sqlite следы оставались в
   git-ignored рабочих каталогах кампаний и не зеркалировались —
@@ -92,6 +113,9 @@
 
 ## T
 
+- **tier L1/L2** — ярусы SessionTierStore: L1 — pinned RAM буфер (mlock одним
+  куском), L2 — O_DIRECT blob + append-only журнал на SSD; L2 переживает
+  рестарт сервера — [session-cache-tiering.md](topics/session-cache-tiering.md).
 - **TP/FP (триаж)** — в ревью мердж-волн: true-positive / false-positive
   классификация находок ревью —
   [review-2.md](cases/skill-reviews/merge-main-into-vektory79/review-2.md).
