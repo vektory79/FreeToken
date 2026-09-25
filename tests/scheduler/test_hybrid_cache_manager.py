@@ -952,11 +952,58 @@ def test_session_tier_adaptive_set_excludes_stale_grid_points():
         return VictimPath(k[depth_pages - 1], bl_tokens, tuple(k[:depth_pages]),
                           torch.arange(depth_pages, dtype=torch.int32), None)
 
+    offered = []
+    real_offer = cm.tier_store.offer
+
+    def spy(path_key, boundary, kv_pages, snapshot_slot=None):
+        offered.append(boundary)
+        return real_offer(path_key, boundary, kv_pages, snapshot_slot)
+
+    cm.tier_store.offer = spy
     cm._tier_offer([vp(1, 4)])                   # tip
     cm._tier_offer([vp(2, 2)])                   # deepest under-divergence boundary
     cm._tier_offer([vp(1, 1)])                   # stale intermediate grid point
+    assert offered == [1, 2]                     # the stale point never reaches the store
+    # offer-time supersede collapses the snapshot-free tip into the deeper segment
     held = {seg.path_key for seg in cm.tier_store._segments.values()}
-    assert held == {k[0], k[1]}                  # exactly the adaptive set
+    assert held == {k[1]}
+
+
+def test_tier_offers_across_turns_collapse_nested_plain_segments(tmp_path):
+    """Manager-level offer supersede: per-turn cumulative snapshot-free boundaries of one
+    session collapse to the deepest store segment, a re-offer of an already contained
+    boundary is skipped (offers_dedup), and the shutdown flush keeps exactly that one
+    segment - no nested redundant plain segments in the blob."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+    from freetoken.kvcache.utils import chain_page_key
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22, dir=str(tmp_path)))
+    k = [chain_page_key(None, (1,))]
+    for t in (2, 3, 4):
+        k.append(chain_page_key(k[-1], (t,)))
+
+    def vp(depth_pages, bl_tokens):
+        return VictimPath(k[depth_pages - 1], bl_tokens, tuple(k[:depth_pages]),
+                          torch.arange(depth_pages, dtype=torch.int32), None)
+
+    cm._tier_sessions[k[0]] = [4, 0, 0, None]
+    cm._tier_offer([vp(1, 4)])                   # turn-1 tip
+    cm._tier_sessions[k[0]] = [8, 4, 0, None]
+    cm._tier_offer([vp(2, 8)])                   # turn-2 tip: supersedes turn-1's segment
+    cm._tier_sessions[k[0]] = [12, 8, 0, None]
+    cm._tier_offer([vp(3, 12)])                  # turn-3 tip: supersedes turn-2's
+    store = cm.tier_store
+    assert len(store._segments) == 1
+    assert next(iter(store._segments.values())).boundary_len == 3
+    cm._tier_offer([vp(2, 8)])                   # re-offer of a contained boundary
+    assert store.snapshot()["offers_dedup"] == 1
+    assert len(store._segments) == 1
+    assert cm.shutdown_tier() == 1               # flush_live: still exactly one segment
+    assert len(store._segments) == 1
 
 
 def test_abandon_restore_returns_pages_and_slot():

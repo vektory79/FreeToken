@@ -223,7 +223,8 @@ class SessionTierStore:
         # rejection counters on the disabled store before any early return. Pre-seeded so
         # snapshot()/stats_line() always see every key.
         self._dead_bytes = 0
-        self._counters: Counter = Counter(offers_ok=0, offers_rej=0, probe_hit=0,
+        self._counters: Counter = Counter(offers_ok=0, offers_rej=0, offers_dedup=0,
+                                          probe_hit=0,
                                           probe_miss=0, note_match=0, restore_l1=0,
                                           restore_l2=0, evictions=0, demotions=0,
                                           discards=0, prefetch_begin=0, prefetch_adopt=0,
@@ -353,6 +354,7 @@ class SessionTierStore:
             raise ValueError(f"boundary_len {boundary_len} != {len(kv_pages)} pages")
         snaps = self._resolve_snaps(snapshot_slot)
         now = time.monotonic_ns()
+        page_keys = [k for k, _ in kv_pages]
         with self._lock:
             existing = self._by_path(path_key)
             if existing is not None and existing.boundary_len == boundary_len:
@@ -369,6 +371,23 @@ class SessionTierStore:
                     except MemoryError:
                         logger.warning("session tier: L1 full; offer dropped")
                         return False
+            # Same-chain dedup via the page_keys prefix relation (path_key is the TIP key,
+            # so boundaries of one session never share it): a live deeper seg serves every
+            # restore a snapshot-free offer could (restore depth-truncates; the hybrid
+            # _restore_tail gate needs a snapshot at the exact bound) -> skip the store.
+            relatives = self._same_path_segs(page_keys)
+            if not snaps and any(self._is_prefix(page_keys, s.page_keys) for s in relatives):
+                self._counters["offers_dedup"] += 1
+                return True
+            # Supersede contained shallower snapshot-free segs (refs guard, snapshots are
+            # never discarded) BEFORE staging so their freed L1/L2 room counts toward
+            # this offer; if staging then fails the chain drops capability until a
+            # re-offer (pre-diff code kept the shallower seg) - accepted regression.
+            for seg in relatives:
+                if (seg.boundary_len < boundary_len and seg.refs == 0
+                        and not any(seg.snap_lens)
+                        and self._is_prefix(seg.page_keys, page_keys)):
+                    self._supersede(seg)
             need = sum(len(data) for _, data in kv_pages) + sum(len(s) for s in snaps)
             if self._pool is not None:
                 while self.ram_bytes - self._l1_used < need:
@@ -415,6 +434,21 @@ class SessionTierStore:
             if seg.path_key == path_key:
                 return seg
         return None
+
+    @staticmethod
+    def _is_prefix(prefix: Sequence[bytes], chain: Sequence[bytes]) -> bool:
+        # Equal chain key at depth d implies an equal page prefix (probe's store
+        # invariant): the prefix relation proves containment, boundary_len alone cannot.
+        return len(prefix) <= len(chain) and list(prefix) == list(chain[:len(prefix)])
+
+    def _same_path_segs(self, page_keys: list[bytes]) -> list[_Segment]:
+        """Live segments on the offer's session path: chain-key prefix relation in either
+        direction (path_key is the boundary tip key, so successive boundaries of one
+        session never share it - only the prefix proves same-path containment)."""
+        return [s for s in self._segments.values()
+                if (s.in_l1 or s.in_l2)
+                and (self._is_prefix(page_keys, s.page_keys)
+                     or self._is_prefix(s.page_keys, page_keys))]
 
     def _store_l1(self, path_key, boundary_len, kv_pages, snaps, now) -> _Segment:
         seg = _Segment(self._next_seg, path_key, boundary_len, [k for k, _ in kv_pages],
@@ -607,6 +641,13 @@ class SessionTierStore:
             self._close_staging(t)
             t.state = "abandoned"
             self._counters["prefetch_abandon"] += 1
+
+    def _supersede(self, seg: _Segment) -> None:
+        # L1 resources first: _discard only accounts the L2 padded span (a no-op when the
+        # segment never reached L2) plus index removal and staged-ticket drop.
+        if seg.in_l1:
+            self._release_l1(seg)
+        self._discard(seg)
 
     # ----------------------------------------------------------------- restore
 
@@ -1102,6 +1143,7 @@ class SessionTierStore:
         return (f"session-tier: l1={snap['l1_used'] / 2**20:.1f}MiB, "
                 f"l2={snap['ssd_used'] / 2**20:.1f}MiB, "
                 f"offers={snap['offers_ok']}/{snap['offers_rej']}, "
+                f"dedup={snap['offers_dedup']}, "
                 f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
                 f"restore={snap['restore_l1']}(l1)/{snap['restore_l2']}(l2), "
                         f"evict={snap['evictions']}, demote={snap['demotions']}, "

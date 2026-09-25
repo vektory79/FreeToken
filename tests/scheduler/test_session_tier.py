@@ -144,6 +144,193 @@ def test_reoffer_same_path_refreshes_not_duplicates(tmp_path):
     assert snaps == [_snap("again")]
 
 
+# ------------------------------------------------- offer-time dedup / supersede
+
+
+def test_contained_snapshot_free_offer_skipped_and_counted(tmp_path):
+    """A snapshot-free offer whose pages a live deeper same-chain segment already holds
+    is redundant: skipped (offers_dedup moved), the store keeps exactly one segment, and
+    the covered restores still work through the deeper segment."""
+    store = SessionTierStore(_cfg(d=str(tmp_path)))
+    keys, pages = _chain([(1, 0), (1, 1), (1, 2)])
+    assert store.offer(b"path", 3, pages)
+    assert store.offer(b"path", 2, pages[:2])
+    snap = store.snapshot()
+    # counting convention: a dedup skip returns True, so the offer() wrapper stamps it
+    # offers_ok like any accepted offer; offers_dedup is the additional breakdown
+    assert snap["offers_dedup"] == 1 and snap["offers_ok"] == 2
+    assert len(store._segments) == 1
+    hit = store.probe(keys[:2])
+    assert hit is not None and hit[0] == 2
+    assert store.restore(hit[1])[0] == [data for _, data in pages[:2]]
+
+
+def test_supersede_never_matches_across_divergent_chains(tmp_path):
+    """Chains sharing ONLY page 0 (same first key, then divergence) are different paths:
+    a deeper plain offer of chain B must not supersede the shallower plain chain-A seg
+    (the prefix check diverges) - both stay, and each probe restores its own bytes."""
+    store = SessionTierStore(_cfg(d=str(tmp_path)))
+    keys_a, pages_a = _chain([(1, 0), (1, 1)])
+    keys_b, pages_b = _chain([(1, 0), (7, 1), (7, 2)])   # shares page 0 only
+    assert keys_a[0] == keys_b[0] and keys_a[1] != keys_b[1]
+    assert store.offer(b"path-a", 2, pages_a)
+    assert store.offer(b"path-b", 3, pages_b)
+    assert len(store._segments) == 2
+    assert store.snapshot()["offers_dedup"] == 0
+    hit_a = store.probe(keys_a)
+    assert hit_a is not None and hit_a[0] == 2
+    assert store.restore(hit_a[1])[0] == [data for _, data in pages_a]
+    hit_b = store.probe(keys_b)
+    assert hit_b is not None and hit_b[0] == 3
+    assert store.restore(hit_b[1])[0] == [data for _, data in pages_b]
+
+
+def test_supersede_shallower_plain_segment_l2_accounting(tmp_path):
+    """A deeper snapshot-free offer replaces a contained shallower snapshot-free one via
+    _discard (dead-byte ledger, capacity accounting, index removal) and stores normally:
+    no blob surgery, byte-exact restore from the new record."""
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path)))
+    keys, pages = _chain([(2, 0), (2, 1)])
+    assert store.offer(b"path", 1, pages[:1])
+    seg1 = store._by_path(b"path")
+    assert store.offer(b"path", 2, pages)
+    assert seg1.seg_id not in store._segments            # superseded
+    assert len(store._segments) == 1
+    seg2 = store._by_path(b"path")
+    assert seg2.boundary_len == 2 and seg2.in_l2
+    assert store._dead_bytes == 4096                     # the padded 1-page span is dead
+    assert store._ssd_used == 4096                       # only the new record counts
+    assert store._index[keys[0]] == [(seg2.seg_id, 1)]   # old entries removed
+    assert store._index[keys[1]] == [(seg2.seg_id, 2)]
+    hit = store.probe(keys)
+    assert hit is not None and hit[0] == 2
+    assert store.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_supersede_releases_l1_pages_refcounted(tmp_path):
+    """Superseding an L1-resident segment releases its pool pages (refcounted) before the
+    _discard cleanup: no L1 leak, no L2 dead bytes (it never reached the blob)."""
+    store = SessionTierStore(_cfg())
+    keys, pages = _chain([(3, 0), (3, 1)])
+    assert store.offer(b"path", 1, pages[:1])
+    assert store.offer(b"path", 2, pages)
+    assert len(store._segments) == 1
+    seg = store._by_path(b"path")
+    assert seg.boundary_len == 2 and seg.in_l1
+    assert store._l1_used == 2 * PAGE
+    assert store._pages[keys[0]].refs == 1               # old seg's page ref released
+    snap = store.snapshot()
+    assert snap["discards"] == 1 and snap["dead_bytes"] == 0
+
+
+def test_refs_guard_blocks_supersede(tmp_path):
+    """refs > 0 (a restore in flight) blocks the supersede: both segments are kept; once
+    unpinned, a deeper offer supersedes every contained snapshot-free segment."""
+    store = SessionTierStore(_cfg())
+    keys, pages = _chain([(4, 0), (4, 1), (4, 2)])
+    assert store.offer(b"path", 1, pages[:1])
+    pinned = store._by_path(b"path")
+    pinned.refs += 1
+    assert store.offer(b"path", 2, pages[:2])
+    assert len(store._segments) == 2                     # keep both under the live reader
+    assert store.snapshot()["offers_dedup"] == 0
+    pinned.refs -= 1
+    assert store.offer(b"path", 3, pages)
+    assert len(store._segments) == 1                     # both contained segs superseded
+    assert store._by_path(b"path").boundary_len == 3
+
+
+def test_snapshot_bearing_deeper_offer_stored_not_skipped(tmp_path):
+    """The snapshot is the non-contained part: a snapshot-bearing offer is ALWAYS stored
+    (and supersedes a contained shallower snapshot-free seg); a snapshot-bearing segment
+    is never discarded by a deeper snapshot-free offer and keeps serving its boundary."""
+    store = SessionTierStore(_cfg(d=str(tmp_path)))
+    keys, pages = _chain([(5, 0), (5, 1)])
+    assert store.offer(b"path", 1, pages[:1])
+    assert store.offer(b"path", 2, pages, _snap("s"))
+    assert len(store._segments) == 1                     # stored, plain b1 superseded
+    assert store.snapshot()["offers_dedup"] == 0
+    keys3 = keys + [chain_page_key(keys[1], (5, 2))]
+    pages3 = pages + [(keys3[2], _page_data((5, 2)))]
+    assert store.offer(b"path", 3, pages3)               # deeper plain offer
+    assert len(store._segments) == 2                     # snapshot-bearing seg kept
+    snap_seg = next(s for s in store._segments.values() if any(s.snap_lens))
+    assert snap_seg.boundary_len == 2 and snap_seg.snap_lens == [SNAP]
+    hit = store.probe(keys[:2])                          # boundary-EXACT preference intact
+    assert hit is not None and hit[0] == 2
+    assert store.restore(hit[1]) == ([data for _, data in pages], [_snap("s")])
+
+
+def test_dedup_covers_over_snapshot_bearing_deeper_segment(tmp_path):
+    """Predicate pinned explicitly: a snapshot-free offer is COVERED by a deeper live
+    same-chain segment even when that segment is snapshot-bearing. Derivation: the offer
+    would serve restores only at depths <= its boundary; the deeper seg serves every one
+    of them (restore depth-truncates its pages, session_tier.restore), and on the hybrid
+    path a snapshot-free seg serves NO restore at all (cache.py _restore_tail needs a
+    snapshot at the exact _tier_snap_bound depth) - so skipping loses no capability."""
+    store = SessionTierStore(_cfg(d=str(tmp_path)))
+    keys, pages = _chain([(6, 0), (6, 1), (6, 2)])
+    assert store.offer(b"path", 3, pages, _snap("deep"))
+    assert store.offer(b"path", 2, pages[:2])            # snapshot-free, contained
+    snap = store.snapshot()
+    assert snap["offers_dedup"] == 1 and len(store._segments) == 1
+    hit = store.probe(keys[:2])
+    assert hit is not None and hit[0] == 2               # the deeper seg serves depth 2
+    assert store.restore(hit[1]) == ([data for _, data in pages[:2]], [_snap("deep")])
+
+
+def test_sigkill_replay_after_supersede_keeps_exactly_live_set(tmp_path):
+    """Supersede leaves the superseded journal record's blob region intact until
+    compaction rewrites it away (accepted discard durability, cf. the resurrected-records
+    pin); after compaction a SIGKILL-style reboot replays EXACTLY the live set, and a
+    supersede in the replayed history converges under the next compaction (extends the
+    sigkill-replay and compact-convergence patterns)."""
+    d = tmp_path / "tier"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"path", 1, pages[:1])
+    assert store.offer(b"path", 2, pages)                # supersedes the boundary-1 record
+    assert store._dead_bytes == 4096
+    assert store.compact() == 1                          # dead record dropped
+    assert store.compact() == 0                          # idempotent
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 1                    # exactly the live set
+    hit = boot.probe(keys)
+    assert hit is not None and hit[0] == 2
+    assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+    # uncompacted crash: the superseded record resurrects at replay, a deeper offer
+    # supersedes BOTH stale segments, and compaction converges to the live set
+    d2 = tmp_path / "tier2"
+    store2 = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d2)))
+    keys, pages = _chain([(8, 0), (8, 1), (8, 2)])
+    assert store2.offer(b"path", 1, pages[:1])
+    assert store2.offer(b"path", 2, pages[:2])           # supersede #1
+    reborn = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d2)))
+    assert reborn.replay_journal() == 2                  # both regions intact pre-compact
+    assert len(reborn._segments) == 2
+    assert reborn.offer(b"path", 3, pages)               # supersedes both stale segments
+    assert len(reborn._segments) == 1
+    assert reborn.compact() == 2
+    final = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d2)))
+    assert final.replay_journal() == 1
+    hit = final.probe(keys)
+    assert final.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_offers_dedup_metric_preseeded_and_in_stats_line(tmp_path):
+    """offers_dedup is pre-seeded in the Counter (snapshot() copies it whole) and lands in
+    the stats_line fragment (batch log + shutdown final line via tier_stats_line)."""
+    store = SessionTierStore(_cfg(d=str(tmp_path)))
+    assert store.snapshot()["offers_dedup"] == 0
+    assert "dedup=0" in store.stats_line()
+    keys, pages = _chain([(9, 0), (9, 1)])
+    assert store.offer(b"path", 2, pages)
+    assert store.offer(b"path", 1, pages[:1])
+    assert store.snapshot()["offers_dedup"] == 1
+    assert "dedup=1" in store.stats_line()
+
+
 # ------------------------------------------------------------------- L1 -> L2 LRU
 
 def test_l1_overflow_demotes_lru_to_l2(tmp_path):
