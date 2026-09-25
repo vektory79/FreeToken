@@ -56,6 +56,7 @@ This rig runs a local LLM that occupies all VRAM and can process only one reques
 
 - Do not run tests or any workload that needs VRAM while the local LLM is resident.
 - Do not run parallel or background subagents; launch subagents synchronously, one at a time.
+- When the cloud LLM is active, do not resume subagents with a large accumulated context: resume replays the whole prior conversation and is expensive on provider credits. Prefer a fresh narrow subagent with only the required context (exact file paths, anchors, decisions); resume only when the delta task is tiny. On the local LLM the cost pressure is lower, but the lean-context discipline still applies.
 - CPU-only work (unit tests without VRAM, log parsing, static analysis) is fine at any time.
 
 VRAM-heavy work (GPU tests, hardware A/B, `ft serve` runs):
