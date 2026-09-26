@@ -154,6 +154,11 @@ class Batch:
     # _prepare_batch succeeds. Continuation chunks leave this empty, so accounting is
     # exactly-once.
     prompt_admissions: List[Tuple[int, int, int]] = field(default_factory=list, init=False)
+    # uid -> new (non-cached) tokens this prefill batch forwards, snapshotted at schedule
+    # time alongside log_new_tokens: by drain time complete_one() has advanced the reqs, so
+    # extend_len no longer describes the chunk. Drives per-request prompt-time attribution
+    # for the timings block. Empty on decode batches.
+    log_req_new_tokens: dict = field(default_factory=dict, init=False)
 
     @property
     def is_prefill(self) -> bool:

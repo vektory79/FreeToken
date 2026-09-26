@@ -48,6 +48,15 @@ class DetokenizeMsg(BaseTokenizerMsg):
     swa_total_tokens: int = 0
     # Bytes this engine process holds on the GPU (torch reserved pool). 0 on CPU.
     gpu_mem_bytes: int = 0
+    # Accumulated per-request forward time (ms), sent on the terminal reply: prefill
+    # forward time (engine-start warmup batch excluded) and decode forward time (the
+    # request's first decode step excluded - TTFT-class overhead, not steady decode).
+    # 0 when the request had no measurable forward of that kind (e.g. fully cached prompt).
+    prefill_ms: float = 0.0
+    decode_ms: float = 0.0
+    # At least one prefill batch of this request was the engine-start warmup batch; its
+    # time is excluded from prefill_ms (the batch is marked in the prefill log line).
+    prompt_warmup: bool = False
 
 
 @dataclass

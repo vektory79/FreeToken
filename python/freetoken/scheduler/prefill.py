@@ -327,6 +327,7 @@ class PrefillManager:
         # once at admission, so continuation chunks (already-chunked reqs) contribute 0.
         log_new_tokens = 0
         log_cached_tokens = 0
+        log_req_new_tokens: dict[int, int] = {}
         for pending_req in self.pending_list:
             is_continuation = pending_req.chunked_req is not None
             if req := adder.try_add_one(pending_req):
@@ -349,6 +350,7 @@ class PrefillManager:
                                 item.hash, req.uid, mm_rows_after(item, req.cache_handle.cached_len)
                             )
                 log_new_tokens += req.extend_len
+                log_req_new_tokens[req.uid] = req.extend_len
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len
             else:
@@ -359,6 +361,7 @@ class PrefillManager:
         batch = Batch(reqs=reqs, phase="prefill")
         batch.log_new_tokens = log_new_tokens
         batch.log_cached_tokens = log_cached_tokens
+        batch.log_req_new_tokens = log_req_new_tokens
         batch.prompt_admissions = prompt_admissions
         return batch
 

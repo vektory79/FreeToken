@@ -18,16 +18,18 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from freetoken.core import Batch, Req, SamplingParams
 from freetoken.kvcache.linear_state_pool import LinearStatePool
-from freetoken.message import AbortBackendMsg
+from freetoken.message import AbortBackendMsg, DetokenizeMsg
 from freetoken.models.config import LinearGatedDeltaGroupConfig
 from freetoken.scheduler.cache import CacheManager
 from freetoken.scheduler.decode import DecodeManager
 from freetoken.scheduler.prefill import ChunkedReq, PrefillManager
 from freetoken.scheduler.scheduler import Scheduler
+from freetoken.scheduler.status import RequestTimingTracker
 from freetoken.scheduler.table import TableManager
 from freetoken.scheduler.utils import PendingReq
 
@@ -62,6 +64,8 @@ def _setup():
         toolcall_anchor_id=None,
         config=SimpleNamespace(page_size=1),
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
+        # frozen clock: drains measure a 0 ms forward, so the reporter receives no timing
+        timing_tracker=RequestTimingTracker(clock=lambda: 0.0),
         send_result=sent.extend,
         _kv_usage_pages=cm.page_usage,
         _mamba_slot_usage=lambda: None,
@@ -94,10 +98,13 @@ def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
 
 
 def _as_last_data(batch):
+    # (ForwardInput-ish, ForwardOutput-ish, launch clock): the launch timestamp is the
+    # third element the drain unpacks since the measured-forward-duration change.
     return (
         SimpleNamespace(batch=batch),
         (None, torch.tensor([42], dtype=torch.int32),
          SimpleNamespace(synchronize=lambda: None)),
+        0.0,
     )
 
 
@@ -163,11 +170,15 @@ def test_abort_starved_decode_req_frees_immediately():
     dm.filter_reqs([req])
     # the un-drained batch belongs to some other request's prefill
     stub._last_data = (SimpleNamespace(batch=SimpleNamespace(reqs=[])), None)
+    # mid-decode request with an accumulated timing entry (no drain will ever run for it)
+    req.decode_batch_idx = 2
+    stub.timing_tracker.on_decode_drained(SimpleNamespace(reqs=[req]), 100.0)
     base_free = pool.num_free_slots
 
     Scheduler._process_one_msg(stub, AbortBackendMsg(uid=UID))
     assert not req.aborted
     assert req.table_idx == -1                  # freed immediately, no drain needed
+    assert stub.timing_tracker.pop(UID) == (0.0, 0.0, False)  # timing entry released too
     assert pool.num_free_slots > base_free
     assert req not in dm.running_reqs
     cm.check_integrity()
@@ -261,6 +272,89 @@ def test_post_terminal_overlap_step_is_dropped():
     assert [m for m in sent if isinstance(m, DetokenizeMsg)] == terminal  # no 2nd msg
     assert req.output_len == output_len_before                           # no append
     cm.check_integrity()
+
+
+def test_drain_attributes_forward_time_to_the_terminal_reply():
+    """The final chunk's forward time lands in the terminal reply's timings: the tracker
+    is fed BEFORE the terminal pop, so even a single-chunk prompt reports prefill_ms
+    (pre-fix ordering popped first and the only chunk's time was lost)."""
+    pool, cm, tm, dm, _pm, sent, stub = _setup()
+    stub.timing_tracker = RequestTimingTracker(clock=lambda: 2.0)  # t_launch 0.0 -> 2000 ms
+    # burn the engine-start warmup slot so the drained batch is a regular one
+    stub.timing_tracker.on_prefill_drained(
+        SimpleNamespace(log_new_tokens=1, log_req_new_tokens={999: 1}), 0.0)
+    req = _launch_req(pool, cm, tm, torch.arange(1, 13, dtype=torch.int32))
+    batch = Batch(reqs=[req], phase="prefill")
+    batch.log_new_tokens = 12
+    batch.log_req_new_tokens = {UID: 12}
+    dm.filter_reqs(batch.reqs)
+    stub.eos_token_ids = {42}  # the drained token (42) finishes the request by EOS
+
+    Scheduler._process_last_data(stub, _as_last_data(batch))
+
+    terminal = [m for m in sent if isinstance(m, DetokenizeMsg) and m.finished]
+    assert len(terminal) == 1
+    assert terminal[0].prefill_ms == pytest.approx(2000.0)
+    assert terminal[0].prompt_warmup is False
+    assert stub.timing_tracker.pop(UID) == (0.0, 0.0, False)  # entry released
+
+
+def test_abort_drain_purges_tracker_entry_without_resurrection():
+    """In-flight abort: attribution still sees the aborted req listed in the batch, so the
+    pre-attribution pop alone resurrects the uid; the post-attribution purge must win and
+    leave no tracker entry (no growth for aborted requests)."""
+    pool, cm, tm, dm, _pm, sent, stub = _setup()
+    stub.timing_tracker = RequestTimingTracker(clock=lambda: 5.0)  # drain -> 5000 ms
+    req = _launch_req(pool, cm, tm, torch.arange(1, 13, dtype=torch.int32))
+    req.decode_batch_idx = 3  # aborted mid-decode: attribution would credit this step
+    batch = Batch(reqs=[req], phase="decode")
+    dm.filter_reqs(batch.reqs)
+    stub._last_data = _as_last_data(batch)
+
+    Scheduler._process_one_msg(stub, AbortBackendMsg(uid=UID))
+    assert req.aborted  # marked, NOT freed under the forward
+
+    Scheduler._process_last_data(stub, stub._last_data)
+
+    assert req.table_idx == -1
+    assert sent == []                           # abort ack stays the terminal reply
+    assert stub.timing_tracker.pop(UID) == (0.0, 0.0, False)  # purged, not resurrected
+
+
+def test_chunked_prefill_accumulates_ms_across_chunks_into_terminal_reply():
+    """Each chunk's own-window forward time accumulates per uid; the final chunk's drain
+    publishes the sum on the terminal reply. Also pins the own-window span: chunk 2 is
+    measured against chunk 1's drain (2.0 s), not its own launch (which would give 3.0)."""
+    pool, cm, tm, dm, _pm, sent, stub = _setup()
+    clock = {"t": 0.0}
+    stub.timing_tracker = RequestTimingTracker(clock=lambda: clock["t"])
+    # burn the engine-start warmup slot so both chunks carry regular (non-warmup) time
+    stub.timing_tracker.on_prefill_drained(
+        SimpleNamespace(log_new_tokens=1, log_req_new_tokens={999: 1}), 0.0)
+
+    prompt = torch.arange(1, 13, dtype=torch.int32)
+    chunk = _launch_req(pool, cm, tm, prompt[:8], cls=ChunkedReq)
+    mid = Batch(reqs=[chunk], phase="prefill")
+    mid.log_new_tokens = 8
+    mid.log_req_new_tokens = {UID: 8}
+    clock["t"] = 1.0  # chunk 1 own window: 1.0 s -> 1000 ms
+    Scheduler._process_last_data(stub, _as_last_data(mid))
+    assert sent == []                           # intermediate chunks never reply
+
+    req = _launch_req(pool, cm, tm, prompt)     # final chunk: plain Req, same uid
+    final = Batch(reqs=[req], phase="prefill")
+    final.log_new_tokens = 12
+    final.log_req_new_tokens = {UID: 12}
+    dm.filter_reqs(final.reqs)
+    stub.eos_token_ids = {42}  # the drained token (42) finishes the request by EOS
+    clock["t"] = 3.0  # chunk 2 own window: 3.0 - 1.0 (previous drain) = 2.0 s -> 2000 ms
+    Scheduler._process_last_data(stub, _as_last_data(final))
+
+    terminal = [m for m in sent if isinstance(m, DetokenizeMsg) and m.finished]
+    assert len(terminal) == 1
+    assert terminal[0].prefill_ms == pytest.approx(3000.0)  # 1000 + 2000 across chunks
+    assert terminal[0].prompt_warmup is False
+    assert stub.timing_tracker.pop(UID) == (0.0, 0.0, False)  # entry released
 
 
 if __name__ == "__main__":

@@ -193,3 +193,35 @@ def test_ttft_mean_is_zero_without_samples():
     request_ring.reset()
     request_ring.record_request(_row(ttft_ms=None))
     assert request_ring.requests_ttft_mean_ms() == 0
+
+
+# ------------------------------------------------------- timings ack chain (W2)
+def test_timings_accumulate_from_the_terminal_ack_into_genresult_and_gendone():
+    # The scheduler sends prefill/decode forward times on the terminal reply; the shared
+    # generation layer must surface them on both the stream (GenDone) and buffered
+    # (GenResult) paths, regardless of which wire protocol is on top.
+    timed_terminal = UserReply(
+        uid=42, incremental_output="bc", finished=True, completion_tokens_delta=2,
+        prefill_ms=1500.0, decode_ms=2500.0,
+    )
+    st = FakeState([_ack(prompt=5, completion=1, out="a"), timed_terminal])
+    result = asyncio.run(generate_full(42, _spec(), st, source="/v1/chat/completions"))
+    assert (result.prefill_ms, result.decode_ms) == (1500.0, 2500.0)
+
+    async def drain():
+        done = None
+        async for ev in generate_events(42, _spec(), FakeState([
+            _ack(prompt=5, completion=1, out="a"), timed_terminal,
+        ]), source="/v1/chat/completions"):
+            if isinstance(ev, GenDone):
+                done = ev
+        return done
+
+    done = asyncio.run(drain())
+    assert (done.prefill_ms, done.decode_ms) == (1500.0, 2500.0)
+
+
+def test_timings_default_to_zero_for_acks_that_carry_none():
+    st = FakeState([_ack(prompt=5, completion=1, out="a"), _ack(completion=2, out="bc", finished=True)])
+    result = asyncio.run(generate_full(42, _spec(), st))
+    assert result.prefill_ms == 0.0 and result.decode_ms == 0.0

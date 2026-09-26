@@ -674,6 +674,112 @@ def test_stream_chat_usage_chunk_carries_cached_tokens():
     assert usage["prompt_tokens_details"] == {"cached_tokens": 3}
 
 
+# -------------------------------------------------- timings block (llama.cpp style)
+def _timed_replies(cached: int = 0) -> list[UserReply]:
+    """Admission ack (100-token prompt, optional cache hit) + terminal ack with timings.
+    Analytic fixtures: 100 new tokens over 2000 ms and 10 tokens over 4000 ms are exact.
+    """
+    return [
+        UserReply(
+            uid=42, incremental_output="", finished=False,
+            prompt_tokens_delta=100, cached_tokens=cached,
+        ),
+        UserReply(
+            uid=42, incremental_output="hi", finished=True,
+            completion_tokens_delta=10, prefill_ms=2000.0, decode_ms=4000.0,
+        ),
+    ]
+
+
+def test_non_stream_chat_response_includes_timings_block():
+    response = run(handle_chat_completion(
+        chat_request(tools=None), request=None, state=FakeState(_timed_replies()),
+        model_sampling={},
+    ))
+    timings = response["timings"]
+    assert timings["prompt_n"] == 100
+    assert timings["prompt_ms"] == 2000.0
+    assert timings["predicted_n"] == 10
+    assert timings["predicted_ms"] == 4000.0
+    assert timings["prompt_per_second"] == 50.0   # 100 new tokens / 2 s
+    assert timings["predicted_per_second"] == 2.5  # 10 tokens / 4 s
+    assert timings["cache_n"] == 0
+    # usage behavior unchanged: details stay gated on --enable-cache-report
+    assert "prompt_tokens_details" not in response["usage"]
+
+
+def test_timings_rate_uses_new_tokens_and_cache_n_reports_actual_hit():
+    # 80 of 100 prompt tokens served from cache: the rate covers the 20 NEW tokens only,
+    # and cache_n carries the actual hit even with --enable-cache-report off (timings are
+    # engine measurements, unlike the gated usage details).
+    response = run(handle_chat_completion(
+        chat_request(tools=None), request=None, state=FakeState(_timed_replies(cached=80)),
+        model_sampling={},
+    ))
+    timings = response["timings"]
+    assert timings["prompt_per_second"] == 10.0  # 20 new tokens / 2 s
+    assert timings["cache_n"] == 80
+    assert "prompt_tokens_details" not in response["usage"]
+
+
+def test_timings_omit_rate_keys_at_zero_denominator():
+    # Fully cached prompt: no prefill forward ran (a warmup-excluded time lands here too);
+    # omit the rate instead of reporting a fake 0 tok/s.
+    replies = [
+        UserReply(
+            uid=42, incremental_output="", finished=False,
+            prompt_tokens_delta=100, cached_tokens=100,
+        ),
+        UserReply(
+            uid=42, incremental_output="hi", finished=True,
+            completion_tokens_delta=10, prefill_ms=0.0, decode_ms=4000.0,
+        ),
+    ]
+    response = run(handle_chat_completion(
+        chat_request(tools=None), request=None, state=FakeState(replies), model_sampling={},
+    ))
+    timings = response["timings"]
+    assert "prompt_per_second" not in timings
+    assert timings["prompt_ms"] == 0.0
+    assert timings["predicted_per_second"] == 2.5
+
+
+def test_stream_chat_usage_chunk_carries_timings_block():
+    state = FakeState(_timed_replies(cached=80))
+    req = chat_request(tools=None, stream_options={"include_usage": True})
+
+    async def collect():
+        return [chunk async for chunk in stream_chat_completion_chunks(42, req, state)]
+
+    events = parse_sse(run(collect()))
+    final = next(e for e in reversed(events) if isinstance(e, dict) and e.get("usage"))
+    assert final["timings"]["prompt_per_second"] == 10.0
+    assert final["timings"]["cache_n"] == 80
+    assert final["timings"]["predicted_per_second"] == 2.5
+
+
+def test_stream_chat_without_include_usage_has_no_timings_chunk():
+    # Timings ride the terminal usage chunk only: clients that do not ask for usage get
+    # no extra chunk (llama-swap config injects include_usage - the W1 config wave).
+    state = FakeState(_timed_replies())
+    req = chat_request(tools=None)
+
+    async def collect():
+        return [chunk async for chunk in stream_chat_completion_chunks(42, req, state)]
+
+    events = parse_sse(run(collect()))
+    assert all("timings" not in e for e in events if isinstance(e, dict))
+
+
+def test_non_stream_completions_includes_timings_block():
+    req = CompletionRequest(model="client-model", prompt="say hi", max_tokens=8)
+    response = run(handle_completion(req, request=None, state=FakeState(_timed_replies()), model_sampling={}))
+    timings = response["timings"]
+    assert timings["prompt_per_second"] == 50.0
+    assert timings["predicted_per_second"] == 2.5
+    assert timings["cache_n"] == 0
+
+
 # --------------------------------------------------------------- minimax think
 def test_minimax_http_non_stream_forces_implicit_reasoning_without_request_knob():
     state = FakeState(

@@ -114,6 +114,11 @@ class GenDone:
     completion_tokens: int
     matched_stop: str | None = None
     cached_tokens: int = 0
+    # Accumulated forward timings (ms) from the terminal ack: prefill excludes the
+    # engine-start warmup batch, decode excludes the request's first step (TTFT-class
+    # overhead). 0 when the request had no measurable forward of that kind.
+    prefill_ms: float = 0.0
+    decode_ms: float = 0.0
 
 
 GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
@@ -129,6 +134,9 @@ class GenResult:
     completion_tokens: int
     matched_stop: str | None = None
     cached_tokens: int = 0
+    # Same semantics as GenDone.prefill_ms/decode_ms.
+    prefill_ms: float = 0.0
+    decode_ms: float = 0.0
 
 
 @dataclass
@@ -594,6 +602,8 @@ async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIte
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    prefill_ms = 0.0
+    decode_ms = 0.0
     pending = ""
     parse_tools = spec.parse_tools
     reasoning_parser = _make_reasoning_parser(spec, state)
@@ -689,6 +699,9 @@ async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIte
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
+        # Timings ride the terminal reply; += keeps this robust to reply batching.
+        prefill_ms += getattr(ack, "prefill_ms", 0.0)
+        decode_ms += getattr(ack, "decode_ms", 0.0)
         content_delta = ack.incremental_output
         if reasoning_parser is not None and content_delta:
             reasoning_delta, content_delta = reasoning_parser.parse_stream_chunk(content_delta)
@@ -771,6 +784,7 @@ async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIte
     yield GenDone(
         finish_reason, prompt_tokens, completion_tokens,
         matched_stop=engine_matched_stop, cached_tokens=cached_tokens,
+        prefill_ms=prefill_ms, decode_ms=decode_ms,
     )
 
 
@@ -781,6 +795,8 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    prefill_ms = 0.0
+    decode_ms = 0.0
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
     async for ack in state.wait_for_ack(uid):
@@ -789,6 +805,8 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
+        prefill_ms += getattr(ack, "prefill_ms", 0.0)
+        decode_ms += getattr(ack, "decode_ms", 0.0)
         full_content += ack.incremental_output
         if ack.finished:
             engine_finish_reason = getattr(ack, "finish_reason", None)
@@ -815,4 +833,6 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
         completion_tokens=completion_tokens,
         matched_stop=engine_matched_stop,
         cached_tokens=cached_tokens,
+        prefill_ms=prefill_ms,
+        decode_ms=decode_ms,
     )

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import pytest
 from types import SimpleNamespace
 
-from freetoken.scheduler.status import SchedulerStatusReporter, _usage_ratio
+from freetoken.scheduler.status import (
+    RequestTimingTracker,
+    SchedulerStatusReporter,
+    _usage_ratio,
+)
 
 
 def _reporter(interval=40):
@@ -159,3 +164,129 @@ def test_usage_ratio_guard():
     assert _usage_ratio(0, 0) == 0.0
     assert _usage_ratio(5, 0) == 0.0
     assert _usage_ratio(5, 10) == 0.5
+
+
+# ------------------------------------- measured forward duration (W2/W3 wave)
+def test_prefill_throughput_uses_measured_forward_duration():
+    # Regression for the last-chunk artifact: the report gap (5.2s) suggested an
+    # impossible ~1563 tok/s while the measured forward took the full 8s.
+    rep, logs, clock = _reporter()
+    clock["t"] = 1.0
+    rep.report_batch(
+        _prefill_batch(new_tokens=8128, cached_tokens=0, n_seqs=1),
+        running_reqs=1, queue_reqs=0, kv_used_pages=1, kv_total_pages=10, page_size=1,
+    )
+    clock["t"] = 6.2  # report gap = 5.2s; the batch's forward itself measured 8.0s
+    rep.report_batch(
+        _prefill_batch(new_tokens=8128, cached_tokens=0, n_seqs=1),
+        running_reqs=1, queue_reqs=0, kv_used_pages=1, kv_total_pages=10, page_size=1,
+        forward_ms=8000.0,
+    )
+    assert "input throughput (token/s): 1016.00" in logs[-1]  # 8128 / 8.0
+    assert "1563" not in logs[-1]  # the gap-based artifact value must be gone
+
+
+def test_prefill_throughput_falls_back_to_gap_without_measurement():
+    rep, logs, clock = _reporter()
+    clock["t"] = 0.5  # 30 new tokens over a 0.5s gap -> 60 tok/s (legacy behavior)
+    rep.report_batch(
+        _prefill_batch(new_tokens=30, cached_tokens=12, n_seqs=2),
+        running_reqs=2, queue_reqs=1, kv_used_pages=50, kv_total_pages=200, page_size=16,
+    )
+    assert "input throughput (token/s): 60.00" in logs[-1]
+
+
+def test_warmup_prefill_line_is_marked_and_placeholders_unchanged():
+    rep, logs, clock = _reporter()
+    clock["t"] = 1.0
+    rep.report_batch(
+        _prefill_batch(new_tokens=30, cached_tokens=0, n_seqs=1),
+        running_reqs=1, queue_reqs=0, kv_used_pages=1, kv_total_pages=10, page_size=1,
+        forward_ms=3000.0,
+        warmup=True,
+    )
+    assert logs[-1].endswith(", warmup: true")
+    # the parsed throughput field keeps its place in the line
+    assert "input throughput (token/s): 10.00" in logs[-1]
+    clock["t"] = 2.0
+    rep.report_batch(
+        _prefill_batch(new_tokens=30, cached_tokens=0, n_seqs=1),
+        running_reqs=1, queue_reqs=0, kv_used_pages=1, kv_total_pages=10, page_size=1,
+        forward_ms=3000.0,
+    )
+    assert "warmup" not in logs[-1]
+
+
+def test_decode_window_throughput_uses_measured_batch_durations():
+    # First decode window after a prefill chunk: the wall gap includes the prefill and
+    # understates the rate; the measured decode window excludes it.
+    rep, logs, clock = _reporter(interval=2)
+    clock["t"] = 1.0
+    rep.report_batch(
+        _decode_batch(2), running_reqs=2, queue_reqs=0,
+        kv_used_pages=60, kv_total_pages=200, page_size=16,
+        forward_ms=100.0,
+    )
+    assert logs == []  # throttled
+    clock["t"] = 1.5
+    rep.report_batch(  # a prefill chunk lands inside the decode window
+        _prefill_batch(new_tokens=8000, cached_tokens=0, n_seqs=1),
+        running_reqs=2, queue_reqs=0, kv_used_pages=60, kv_total_pages=200, page_size=16,
+    )
+    clock["t"] = 9.0  # wall gap 8.0s; measured decode window = 0.1 + 0.1 = 0.2s
+    rep.report_batch(
+        _decode_batch(2), running_reqs=2, queue_reqs=0,
+        kv_used_pages=60, kv_total_pages=200, page_size=16,
+        forward_ms=100.0,
+    )
+    assert "gen throughput (token/s): 20.00" in logs[-1]  # 4 tokens / 0.2s
+    assert "0.50" not in logs[-1]  # the gap-based value (4 / 8.0) must be gone
+
+
+# ------------------------------------------------- per-request timing tracker
+def test_tracker_attributes_prefill_by_token_share_and_marks_warmup():
+    tracker = RequestTimingTracker(clock=lambda: 0.0)
+    warmup_batch = SimpleNamespace(log_new_tokens=100, log_req_new_tokens={1: 80, 2: 20})
+    assert tracker.on_prefill_drained(warmup_batch, 1000.0) is True  # first prefill = warmup
+    # warmup time is excluded from the rate, but the touched requests stay marked
+    assert tracker.pop(1) == (0.0, 0.0, True)
+
+    second = SimpleNamespace(log_new_tokens=50, log_req_new_tokens={2: 50})
+    assert tracker.on_prefill_drained(second, 500.0) is False
+    # req 2: warmup-chunk share dropped, steady-state share kept; flag still marks it
+    assert tracker.pop(2) == (pytest.approx(500.0), 0.0, True)
+
+
+def test_tracker_splits_prefill_time_proportionally_to_tokens():
+    tracker = RequestTimingTracker(clock=lambda: 0.0)
+    # burn the engine-start warmup slot so the measured batch is a regular one
+    tracker.on_prefill_drained(SimpleNamespace(log_new_tokens=1, log_req_new_tokens={9: 1}), 0.0)
+    batch = SimpleNamespace(log_new_tokens=100, log_req_new_tokens={1: 75, 2: 25})
+    assert tracker.on_prefill_drained(batch, 1000.0) is False
+    assert tracker.pop(1) == (pytest.approx(750.0), 0.0, False)
+    assert tracker.pop(2) == (pytest.approx(250.0), 0.0, False)
+
+
+def test_tracker_skips_each_requests_first_decode_step():
+    tracker = RequestTimingTracker(clock=lambda: 0.0)
+    first = SimpleNamespace(reqs=[
+        SimpleNamespace(uid=1, decode_batch_idx=1),   # first decode forward: skipped
+        SimpleNamespace(uid=2, decode_batch_idx=2),
+    ])
+    tracker.on_decode_drained(first, 100.0)
+    second = SimpleNamespace(reqs=[
+        SimpleNamespace(uid=1, decode_batch_idx=2),
+        SimpleNamespace(uid=2, decode_batch_idx=3),
+    ])
+    tracker.on_decode_drained(second, 60.0)
+    assert tracker.pop(1) == (0.0, pytest.approx(30.0), False)
+    assert tracker.pop(2) == (0.0, pytest.approx(80.0), False)
+    assert tracker.pop(1) == (0.0, 0.0, False)  # pop clears
+
+
+def test_tracker_batch_forward_ms_measures_launch_to_drain():
+    now = {"t": 1.0}
+    tracker = RequestTimingTracker(clock=lambda: now["t"])
+    launch = tracker.clock()
+    now["t"] = 1.25
+    assert tracker.batch_forward_ms(launch) == pytest.approx(250.0)

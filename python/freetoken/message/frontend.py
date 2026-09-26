@@ -45,6 +45,14 @@ class UserReply(BaseFrontendMsg):
     swa_total_tokens: int = 0
     # Bytes the engine process holds on the GPU (torch reserved pool). 0 when not reported.
     gpu_mem_bytes: int = 0
+    # Accumulated per-request forward timings (ms) from the scheduler, carried on the
+    # terminal reply: prefill excludes the engine-start warmup batch, decode excludes the
+    # request's first step (TTFT-class overhead). Feeds the llama.cpp-style timings block.
+    prefill_ms: float = 0.0
+    decode_ms: float = 0.0
+    # A prefill batch of this request was the engine-start warmup batch (excluded from
+    # prefill_ms and marked in the prefill log line).
+    prompt_warmup: bool = False
     # Set (with finished=True) when a request failed before producing output — e.g. a chat
     # template that the tokenizer cannot render, or a prompt that exceeds the KV budget the
     # scheduler can serve. Carries a human-readable reason. Without this, such a request would

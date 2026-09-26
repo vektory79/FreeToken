@@ -34,7 +34,7 @@ from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .mm import cut_image_spans, plan_mm_batch
 from .prefill import ChunkedReq, PrefillManager
-from .status import SchedulerStatusReporter
+from .status import RequestTimingTracker, SchedulerStatusReporter
 from .table import TableManager
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ class ForwardInput(NamedTuple):
     write_tuple: Indice2D  # (req_mapping, seq_lens or -1)
 
 
-ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
+ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput, float]"  # .., launch clock()
 
 
 class Scheduler(SchedulerIOMixin):
@@ -154,6 +154,8 @@ class Scheduler(SchedulerIOMixin):
             log=logger.info_rank0,
             decode_log_interval=config.decode_log_interval,
         )
+        # Same clock as the status reporter so launch->drain durations and log gaps agree.
+        self.timing_tracker = RequestTimingTracker(clock=self.status_reporter.clock)
 
         # Initialize the I/O mixin
         super().__init__(config, self.engine.tp_cpu_group)
@@ -262,7 +264,8 @@ class Scheduler(SchedulerIOMixin):
                 # cross-stream wait and before the forward reads the live slot (program order
                 # vs the prior batch's snapshot writes). Doing this on self.stream would race.
                 self._restore_linear_states(forward_input.batch)
-                ongoing_data = (forward_input, self._forward(forward_input))
+                t_launch = self.timing_tracker.clock()
+                ongoing_data = (forward_input, self._forward(forward_input), t_launch)
 
         # The drain issues GPU-visible writes to state the batch just launched still reads: the
         # page-table re-point and, for the paged-SWA pools, the full->swa (DSV4: full->window)
@@ -296,7 +299,8 @@ class Scheduler(SchedulerIOMixin):
         if forward_input is not None:
             # already inside engine_stream_ctx (run_forever); restore on the engine stream
             self._restore_linear_states(forward_input.batch)
-            ongoing_data = (forward_input, self._forward(forward_input))
+            t_launch = self.timing_tracker.clock()
+            ongoing_data = (forward_input, self._forward(forward_input), t_launch)
 
         self._process_last_data(ongoing_data)
         self._flush_abort_acks()
@@ -328,10 +332,17 @@ class Scheduler(SchedulerIOMixin):
         if last_data is None:
             return
 
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
+        forward_input, (_, next_tokens_cpu, copy_done), t_launch = last_data
+        batch = forward_input.batch
         copy_done.synchronize()
+        # Measured own-window forward duration of THIS batch (see batch_forward_ms):
+        # excludes host/idle time and the queue wait behind the previous in-flight batch
+        # (the old report-gap log showed a bogus ~1600 tok/s last chunk instead).
+        forward_ms = self.timing_tracker.batch_forward_ms(t_launch)
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
+        stale_uids: Set[int] = set()
+        aborted_uids: Set[int] = set()
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
@@ -350,6 +361,7 @@ class Scheduler(SchedulerIOMixin):
                         # popped the pending continuation (no next chunk launches), and this
                         # drain point frees the chunk's pages/slots exactly once.
                         self._free_req_resources(req)
+                        aborted_uids.add(req.uid)
                     continue
                 if req.aborted:
                     # Aborted while this final-chunk prefill / decode step was in flight: free
@@ -357,6 +369,7 @@ class Scheduler(SchedulerIOMixin):
                     # the abort ack flushed after this method stays the uid's terminal reply.
                     self.decode_manager.remove_req(req)
                     self._free_req_resources(req)
+                    aborted_uids.add(req.uid)
                     new_finished_reqs.add(req)
                     continue
                 if req in self.finished_reqs:
@@ -365,6 +378,7 @@ class Scheduler(SchedulerIOMixin):
                     # and the next batch is scheduled before this drain runs). Its resources
                     # are freed below/already; shipping this token would append past the
                     # client's terminal reply.
+                    stale_uids.add(req.uid)
                     continue
                 next_token = next_tokens_cpu[i]
                 req.append_host(next_token.unsqueeze(0))
@@ -425,6 +439,17 @@ class Scheduler(SchedulerIOMixin):
         used, total = self._kv_usage_pages()
         mamba_slots = self._mamba_slot_usage()
         swa_tokens = self._swa_token_usage()
+        # Attribute THIS drain's forward time BEFORE popping terminal requests: the final
+        # prefill chunk / decode step is part of the request's own timing totals.
+        warmup = False
+        if batch.is_prefill:
+            warmup = self.timing_tracker.on_prefill_drained(batch, forward_ms)
+        elif batch.is_decode:
+            self.timing_tracker.on_decode_drained(batch, forward_ms)
+        # Attribution resurrects entries for aborted and over-launched reqs still listed
+        # in the batch; drop them so the tracker never grows with dead requests.
+        for uid in stale_uids | aborted_uids:
+            self.timing_tracker.pop(uid)
         if reply:
             mem = self._gpu_mem_bytes()
             mamba_used, mamba_total = mamba_slots or (0, 0)
@@ -437,6 +462,10 @@ class Scheduler(SchedulerIOMixin):
                 m.swa_used_tokens = swa_used
                 m.swa_total_tokens = swa_total
                 m.gpu_mem_bytes = mem
+                if m.finished:
+                    # Terminal reply carries the request's accumulated forward timings for
+                    # the timings block; the tracker entry must not outlive the request.
+                    m.prefill_ms, m.decode_ms, m.prompt_warmup = self.timing_tracker.pop(m.uid)
         self.status_reporter.report_batch(
             batch,
             running_reqs=len(self.decode_manager.running_reqs),
@@ -446,8 +475,10 @@ class Scheduler(SchedulerIOMixin):
             page_size=self.config.page_size,
             mamba_slots=mamba_slots,
             swa_tokens=swa_tokens,
-            tier_fn=self.cache_manager.tier_stats_line,   # lazy: evaluated only in the
-        )                                                 # throttled/triggered log branches
+            tier_fn=self.cache_manager.tier_stats_line,  # lazy: called only in log branches
+            forward_ms=forward_ms if forward_ms > 0 else None,
+            warmup=warmup,
+        )
         self.send_result(reply)
 
     def _match_stop_str(self, req: Req) -> str | None:
@@ -604,6 +635,8 @@ class Scheduler(SchedulerIOMixin):
                     req_to_free.aborted = True
                 else:
                     self._free_req_resources(req_to_free)
+                    # No drain will run for this request: release its timing entry here.
+                    self.timing_tracker.pop(msg.uid)
             # Always acknowledge the abort, even when the request already left the manager,
             # but NOT yet: overlap_loop still has to publish the prior forward's sampled reply.
             # _flush_abort_acks runs after _process_last_data, making this a true terminal

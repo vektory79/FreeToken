@@ -234,6 +234,13 @@ async def handle_chat_completion(
             result.completion_tokens,
             _reported_cached(state, result.cached_tokens),
         ),
+        "timings": _timings(
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.cached_tokens,
+            result.prefill_ms,
+            result.decode_ms,
+        ),
     }
 
 
@@ -257,6 +264,8 @@ async def stream_chat_completion_chunks(
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    prefill_ms = 0.0
+    decode_ms = 0.0
     tool_calls_sent = 0
     open_tool: dict[str, Any] | None = None
     events = generate_events(uid, spec, state, source="/v1/chat/completions")
@@ -366,6 +375,8 @@ async def stream_chat_completion_chunks(
             prompt_tokens = ev.prompt_tokens
             completion_tokens = ev.completion_tokens
             cached_tokens = ev.cached_tokens
+            prefill_ms = ev.prefill_ms
+            decode_ms = ev.decode_ms
             yield _sse(_chat_chunk(req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]))
 
     if req.stream_options and req.stream_options.include_usage:
@@ -378,6 +389,9 @@ async def stream_chat_completion_chunks(
                 "choices": [],
                 "usage": _usage(
                     prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)
+                ),
+                "timings": _timings(
+                    prompt_tokens, completion_tokens, cached_tokens, prefill_ms, decode_ms
                 ),
             }
         )
@@ -422,6 +436,8 @@ async def handle_completion(
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    prefill_ms = 0.0
+    decode_ms = 0.0
     for index, prompt in enumerate(prompts):
         uid = state.new_user()
         await state.send_one(
@@ -441,6 +457,8 @@ async def handle_completion(
             prompt_tokens += ack.prompt_tokens_delta
             completion_tokens += ack.completion_tokens_delta
             cached_tokens += ack.cached_tokens
+            prefill_ms += getattr(ack, "prefill_ms", 0.0)
+            decode_ms += getattr(ack, "decode_ms", 0.0)
             text += ack.incremental_output
             if ack.finished:
                 finish_reason = getattr(ack, "finish_reason", None) or "stop"
@@ -454,6 +472,7 @@ async def handle_completion(
         "model": req.model,
         "choices": choices,
         "usage": _usage(prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)),
+        "timings": _timings(prompt_tokens, completion_tokens, cached_tokens, prefill_ms, decode_ms),
     }
 
 
@@ -461,6 +480,8 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    prefill_ms = 0.0
+    decode_ms = 0.0
     finish_reason = "stop"
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
@@ -470,6 +491,8 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
+        prefill_ms += getattr(ack, "prefill_ms", 0.0)
+        decode_ms += getattr(ack, "decode_ms", 0.0)
         if ack.incremental_output:
             yield _sse(
                 {
@@ -510,6 +533,9 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
                 "choices": [],
                 "usage": _usage(
                     prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)
+                ),
+                "timings": _timings(
+                    prompt_tokens, completion_tokens, cached_tokens, prefill_ms, decode_ms
                 ),
             }
         )
@@ -641,6 +667,35 @@ def _usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -
     if cached_tokens > 0:
         usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
     return usage
+
+
+def _timings(
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int,
+    prefill_ms: float,
+    decode_ms: float,
+) -> dict[str, Any]:
+    """llama.cpp-compatible timings block; llama-swap parses it above OpenAI usage.
+
+    cache_n and the rates always reflect the ACTUAL prefix-cache hit (usage gates its
+    details on --enable-cache-report): prompt_per_second must cover only the tokens
+    really forwarded. Rates are omitted at a zero denominator rather than reported as
+    0 tok/s - a fully cached prompt has prompt_ms == 0 by construction.
+    """
+    timings: dict[str, Any] = {
+        "prompt_n": prompt_tokens,
+        "prompt_ms": round(prefill_ms, 2),
+        "predicted_n": completion_tokens,
+        "predicted_ms": round(decode_ms, 2),
+    }
+    new_tokens = prompt_tokens - cached_tokens
+    if prefill_ms > 0 and new_tokens > 0:
+        timings["prompt_per_second"] = round(new_tokens / (prefill_ms / 1000.0), 2)
+    if decode_ms > 0 and completion_tokens > 0:
+        timings["predicted_per_second"] = round(completion_tokens / (decode_ms / 1000.0), 2)
+    timings["cache_n"] = cached_tokens
+    return timings
 
 
 def _response_format_unsupported(response_format: dict[str, Any] | None) -> bool:
