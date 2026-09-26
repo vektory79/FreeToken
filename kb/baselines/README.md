@@ -32,6 +32,11 @@
   stage-raw, quality-этапы.
   Якорь: тайл 32, +67.2% @8128 = 556.43 tok/s (коммит 1706aae);
   production-дефолт MOE_MTILE=32.
+- [decode-research/](decode-research/) — декод-кампания гибридного MoE: 8 рук
+  arm_*.json, T1-дампы stats_*.json, сэмплер sample_per_cpu_base.csv; таблица,
+  аддитивная модель шага и вердикты - в [decode-research/RESULTS.md](decode-research/RESULTS.md).
+  Якоря: база 16.29 tok/s @64k (конфиг пользователя, 2026-09-26, HEAD 0ff8495);
+  ov0 -23.5%, flagsync0 -21.6%, fetch0 -39.4%, offload 13.72 tok/s, eager ~= graphed.
 - [session-cache-tiering-arms.md](session-cache-tiering-arms.md) — ярусный кеш
   сессий: якорные числа железных рук по трём моделям (GLM-5.3 GGUF,
   Qwen3.8-Flash-Next, Qwen3.8-27B dense-hybrid), общий tier-хвост конфига и

@@ -9,6 +9,11 @@ Specification / Acceptance / Checklist.
 - [dense-q80-gemm/](dense-q80-gemm/) — полный цикл кампании: бриф, триаж
   nsplit/step0, ревью волн A/B и свипа (review-a-*/review-b-*). Учит, как
   ревью фиксируют отклонения от брифа. Вход: [TASK.md](dense-q80-gemm/TASK.md).
+- [decode-t2-host-delivery/](decode-t2-host-delivery/) — бриф T2: совмещённая
+  доставка host-DRAM в декоде гибрида (микро-простои пинг-понга ног, 41.5 из
+  72 GB/s) — единственный живой рычаг декода после decode-research 2026-09-26;
+  опровергнутые направления перечислены внутри, чтобы не тратить сессии.
+  Вход: [TASK.md](decode-t2-host-delivery/TASK.md). Статус: NOT STARTED.
 - [fix1-radix-track-seqlen/](fix1-radix-track-seqlen/) — баг-фикс с тестом
   «падает до / проходит после» и hardware-верификацией. Вход:
   [TASK.md](fix1-radix-track-seqlen/TASK.md). Статус: COMMITTED (5b72aba).

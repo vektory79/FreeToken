@@ -14,6 +14,7 @@
 | [probes/](probes/README.md) | Зонды железа RTX 5090 / NVMe: PCIe BW, RAM/DRAM BW, size-scaling, NVMe-термика |
 | [repro/](repro/README.md) | Воспроизводители: crash-mr080, boot-smoke мердж-волн, волновой раннер |
 | [ftw/](ftw/README.md) | GGUF->FTW: конвертация wave1, верификация конвертации, measure/parity wave2 |
+| [decode-research/](decode-research/README.md) | Декод-кампания гибридного MoE: run_arm.py/campaign.py (A/B рук @64k radix-reuse), analyze.py/analyze_trace.py, T1-драйвер статистики driver/sitecustomize.py |
 
 Ключевые входы (по одному на типовую задачу):
 

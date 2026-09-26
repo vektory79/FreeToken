@@ -1,0 +1,74 @@
+{
+ "name": "flagsync0",
+ "extra": "",
+ "env": [
+  "FREETOKEN_CPU_MOE_FLAG_SYNC=0"
+ ],
+ "started": "2026-09-26 21:55:30",
+ "ready": true,
+ "ready_s": 89.5,
+ "ready_why": "ok",
+ "gpu_after_boot_mib": 27514,
+ "fill": {
+  "wall_s": 4.28,
+  "error": null,
+  "prompt_tokens": 65585,
+  "cached_token": 65536,
+  "new_token": 49,
+  "throughput_lines": [
+   "\u001b[1m[2026-09-26|21:57:03|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 49, #cached-token: 65536, token usage: 0.16, #mamba-slot: 3/8, mamba usage: 0.38, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=1/3, restore=0(l1)/1(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 1, #queue-req: 0, input throughput (token/s): 14.50"
+  ]
+ },
+ "decode": {
+  "wall_s": 47.3,
+  "error": null,
+  "completion_tokens": 545,
+  "chunks": 545,
+  "steady_tok_s": 12.77,
+  "ttft_s": 0.58,
+  "first_frame_to_last_s": 42.54,
+  "p50_step_ms": 67.2,
+  "max_step_ms": 184.3,
+  "cached_token": 65536,
+  "new_token": 49
+ },
+ "log": {
+  "moe_cache_size|num_pages|Allocating .* KV|Allocating .*tokens": [
+   "ServerArgs(model_path='/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-FTW/', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, attention_backend='auto', moe_strategy='hybrid', quant_backend=None, ple_backend='disk', expert_load='auto', moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=400000, moe_cache_policy='lru', moe_prefill_overlap=True, moe_prefill_hit_d2d=False, moe_collect_stats=False, moe_cpu_threads=16, moe_cpu_layers=None, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, kv_quant='fp8', memory_ratio=0.82, linear_state_cache_ratio=2.0, session_tier_ram_gib=10.0, session_tier_dir='/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/cache', session_tier_ssd_gib=50.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=None, num_page_override=None, num_token_override=None, mm=MultimodalConfig(disabled_encoders=frozenset(), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8191, cache_type='radix', offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=2236524', server_host='127.0.0.1', server_port=18801, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='GLM-5.3-Flash-UD-Q3_K_XL-FTW', tool_call_parser='glm47', reasoning_parser='glm', sampling_defaults='model', max_output_tokens=None, enable_cache_report=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', gpu=(), gpu_assigned=None)",
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-cache-auto resolved moe_cache_size=1095 num_pages=6267 (prefill_overlap=True)",
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Allocating 401088 tokens for KV cache, K + V = 2.38 GiB"
+  ],
+  "fetching .*over PCIe|hybrid_max_fetch|fetch fraction": [
+   "ServerArgs(model_path='/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-FTW/', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, attention_backend='auto', moe_strategy='hybrid', quant_backend=None, ple_backend='disk', expert_load='auto', moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=400000, moe_cache_policy='lru', moe_prefill_overlap=True, moe_prefill_hit_d2d=False, moe_collect_stats=False, moe_cpu_threads=16, moe_cpu_layers=None, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, kv_quant='fp8', memory_ratio=0.82, linear_state_cache_ratio=2.0, session_tier_ram_gib=10.0, session_tier_dir='/media/ai/models/unsloth/GLM-5.3-Flash-GGUF/UD-Q3_K_XL/cache', session_tier_ssd_gib=50.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=None, num_page_override=None, num_token_override=None, mm=MultimodalConfig(disabled_encoders=frozenset(), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8191, cache_type='radix', offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=2236524', server_host='127.0.0.1', server_port=18801, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='GLM-5.3-Flash-UD-Q3_K_XL-FTW', tool_call_parser='glm47', reasoning_parser='glm', sampling_defaults='model', max_output_tokens=None, enable_cache_report=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', gpu=(), gpu_assigned=None)",
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-hybrid-max-fetch auto: fetching 30.7% of each decode step's expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU",
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-hybrid-max-fetch auto: fetching 30.7% of each decode step's expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU",
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m --moe-hybrid-max-fetch auto: fetching 30.7% of each decode step's expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU"
+  ],
+  "pool .*core|affinit|CPU MoE executor|isa=": [
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m CPU MoE executor ready [pool 1/3: gguf (18, 18, 23) x39 layers]: threads=15 (pinned to cores 0..22) isa=avx2+gguf(iq/qk)+avx2-w4a8k fmt=iq3_xxs (up=iq3_xxs, down=iq4_xs) H=4096 I=2048 experts=288 layers=39 top_k=8 act=swiglu_clamp max_tokens=1",
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m CPU MoE executor ready [pool 2/3: gguf (23, 23, 14) x1 layers]: threads=1 (pinned to cores 23..23) isa=avx2+gguf(iq/qk)+avx2-w4a8k fmt=iq4_xs (up=iq4_xs, down=q6_k) H=4096 I=2048 experts=288 layers=1 top_k=8 act=swiglu_clamp max_tokens=1",
+   "\u001b[1m[2026-09-26|21:56:16|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m CPU MoE executor ready [pool 3/3: gguf (18, 18, 14) x2 layers]: threads=1 (pinned to cores 24..24) isa=avx2+gguf(iq/qk)+avx2-w4a8k fmt=iq3_xxs (up=iq3_xxs, down=q6_k) H=4096 I=2048 experts=288 layers=2 top_k=8 act=swiglu_clamp max_tokens=1"
+  ],
+  "input throughput": [
+   "\u001b[1m[2026-09-26|21:56:53|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 13, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/8, mamba usage: 0.00, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=0/1, restore=0(l1)/0(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 0, #queue-req: 1, input throughput (token/s): 0.93, warmup: true",
+   "\u001b[1m[2026-09-26|21:56:56|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 13, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/8, mamba usage: 0.00, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=0/2, restore=0(l1)/0(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 0, #queue-req: 1, input throughput (token/s): 4.01",
+   "\u001b[1m[2026-09-26|21:56:59|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 13, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/8, mamba usage: 0.00, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=0/3, restore=0(l1)/0(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 0, #queue-req: 0, input throughput (token/s): 4.02",
+   "\u001b[1m[2026-09-26|21:57:03|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 49, #cached-token: 65536, token usage: 0.16, #mamba-slot: 3/8, mamba usage: 0.38, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=1/3, restore=0(l1)/1(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 1, #queue-req: 0, input throughput (token/s): 14.50",
+   "\u001b[1m[2026-09-26|21:57:08|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 49, #cached-token: 65536, token usage: 0.16, #mamba-slot: 3/8, mamba usage: 0.38, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=2/3, restore=0(l1)/2(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 1, #queue-req: 0, input throughput (token/s): 13.85"
+  ],
+  "new-token|cached-token": [
+   "\u001b[1m[2026-09-26|21:56:53|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 13, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/8, mamba usage: 0.00, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=0/1, restore=0(l1)/0(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 0, #queue-req: 1, input throughput (token/s): 0.93, warmup: true",
+   "\u001b[1m[2026-09-26|21:56:56|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 13, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/8, mamba usage: 0.00, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=0/2, restore=0(l1)/0(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 0, #queue-req: 1, input throughput (token/s): 4.01",
+   "\u001b[1m[2026-09-26|21:56:59|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 13, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/8, mamba usage: 0.00, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=0/3, restore=0(l1)/0(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 0, #queue-req: 0, input throughput (token/s): 4.02",
+   "\u001b[1m[2026-09-26|21:57:03|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 49, #cached-token: 65536, token usage: 0.16, #mamba-slot: 3/8, mamba usage: 0.38, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=1/3, restore=0(l1)/1(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 1, #queue-req: 0, input throughput (token/s): 14.50",
+   "\u001b[1m[2026-09-26|21:57:08|core|rank=0]\u001b[0m \u001b[32mINFO    \u001b[0m Prefill batch, #new-seq: 1, #new-token: 49, #cached-token: 65536, token usage: 0.16, #mamba-slot: 3/8, mamba usage: 0.38, session-tier: l1=0.0MiB, l2=42407.6MiB, offers=0/0, dedup=0, probes=2/3, restore=0(l1)/2(l2), evict=0, demote=0, discard=0, dead=0.0MiB, pf=0/0/0, #running-req: 1, #queue-req: 0, input throughput (token/s): 13.85"
+  ],
+  "ready in|Ready in|Uvicorn running": [
+   "INFO:     Uvicorn running on http://127.0.0.1:18801 (Press CTRL+C to quit)"
+  ]
+ },
+ "teardown": {
+  "leftover": [],
+  "gpu_mib": 1870
+ }
+}

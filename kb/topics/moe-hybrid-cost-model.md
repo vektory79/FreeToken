@@ -108,3 +108,30 @@ CPU-ноге 26.9 GB/s эффективных — гибрид РЕКОМЕНД�
 - Смежное: префилл — [prefill-throughput.md](prefill-throughput.md);
   VRAM-план гибрида — [vram-budget.md](vram-budget.md); термины —
   [glossary.md](../glossary.md).
+
+## 2026-09-26: 5-arm A/B + T1 decomposition (supersedes the fixed handshake-floor framing)
+
+Кампания decode-research (риг i7-14700KF + RTX 5090, конфиг пользователя
+0.82/400k, kv fp8, tier 10/50, 8191; GLM-5.3-Flash-UD-Q3_K_XL GGUF/FTW;
+декод @64k radix-reuse, 768 токенов, temp 0): таблица чисел -
+[../baselines/decode-research/RESULTS.md](../baselines/decode-research/RESULTS.md),
+харнесс - [../harness/decode-research/README.md](../harness/decode-research/README.md).
+
+- Аддитивная модель, ложащаяся на все руки: шаг = stream-serialized span
+  (гибрид ~59 ms из 62 wall); overlap прячет ~19 ms CPU-работы (ov0 -23.5%),
+  выключение flag-sync добавляет +17 ms (flagsync0 -21.6%; переворачивает
+  рейтинг микробенча task06: h=3.02 memop против 1.90 hostfunc); объём
+  сплита НЕ рычаг (fetch3 -0.9%, fetch0 -39.4%); offload на том же конфиге
+  13.72 tok/s; eager ~= graphed (15.84 против 15.82).
+- Фиксированного «пола хэндшейка» нет - есть связка CPU-нога x объём фетча:
+  суммарная host-доставка 2.57 GiB/шаг при ~41.5 GB/s эффективных против
+  72 GB/s у перекрывающейся пары benchbw -> пер-слойные ping-pong микро-паузы
+  = живой рычаг (бриф T2: [../cases/decode-t2-host-delivery/TASK.md](../cases/decode-t2-host-delivery/TASK.md)).
+- T3 cache-policy ОПРОВЕРГНУТ оракулом (eager-прогон, decode_routing_stats):
+  oracle_hit 25.7% против LRU 25.1% (доминирующая партиция 39 слоёв,
+  8.56 слотов/слой, working set 184/288 экспертов, norm-энтропия 0.83) ->
+  миссы режет только больше VRAM-слотов.
+- Инструменты: драйвер v3 хукает GraphRunner.replay (декод-шаги - реплеи
+  CUDA-графов; host-код модели на шаг НЕ выполняется); kineto torch.profiler
+  убивает планировщик (по умолчанию events-only); гистограмма маршрутизации
+  честна только в eager (--cuda-graph-max-bs 0).
