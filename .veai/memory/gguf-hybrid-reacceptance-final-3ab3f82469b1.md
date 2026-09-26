@@ -3,7 +3,7 @@ name: "gguf-hybrid-reacceptance-final"
 description: "GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff"
 type: project
 lastUpdated: 2026-09-16T20:16
-lastRecall: 2026-09-24T14:15
+lastRecall: 2026-09-26T17:18
 ---
 
 # GGUF glm5next hybrid: FINAL re-acceptance - hybrid RECOMMENDED

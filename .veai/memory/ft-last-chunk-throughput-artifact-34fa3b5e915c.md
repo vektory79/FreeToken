@@ -3,7 +3,7 @@ name: "ft-last-chunk-throughput-artifact"
 description: "Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last"
 type: project
 lastUpdated: 2026-09-17T18:22
-lastRecall: 2026-09-25T16:52
+lastRecall: 2026-09-26T18:28
 ---
 
 # Last-chunk throughput artifact in ft serve prefill logs

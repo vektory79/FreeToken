@@ -2,8 +2,8 @@
 name: "ft-session-cache-tiering-phase1"
 description: "Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands"
 type: project
-lastUpdated: 2026-09-23T20:15
-lastRecall: 2026-09-26T00:35
+lastUpdated: 2026-09-26T17:24
+lastRecall: 2026-09-26T17:19
 ---
 
 # Session-cache-tiering phase 1 (SessionTierStore) - CPU phase done, uncommitted
@@ -50,3 +50,5 @@ Review-1 caught 4 blockers the implementer missed (dup init block w/ NameError l
 ## OPERATOR DECISIONS (2026-09-23, user)
 - ulimit -l hard limit stays 23.56 GiB (NO root raise). Production L1 = --session-tier-ram-gib 10; worst case ~13 GiB -> mid-run L1->L2 demotion accepted by design.
 - Second model in rotation: Qwen3.8-Flash-Next-NVFP4-FTW (serve: moe-cpu-threads 16, moe-backend hybrid, kv-reserve 262144, mr=1, moe.nvfp4=triton; NO tier flags today -> tier OFF for it). Boot sanity check pending (needs VRAM window). Tier fit findings + phase-2 scoping: see memory ft-qwen38-flashnext-tier-fit (HAZARD: tier would activate for Qwen3.8 with incomplete QSA codec -> do NOT pass tier flags until guard/codec lands).
+
+UPDATE 2026-09-26: the Qwen3.8 hazard noted in OPERATOR DECISIONS is RESOLVED - the S-wave QSA codec (slab+rope rows) landed and Qwen3.8-Flash-Next tiering is HW-verified (reboot HIT, zero integrity fails); see ft-tier-phase2-swave and ft-qwen38-flashnext-tier-fit.

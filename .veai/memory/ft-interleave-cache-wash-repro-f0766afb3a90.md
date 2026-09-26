@@ -2,8 +2,8 @@
 name: "ft-interleave-cache-wash-repro"
 description: "Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x"
 type: project
-lastUpdated: 2026-09-22T23:53
-lastRecall: 2026-09-24T14:15
+lastUpdated: 2026-09-26T17:23
+lastRecall: 2026-09-26T17:18
 ---
 
 # Interleave cache wash (orchestrator/subagent): hardware-confirmed + flag-level fix
@@ -39,3 +39,8 @@ User's orchestrator rig: switch to `--linear-state-cache-ratio 8 --kv-reserve-to
 - More than 2 agents; several sessions may run in parallel (mr may grow).
 - Budgets user will donate: up to 30 GB RAM (pinned-cache candidate) and up to 100 GB NVMe @ ~5 GB/s.
 - Direction chosen: tiered session cache (L0 VRAM -> L1 RAM 30GB -> L2 SSD 100GB) as the PRIMARY fix, kb/topics/session-cache-tiering.md is the design article. Grid retention policy open question (R=1 tip-only vs R=3 vs adaptive below-divergence).
+
+## Diagnosis-pass extras (merged 2026-09-26 from hybrid-interleave-snapshot-washout)
+- Donation load: fix-3 per-chunk donation commits ~8-9 snapshots per ~58k-turn (grid 8064, 16192, ...); each commit fires ensure_mamba_slots -> evict_mamba.
+- Pool-capacity bound: holding BOTH ~60k conversations simultaneously needs ~17-18 evictable slots = ratio ~16-20 (+1.7-2.2 GiB), beyond the ratio-8 arm; flag lever softens but cannot solve it.
+- Original code-fix candidates (pin finished-conversation tips, evict intermediate grid nodes before tips, CPU-spill snapshots ~140.76 MiB/slot copy) were superseded by the user-chosen tiered session cache direction (see ft-session-cache-tiering-phase1); tip-protection remains the fallback if the tier is insufficient.

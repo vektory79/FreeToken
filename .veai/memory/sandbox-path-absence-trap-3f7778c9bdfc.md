@@ -3,6 +3,7 @@ name: "sandbox-path-absence-trap"
 description: "Delegated agents' list_dir is sandboxed to project root; outside paths falsely reported absent - verify via IDE terminal"
 type: project
 lastUpdated: 2026-09-23T20:10
+lastRecall: 2026-09-26T18:28
 ---
 
 # Sandbox tool false-absence trap: ask-agent list_dir sees only project root

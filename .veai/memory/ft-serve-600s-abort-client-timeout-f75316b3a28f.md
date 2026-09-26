@@ -3,7 +3,7 @@ name: "ft-serve-600s-abort-client-timeout"
 description: "ft serve ~600s decode abort = client SDK default timeout; 'Aborting request' log + 0-token ring row discriminate"
 type: project
 lastUpdated: 2026-09-25T22:52
-lastRecall: 2026-09-26T11:05
+lastRecall: 2026-09-26T18:28
 ---
 
 # ft serve: decode aborting after ~10 minutes is a CLIENT-side timeout, not a server bug (HW-confirmed 2026-09-25)

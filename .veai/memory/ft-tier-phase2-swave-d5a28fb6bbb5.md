@@ -3,7 +3,7 @@ name: "ft-tier-phase2-swave"
 description: "Tier phase-2; offer-supersede e5dd1f2 no-op on hybrid flush; kb amended, l2-snapshot-dedup brief ready (extents)"
 type: project
 lastUpdated: 2026-09-25T18:29
-lastRecall: 2026-09-25T23:37
+lastRecall: 2026-09-26T17:19
 ---
 
 # Session-tier phase-2 S-wave (metrics, scheduled compaction, safety guards)

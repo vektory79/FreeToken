@@ -44,14 +44,14 @@
 - [kb-authoring-user-requirements](kb-authoring-user-requirements-d5e5128874ab.md) — User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity
 - [local-llm-vram-protocol](local-llm-vram-protocol-99ff7827a0e7.md) — Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model
 - [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md
-- [hybrid-interleave-snapshot-washout](hybrid-interleave-snapshot-washout-dce37ef61e12.md) — HybridRadixCache cross-convo snapshot wash: evict_mamba FIFO; pool=4*mr+max(4,ceil(ratio*mr))+1; ratio flag; wash tests
 - [process-hygiene-protocol](process-hygiene-protocol-74ae16a3c293.md) — Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment
-- [ft-interleave-cache-wash-repro](ft-interleave-cache-wash-repro-0065e2ed9c34.md) — Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x
 - [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-6668ba48ee3d.md) — HybridRadixCache test integrity rules + tiering store tests carry own det-clock fixture
 - [sandbox-path-absence-trap](sandbox-path-absence-trap-3f7778c9bdfc.md) — Delegated agents' list_dir is sandboxed to project root; outside paths falsely reported absent - verify via IDE terminal
-- [ft-qwen38-flashnext-tier-fit](ft-qwen38-flashnext-tier-fit-545891f65e1f.md) — Qwen3.8 qwen4_exp hybrid: QSAKVCache passes tier gate, codec incomplete -> corruption risk; phase-2 scoping S/M/L
-- [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-43255b68e674.md) — Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands
 - [lean-subagent-context](lean-subagent-context-32151731dde8.md) — Cloud LLM: do not resume big-context subagents (costly); prefer fresh narrow agents; resume only for tiny deltas
 - [ft-tier-phase2-swave](ft-tier-phase2-swave-d5a28fb6bbb5.md) — Tier phase-2; offer-supersede e5dd1f2 no-op on hybrid flush; kb amended, l2-snapshot-dedup brief ready (extents)
 - [ft-serve-600s-abort-client-timeout](ft-serve-600s-abort-client-timeout-f75316b3a28f.md) — ft serve ~600s decode abort = client SDK default timeout; 'Aborting request' log + 0-token ring row discriminate
 - [ft-serve-shutdown-grace-kills-tier-flush](ft-serve-shutdown-grace-kills-tier-flush-d0b0eee76b02.md) — ft serve tier-flush on llama-swap stop FIXED: worker SIGTERM handler, commit f5e51fd
+- [ft-interleave-cache-wash-repro](ft-interleave-cache-wash-repro-f0766afb3a90.md) — Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x
+- [ft-qwen38-flashnext-tier-fit](ft-qwen38-flashnext-tier-fit-b5f533d1ae86.md) — Qwen3.8 qwen4_exp QSAKVCache tier-fit anchors; QSA corruption hazard RESOLVED by phase-2 codec (ft-tier-phase2-swave)
+- [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-67e8a5a7a071.md) — Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands
+- [ft-serve-llama-swap-metrics-brief](ft-serve-llama-swap-metrics-brief-abf857ee5263.md) — llama-swap stats accepted on HW; endpoint /api/metrics/activity; D4 tail-chunk inflation; page_size=64 quirk
