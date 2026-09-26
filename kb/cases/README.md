@@ -46,6 +46,12 @@ Specification / Acceptance / Checklist.
 - [skill-reviews/](skill-reviews/) — ревью скиллов с TP/FP-классификацией
   находок — образец структуры ревью. Вход:
   [merge-main-into-vektory79/review-2.md](skill-reviews/merge-main-into-vektory79/review-2.md).
+- [serve-llama-swap-metrics/](serve-llama-swap-metrics/) — бриф: полная
+  статистика запросов llama-swap для ft serve (usage/timings, честные скорости
+  префила и декода без warmup/last-chunk артефактов). W1 (конфиг) + W5
+  (hardware acceptance, обе ft-секции) приняты; код W2-W4 в рабочем дереве.
+  Входы: [TASK.md](serve-llama-swap-metrics/TASK.md),
+  [REPORT.md](serve-llama-swap-metrics/REPORT.md). Статус: W5 DONE.
 
 ## Навигация
 
