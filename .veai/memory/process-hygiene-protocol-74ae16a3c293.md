@@ -3,7 +3,7 @@ name: "process-hygiene-protocol"
 description: "Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment"
 type: feedback
 lastUpdated: 2026-09-22T20:42
-lastRecall: 2026-09-25T00:15
+lastRecall: 2026-09-26T00:35
 ---
 
 # Process-hygiene protocol for agent test waves

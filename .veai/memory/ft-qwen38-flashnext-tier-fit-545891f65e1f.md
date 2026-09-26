@@ -3,7 +3,7 @@ name: "ft-qwen38-flashnext-tier-fit"
 description: "Qwen3.8 qwen4_exp hybrid: QSAKVCache passes tier gate, codec incomplete -> corruption risk; phase-2 scoping S/M/L"
 type: project
 lastUpdated: 2026-09-23T20:15
-lastRecall: 2026-09-25T00:47
+lastRecall: 2026-09-25T14:33
 ---
 
 # Qwen3.8-Flash-Next (qwen4_exp) tier fit + phase-2 scoping

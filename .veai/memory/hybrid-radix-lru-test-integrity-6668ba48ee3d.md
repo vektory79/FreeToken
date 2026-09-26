@@ -3,7 +3,7 @@ name: "hybrid-radix-lru-test-integrity"
 description: "HybridRadixCache test integrity rules + tiering store tests carry own det-clock fixture"
 type: project
 lastUpdated: 2026-09-23T10:08
-lastRecall: 2026-09-24T15:46
+lastRecall: 2026-09-25T18:19
 ---
 
 # Test integrity for hybrid radix LRU tests (Fix-3 wave lessons, 2026-09-21)

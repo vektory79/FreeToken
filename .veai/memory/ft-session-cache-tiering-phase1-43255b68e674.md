@@ -3,7 +3,7 @@ name: "ft-session-cache-tiering-phase1"
 description: "Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands"
 type: project
 lastUpdated: 2026-09-23T20:15
-lastRecall: 2026-09-25T01:35
+lastRecall: 2026-09-26T00:35
 ---
 
 # Session-cache-tiering phase 1 (SessionTierStore) - CPU phase done, uncommitted
