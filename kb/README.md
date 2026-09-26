@@ -55,7 +55,8 @@ serving на RTX 5090): методики измерений, переиспол�
   числа -> как измерить): префилл ([prefill-throughput.md](topics/prefill-throughput.md)),
   VRAM-бюджет ([vram-budget.md](topics/vram-budget.md)), переиспользование
   radix-кэша ([radix-cache-reuse.md](topics/radix-cache-reuse.md)), стоимость
-  гибридного MoE ([moe-hybrid-cost-model.md](topics/moe-hybrid-cost-model.md)).
+  гибридного MoE ([moe-hybrid-cost-model.md](topics/moe-hybrid-cost-model.md)),
+  graceful-остановка ft serve ([ft-serve-shutdown-signals.md](topics/ft-serve-shutdown-signals.md)).
 - [glossary.md](glossary.md) — глоссарий терминов kb (mr, MTILE, step-0, MMQ,
   fail-fast gate, ...) с ссылками на основной документ по каждому термину.
 - [reports/](reports/README.md) - текстовые выжимки nsys-профилей кампаний
