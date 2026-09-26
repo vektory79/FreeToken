@@ -1,9 +1,9 @@
 ---
 name: "gguf-hybrid-decode-handshake-floor"
-description: "GGUF hybrid per-layer cost = fetch volume + 0.6-1.0 ms sync; hardware-validated 1.43 ms/layer at 16.67 tok/s"
+description: "Hybrid decode per-layer cost model: no fixed handshake floor; CPU-leg x fetch-volume coupling; 26.9 GB/s idle-inflated"
 type: project
-lastUpdated: 2026-09-15T18:18
-lastRecall: 2026-09-22T11:22
+lastUpdated: 2026-09-26T22:29
+lastRecall: 2026-09-26T23:36
 ---
 
 # GGUF hybrid per-layer cost: fetch volume (endogenous to CPU-leg speed) + ~0.6-1.0 ms sync
@@ -22,3 +22,6 @@ What actually holds:
 
 ## 2026-09-15 (final): hardware-validated end-to-end
 The corrected model survived hardware re-acceptance: GGUF hybrid with the ported ggml kernels measured 16.67 tok/s @64k = 60.0 ms/step = 1.43 ms/layer all-in (f=30.7%, CPU leg 26.9 GB/s effective on the weighted [15,1,1] split, 19.9/20 cores) - BELOW even the 0.6-1.0 ms fixed-sync band plus modeled legs, i.e. the legs overlap better than the conservative model assumed. The fixed-sync-only footprint stays small; the actionable lesson stands: per-layer cost tracks CPU-leg bandwidth and fetch volume, not a fixed floor.
+
+## 2026-09-26 caveat: the "26.9 GB/s effective" figure above is idle-inflated
+The decode-research 5-arm A/B (ft-decode-research-campaign + .tasks/decode-research/) showed the pool is busy only ~59% of the decode window (burst ~45 GB/s ~= bench 50), fetch-split volume is NOT a lever (cap-3 neutral), and the step fits an additive model with a ~44 ms GPU_chain+sync block (1.06 ms/layer) plus a fixed ~17 ms per-layer CPU_exposed component. Full arms, model and next-campaign plan live in that memory - not repeated here.

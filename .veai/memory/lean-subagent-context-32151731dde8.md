@@ -3,7 +3,7 @@ name: "lean-subagent-context"
 description: "Cloud LLM: do not resume big-context subagents (costly); prefer fresh narrow agents; resume only for tiny deltas"
 type: feedback
 lastUpdated: 2026-09-25T01:23
-lastRecall: 2026-09-25T01:24
+lastRecall: 2026-09-26T23:44
 ---
 
 # Минимальный контекст для субагентов

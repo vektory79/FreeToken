@@ -3,7 +3,7 @@ name: "measured-advice-over-paper"
 description: "User rejects paper extrapolations as config advice; demands measured numbers (2026-09-20 VRAM-headroom case)"
 type: feedback
 lastUpdated: 2026-09-20T14:07
-lastRecall: 2026-09-20T14:24
+lastRecall: 2026-09-26T23:44
 ---
 
 # Measured advice over paper extrapolations (user expectation)

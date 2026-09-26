@@ -3,7 +3,7 @@ name: "git-stale-index-parallel-sessions"
 description: "Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit"
 type: project
 lastUpdated: 2026-09-16T19:29
-lastRecall: 2026-09-26T11:12
+lastRecall: 2026-09-26T23:45
 ---
 
 # Stale git index + параллельные пользовательские коммиты

@@ -1,9 +1,9 @@
 ---
 name: "rtx5090-pcie-gen5-bw-cap"
-description: "RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts"
+description: "RTX 5090 rig (i7-14700KF 8P+12E, AVX2-only): Gen5 DMA cap = IOMMU Translated; iommu=pt restores 46/57 GB/s; probes"
 type: project
-lastUpdated: 2026-09-13T23:42
-lastRecall: 2026-09-24T14:20
+lastUpdated: 2026-09-26T21:54
+lastRecall: 2026-09-26T21:53
 ---
 
 # RTX 5090 PCIe Gen5 bandwidth cap on work.vektory79.me - ROOT CAUSE: IOMMU Translated mode (fixed 2026-09-12)
@@ -31,3 +31,8 @@ On consumer Intel + IOMMU Translated default, any ATS-less DMA device can be cap
 ## Artifacts
 - Full article (fix steps, verification checklist, false hypotheses, measurements): /media/ai/src/FreeToken/.veai/docs/rtx5090-pcie-gen5-iommu-bandwidth.md
 - Probe scripts: /media/ai/src/FreeToken/.tasks/pcie-bw-probe/ (pcie_bw_probe.py, size_scaling.py, dram_dir_bw.py, pcie_bw.cu)
+
+## CPU P/E topology and ISA (verified 2026-09-26)
+- i7-14700KF: cpu0-15 = 8 P-cores with SMT (siblings 0-1..14-15), cpu16-27 = 12 E-cores (no SMT). lscpu -e confirms.
+- AVX-512 is fused OFF (/proc/cpuinfo has no avx512 flags): AVX2+VNNI is the ISA ceiling for CPU MoE kernels on this rig; the ggml AVX2 W4A8K port already sits at it (kernels are DRAM-bound anyway).
+- STREAM 75.84 GB/s (4x48 GiB DDR5-5600). Production hybrid pool layout [15,1,1] @16 threads: dominant pool = 8P+7E (cores 0..22), the two minority pools each get ONE E-core (23, 24) - a per-layer critical-path suspect for decode.

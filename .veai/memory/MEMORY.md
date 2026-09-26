@@ -1,10 +1,8 @@
 - [ft-pr-relevance-glm-hybrid](ft-pr-relevance-glm-hybrid-742559ca5630.md) — PR verdicts GLM-5.3 hybrid: #300 kv-ladder no-gain, #339 no-op w/ sgl_kernel, #414/#439/#399 not applicable
 - [ft-gguf-glm5next-private-scope](ft-gguf-glm5next-private-scope-d788b6c0ee9e.md) — GGUF glm5next Path A is private-use local work; user waived upstream issue #34 gate (2026-09-13)
-- [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-30a075828b64.md) — RTX 5090 Gen5 DMA cap root cause: IOMMU Translated; iommu=pt restores 46/57 GB/s; rig details and probe artifacts
 - [ft-serve-moe-flags-semantics](ft-serve-moe-flags-semantics-35ff08215256.md) — ft serve MoE flags: cpu-threads per-partition split (aad5d3a); eb7de4c clamp/help fixes; fetch fractions
 - [glm53-flash-nvfp4-cache-budget](glm53-flash-nvfp4-cache-budget-e072d0274c3d.md) — GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu
 - [benchbw-profile-clobber-trap](benchbw-profile-clobber-trap-6b9f0d04e5e9.md) — benchbw writes the FULL per-GPU profile per run: single-dtype run clobbers other formats' fractions; no TTL/fingerprint
-- [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-d98055871b80.md) — GGUF hybrid per-layer cost = fetch volume + 0.6-1.0 ms sync; hardware-validated 1.43 ms/layer at 16.67 tok/s
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-90784dc7d0a9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-029031181f9f.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 1M break was transient
 - [vektory79-main-rewrite-gotcha](vektory79-main-rewrite-gotcha-44d497ec530c.md) — vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits
@@ -23,10 +21,8 @@
 - [ft-gguf-moe-mtile-kernel-traps](ft-gguf-moe-mtile-kernel-traps-c8b1b2a09ff4.md) — moe.cuh m-tile traps: x=weights y=activations naming, ds-fill garbage rows, block_size single source of truth
 - [ft-gate-baseline-nan-flake](ft-gate-baseline-nan-flake-438a2a9c30e0.md) — Cap-test NaN flake root-caused to torch.empty x and FIXED in v3a (zeros); gate scale 2135 tests; classification method
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-28c5cc0c6fd3.md) — GLM-5.3 NVFP4 post-iommu baseline: 1M/512k budget recipes, chunk-size prefill lever; 09-14 fail-fast transient
-- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-f47c9e16cbc5.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu ERR_NVGPUCTRPERM blocked
 - [ft-gate-nodeid-collection-drift](ft-gate-nodeid-collection-drift-ed9c69f3e41e.md) — Full-gate nodeid counts drift across runs: test_quant_config.py collection-time glob parametrization; key on failure set
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-08f4f089d42d.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
-- [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-f3b720f0ab4a.md) — GGUF prefill MMQ roofline analysis: step-0 nsys split, v0 no-op, v2 grouped +16.4%, ~758 ceiling unreachable (ALU-bound)
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-ed33892b6a6b.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; old ~4 GB/s likely IOMMU tax
 - [nsys-silent-no-collection-trap](nsys-silent-no-collection-trap-561ecdc4872d.md) — nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe
@@ -55,3 +51,12 @@
 - [ft-qwen38-flashnext-tier-fit](ft-qwen38-flashnext-tier-fit-b5f533d1ae86.md) — Qwen3.8 qwen4_exp QSAKVCache tier-fit anchors; QSA corruption hazard RESOLVED by phase-2 codec (ft-tier-phase2-swave)
 - [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-67e8a5a7a071.md) — Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands
 - [ft-serve-llama-swap-metrics-brief](ft-serve-llama-swap-metrics-brief-abf857ee5263.md) — llama-swap stats accepted on HW; endpoint /api/metrics/activity; D4 tail-chunk inflation; page_size=64 quirk
+- [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-0bbba261e8c3.md) — RTX 5090 rig (i7-14700KF 8P+12E, AVX2-only): Gen5 DMA cap = IOMMU Translated; iommu=pt restores 46/57 GB/s; probes
+- [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-7ef390fc96b0.md) — GGUF prefill MMQ roofline analysis: step-0 nsys split, v0 no-op, v2 grouped +16.4%, ~758 ceiling unreachable (ALU-bound)
+- [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-5405b1861a61.md) — Hybrid decode per-layer cost model: no fixed handshake floor; CPU-leg x fetch-volume coupling; 26.9 GB/s idle-inflated
+- [ft-offload-decode-gather-gap](ft-offload-decode-gather-gap-c3b70a1e4313.md) — Offload gather ~29 GB/s effective vs benched 43.6 (benchbw pcie_gather_gbs); fixing gives ~18.4 tok/s > hybrid 16.29
+- [kb-first-research-workflow](kb-first-research-workflow-69ea95d4e31a.md) — Research workflow: kb/ first, questions one-by-one; research+instrumentation in-session; only optimizations split out
+- [ft-decode-research-campaign](ft-decode-research-campaign-5f8a6014ab6f.md) — GGUF decode A/B: split neutral, ov0 -23%, hostfunc -22%, fetch0 -39%; additive step model; .tasks/decode-research
+- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-4e3773c6a82d.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; torch.profiler aborts scheduler
+- [ft-decode-stats-instruments-unwired](ft-decode-stats-instruments-unwired-e3ffca136987.md) — Decode T1 driver v3: hook GraphRunner.replay (replay bypasses layer host code); kineto aborts scheduler; events-only
+- [ft-decode-lever-research](ft-decode-lever-research-c60963ff7f3c.md) — GGUF glm5next hybrid decode lever study; A/B verdicts + T1 decomposition; T3 refuted by oracle; offload measured

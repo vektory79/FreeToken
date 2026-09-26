@@ -1,9 +1,9 @@
 ---
 name: "cuda-debug-tool-strategy"
-description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu ERR_NVGPUCTRPERM blocked"
+description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; torch.profiler aborts scheduler"
 type: project
-lastUpdated: 2026-09-19T17:59
-lastRecall: 2026-09-24T14:19
+lastUpdated: 2026-09-26T22:58
+lastRecall: 2026-09-26T22:57
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation
@@ -51,3 +51,6 @@ enough, reserve python instrumentation for wrapper-blocked cases.
 
 ## ncu is BLOCKED on this box (2026-09-19, dense-q80-gemm Step 0)
 `ncu` fails with ERR_NVGPUCTRPERM (GPU perf counters not enabled for the user) - do not plan a profiling campaign around ncu; enabling counters requires the user (driver permission). Substitute software discriminators that pin a kernel's regime without counters: (1) measured-vs-model BW closure per op class - a UNIFORM measured/model ratio across different shapes = a throughput ceiling expressed in traffic units (here ~22 TF/s per-MAC), while closure near 1.0x = BW-bound (moe_vec closed at 0.92x; dense q8_0 did NOT at 0.62x); (2) M-sweep on one exact shape - time linear in M at a constant rate, with implied BW above the spec peak, proves BW-bound is physically impossible; (3) format A/B at identical shape/MACs - more bytes but slower = not BW-bound (q6_K: 23% fewer bytes, 6.3% slower); (4) per-class rate spread - e.g. kda_in_proj 18.08 TF/s at W=108.35 MB > L2 vs 20.9-22.4 TF/s for W<=71.3 MB isolates an L2-overflow mix.
+
+## In-process torch.profiler is UNSAFE in ft serve (2026-09-26, decode-research T1)
+Opening a kineto CPU+CUDA profiling window inside the scheduler process (`torch.profiler.profile(...).start()` via a sitecustomize hook on `GraphRunner.replay`) kills the worker with a NATIVE abort at window-open — no Python exception, C++ stack, "backend worker freetoken-TP0-scheduler exited"; the box already blocks ncu (ERR_NVGPUCTRPERM). Do not plan in-process kineto windows for ft serve. Safe substitutes: (a) nsys interactive session (kernel-level, validated above); (b) CUDA-event brackets around `GraphRunner.replay` + on-device stat tensors (decode-research driver, `.tasks/decode-research/driver/sitecustomize.py`, events-only by default via FREETOKEN_DR_PROF gate). Harness side-effect worth knowing: a natively-dead scheduler makes the arm runner sit its full readiness timeout (looks like a hung background task) before the failure surfaces.

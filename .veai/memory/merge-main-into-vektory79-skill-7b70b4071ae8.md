@@ -3,7 +3,7 @@ name: "merge-main-into-vektory79-skill"
 description: "Skill merge-main-into-vektory79 (.veai/skills): merge origin/main into vektory79; duplicates->main; boot-smoke"
 type: reference
 lastUpdated: 2026-09-16T19:29
-lastRecall: 2026-09-20T20:29
+lastRecall: 2026-09-26T23:44
 ---
 
 # Skill merge-main-into-vektory79 (оркестрирующий)
