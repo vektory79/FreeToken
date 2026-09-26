@@ -149,8 +149,8 @@ def _release_ack_queue(ack_queue: Any) -> None:
 def _shutdown_backend_workers(processes: List[Any], ack_queue: Any = None) -> None:
     """Full stop escalation shared by the uvicorn lifespan shutdown and the shell teardown.
 
-    SIGINT is relayed first -- the only signal a worker handles gracefully (no SIGTERM
-    handler exists in any worker): its KeyboardInterrupt path runs scheduler.shutdown() ->
+    SIGINT is relayed first - the worker's KeyboardInterrupt path, which also absorbs an
+    orchestrator's group SIGTERM, runs scheduler.shutdown() ->
     Engine.shutdown() (CUDA graphs + process group). Then join -> SIGTERM -> join -> SIGKILL
     with the escalation budgets, and finally the ack queue is released. Blocking here is
     deliberate: on return the whole tree is dead, so the uvicorn re-raise that kills this
@@ -177,7 +177,8 @@ def _shutdown_backend_workers(processes: List[Any], ack_queue: Any = None) -> No
     for p in workers:
         try:
             # BaseProcess exposes no public send_signal (only terminate/kill), so signal
-            # the pid directly; SIGINT is the only signal a worker handles gracefully.
+            # the pid directly; SIGINT stays the relay - workers fold a group SIGTERM
+            # into the same graceful path themselves.
             if _alive(p) and p.pid is not None:
                 os.kill(p.pid, signal.SIGINT)
         except Exception:  # noqa: BLE001 -- already-gone / unqueryable handle: nothing to do

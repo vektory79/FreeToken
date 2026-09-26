@@ -54,9 +54,24 @@ def _arm_sigint_handler() -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
+def _arm_sigterm_handler() -> None:
+    """Group stops (llama-swap, systemd, docker) SIGTERM the whole process group, which no
+    worker handled - the tier flush ran only on Ctrl+C's KeyboardInterrupt. Fold SIGTERM into
+    that same path; SIG_IGN both stop signals first so the parent's relayed SIGINT landing
+    mid-teardown cannot re-raise inside scheduler.shutdown()."""
+
+    def _on_sigterm(signum: int, frame: object) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
 def _run_tokenize_worker(detach: bool, **kwargs) -> None:
     """Module-level so it survives the spawn pickle; exists only to detach the group first."""
     _arm_sigint_handler()
+    _arm_sigterm_handler()
     if detach:
         _detach_process_group()
     from freetoken.tokenizer import tokenize_worker
@@ -66,6 +81,7 @@ def _run_tokenize_worker(detach: bool, **kwargs) -> None:
 
 def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
     _arm_sigint_handler()
+    _arm_sigterm_handler()
     if args.shell_mode:
         _detach_process_group()
 
@@ -125,8 +141,9 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
         try:
             scheduler.run_forever()
         except KeyboardInterrupt:
-            # A relayed or second SIGINT must not cut the teardown already in progress.
+            # A relayed or second stop signal must not cut the teardown already in progress.
             signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             logger = init_logger(__name__)
             if args.tp_info.is_primary():
                 print()  # for a clean newline after ^C

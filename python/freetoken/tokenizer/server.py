@@ -263,5 +263,6 @@ def tokenize_worker(
                     batch_output = batch_output.data[0]
                 send_backend.put(batch_output)
     except KeyboardInterrupt:
-        # A relayed or second SIGINT must not cut the teardown already in progress.
+        # A relayed or second stop signal must not cut the teardown already in progress.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)

@@ -181,6 +181,29 @@ def test_lifespan_shutdown_reaps_worker_born_with_sigint_ignored(monkeypatch, tm
         ack_queue.put("late")
 
 
+def test_arm_sigterm_handler_maps_sigterm_to_graceful_keyboardinterrupt():
+    """The SIGTERM arming helper routes a group SIGTERM into the same graceful
+    KeyboardInterrupt teardown as Ctrl+C, and leaves BOTH stop signals ignored afterwards
+    so the parent's relayed SIGINT cannot re-raise inside the teardown."""
+    import pytest
+
+    from freetoken.server import launch
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        launch._arm_sigterm_handler()
+        with pytest.raises(KeyboardInterrupt):
+            signal.raise_signal(signal.SIGTERM)
+        # One-shot defense: after the raise, both companion signals are dead ends.
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+        assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+        # The relayed SIGINT landing mid-teardown must be a no-op, not a second raise.
+        signal.raise_signal(signal.SIGINT)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 _SIGTERM_TOPOLOGY_SCRIPT = textwrap.dedent(
     """\
     import multiprocessing as mp
@@ -296,3 +319,113 @@ def test_shutdown_backend_workers_is_a_one_shot(monkeypatch, tmp_path):
     assert worker.exitcode == 0  # and it was the full graceful one
     with pytest.raises(ValueError):
         ack_queue.put("late")  # the queue stayed closed; no second release pass
+
+
+_SIGTERM_WORKER_SCRIPT = textwrap.dedent(
+    """\
+    import multiprocessing as mp
+    import os
+    import signal
+    import sys
+    import time
+
+
+    def _wait_for_ready(ready_file, attempts=1200):
+        for _ in range(attempts):
+            if os.path.exists(ready_file):
+                return
+            time.sleep(0.025)
+        raise SystemExit("worker never became ready")
+
+
+    def _worker(ready_file, marker_file):
+        # Production-shaped worker entry: re-arm the graceful handlers, idle until a stop
+        # signal, then run the teardown stand-in (one marker line = one flush pass).
+        import pathlib
+        from freetoken.server import launch
+
+        arm = getattr(launch, "_arm_sigint_handler", None)
+        if arm is not None:
+            arm()
+        arm = getattr(launch, "_arm_sigterm_handler", None)
+        if arm is not None:
+            arm()
+        pathlib.Path(ready_file).touch()
+        try:
+            time.sleep(60)
+        except KeyboardInterrupt:
+            # Mirror the production one-shot defense first: whichever signal raised, the
+            # other may still be pending-stale and must not re-raise inside the flush.
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            with open(marker_file, "a") as fh:
+                fh.write("flush\\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+
+
+    def main():
+        mp.set_start_method("spawn", force=True)
+        mode, workdir = sys.argv[1], sys.argv[2]
+        ready = os.path.join(workdir, "worker_ready")
+        marker = os.path.join(workdir, "flush_marker")
+        worker = mp.Process(
+            target=_worker, args=(ready, marker), name="freetoken-TP0-scheduler"
+        )
+        worker.start()
+        _wait_for_ready(ready)
+        # Orchestrator topology: the group SIGTERM lands on the worker itself; the
+        # term_then_int mode adds the parent's SIGINT relay once the teardown has begun
+        # (marker present), mirroring the milliseconds-late uvicorn relay.
+        os.kill(worker.pid, signal.SIGTERM)
+        if mode == "term_then_int":
+            for _ in range(2000):
+                if os.path.exists(marker):
+                    break
+                time.sleep(0.001)
+            try:
+                os.kill(worker.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass  # worker already exited gracefully
+        worker.join(timeout=15)
+        if worker.exitcode != 0:
+            sys.stderr.write(f"worker exitcode={worker.exitcode}\\n")
+            sys.exit(1)
+        sys.exit(0)
+
+
+    if __name__ == "__main__":
+        main()
+    """
+)
+
+
+def _run_sigterm_worker_mode(tmp_path, mode: str) -> None:
+    script = tmp_path / "_sigterm_worker.py"
+    script.write_text(_SIGTERM_WORKER_SCRIPT)
+    proc = subprocess.run(
+        [sys.executable, str(script), mode, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (mode, proc.returncode, proc.stderr[-2000:])
+    marker = tmp_path / "flush_marker"
+    # Exactly one teardown pass: a second raise would have killed the worker mid-flush.
+    assert marker.exists() and marker.read_text().splitlines() == ["flush"], (
+        marker.read_text() if marker.exists() else "marker missing"
+    )
+
+
+def test_group_sigterm_runs_the_worker_graceful_teardown(tmp_path):
+    """Fails-before for the SIGTERM gap: llama-swap/systemd/docker SIGTERM the whole process
+    group, and a pre-fix worker died on the default SIGTERM action (-15) so the session-tier
+    flush never ran. The armed worker must take the KeyboardInterrupt path: exit 0, one flush."""
+    _run_sigterm_worker_mode(tmp_path, "term")
+
+
+def test_sigterm_then_relayed_sigint_runs_a_single_teardown(tmp_path):
+    """The parent's SIGINT relay lands while/after the teardown runs; the one-shot defense
+    (SIG_IGN both signals inside the handler and again on the except path) must keep it
+    from re-raising inside the teardown: still exit 0 with a single flush, never a double."""
+    _run_sigterm_worker_mode(tmp_path, "term_then_int")
