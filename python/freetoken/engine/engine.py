@@ -20,6 +20,7 @@ from freetoken.mm.config import ENCODER_SECTIONS
 from freetoken.models import create_model, load_weight
 from freetoken.models.weight import ftw_lacks_vision
 from freetoken.moe import is_offload_moe_strategy
+from freetoken.moe.cpu_executor import physical_core_cpus
 from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.host_banks import PinFailed
 from freetoken.moe.offload_cache import OffloadMoeCache
@@ -48,6 +49,105 @@ def _require_offload_cache_size(cache_size: int, num_experts: int) -> None:
             f"--moe-strategy cpu always sizes its own fixed two-layer buffer and ignores "
             f"cache-sizing flags)."
         )
+
+
+def _format_core_groups(cores: list[int]) -> str:
+    runs, start, prev = [], cores[0], cores[0]
+    for c in cores[1:]:
+        if c != prev + 1:
+            runs.append(str(start) if start == prev else f"{start}-{prev}")
+            start = c
+        prev = c
+    runs.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(runs)
+
+
+def _t2_pool_override(n_pools: int) -> tuple[list[list[int]], list[int]] | None:
+    """Env-gated explicit per-pool override for the CPU-MoE executor pools
+    (T2 host-delivery campaign A/B): FREETOKEN_T2_POOL_THREADS="15,1,4" sets the
+    worker count per pool, FREETOKEN_T2_POOL_CPUS="0-7,16-22,23,24-27" pins the
+    cores. The CPUS value is a flat sequence of range/single tokens; each pool
+    takes consecutive tokens until it holds exactly its thread count (the t2a
+    dominant pool reads "0-7,16-22" as one non-contiguous 15-core group). Both
+    vars must be set together - a lone var could contradict the default
+    resolution's disjoint cores."""
+    threads_spec = os.environ.get("FREETOKEN_T2_POOL_THREADS")
+    cpus_spec = os.environ.get("FREETOKEN_T2_POOL_CPUS")
+    if threads_spec is None and cpus_spec is None:
+        return None
+    if threads_spec is None or cpus_spec is None:
+        raise ValueError(
+            "FREETOKEN_T2_POOL_THREADS and FREETOKEN_T2_POOL_CPUS must be set together"
+        )
+
+    threads = []
+    for part in threads_spec.split(","):
+        if not part.isdigit() or int(part) <= 0:
+            raise ValueError(
+                f"FREETOKEN_T2_POOL_THREADS wants positive ints, got {threads_spec!r}"
+            )
+        threads.append(int(part))
+
+    max_cpu = (os.cpu_count() or 1) - 1
+    tokens = []
+    for part in cpus_spec.split(","):
+        bounds = part.split("-")
+        if len(bounds) == 1 and bounds[0].isdigit():
+            lo = hi = int(bounds[0])
+        elif len(bounds) == 2 and all(b.isdigit() for b in bounds):
+            lo, hi = int(bounds[0]), int(bounds[1])
+        else:
+            raise ValueError(f"FREETOKEN_T2_POOL_CPUS bad group {part!r} in {cpus_spec!r}")
+        if lo > hi or hi > max_cpu:
+            raise ValueError(
+                f"FREETOKEN_T2_POOL_CPUS bad range {part!r} (cpus are 0..{max_cpu})"
+            )
+        tokens.append(list(range(lo, hi + 1)))
+
+    if len(threads) != n_pools:
+        raise ValueError(
+            f"T2 pool override wants {n_pools} thread counts, one per partition, "
+            f"got {len(threads)}"
+        )
+
+    groups = []
+    idx = 0
+    for i, want in enumerate(threads):
+        group: list[int] = []
+        while len(group) < want and idx < len(tokens):
+            tok = tokens[idx]
+            if len(group) + len(tok) > want:
+                raise ValueError(
+                    f"T2 pool override: core token {tok[0]}-{tok[-1]} overshoots pool "
+                    f"{i} ({len(group)}+{len(tok)} > {want} threads)"
+                )
+            group.extend(tok)
+            idx += 1
+        if len(group) != want:
+            raise ValueError(
+                f"T2 pool override: pool {i} got {len(group)} cores for {want} threads"
+            )
+        groups.append(group)
+    if idx != len(tokens):
+        raise ValueError(
+            f"T2 pool override: {len(tokens) - idx} leftover core tokens past the last pool"
+        )
+    seen: set[int] = set()
+    for group in groups:
+        if seen & set(group):
+            raise ValueError(f"T2 pool override core groups are not disjoint: {groups}")
+        seen.update(group)
+    # Fail loud on SMT doubling: "0-7" spans 4 physical P cores on adjacent-sibling
+    # kernels, so a spec can silently halve per-core bandwidth instead of adding cores.
+    reps = set(physical_core_cpus())
+    for i, (group, want) in enumerate(zip(groups, threads)):
+        n_phys = sum(c in reps for c in group)
+        if n_phys < want:
+            logger.warning(
+                f"T2 pool override pool {i}: {want} workers on {n_phys} distinct "
+                f"physical cores ({_format_core_groups(group)}) - SMT doubling"
+            )
+    return groups, threads
 
 
 def _flashinfer_available() -> bool:
@@ -1167,6 +1267,16 @@ class Engine:
             pool_threads = [
                 len(cores) if config.moe_cpu_threads > 0 else 0 for cores in pool_cores
             ]
+        override = _t2_pool_override(len(caches))
+        if override is not None:
+            pool_cores, pool_threads = override
+            logger.info_rank0(
+                "T2 pool override active: per-pool (threads, cores) = "
+                + ", ".join(
+                    f"({t}, {_format_core_groups(c)})"
+                    for t, c in zip(pool_threads, pool_cores)
+                )
+            )
         self.cpu_moe_executors = []
         multi_pool = len(caches) > 1
         for pool_idx, (cache, num_threads, allow_cores) in enumerate(
