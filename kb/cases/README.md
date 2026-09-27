@@ -15,7 +15,14 @@ Specification / Acceptance / Checklist.
   опровергнутые направления перечислены внутри, чтобы не тратить сессии.
   Вход: [TASK.md](decode-t2-host-delivery/TASK.md). Статус: WAVE 1 DONE
   2026-09-26 ([wave1-ab-summary.md](decode-t2-host-delivery/wave1-ab-summary.md),
-  committed 2026-09-27: e541423 + 227e7a3 + e10b424).
+  committed 2026-09-27: e541423 + 227e7a3 + e10b424). Lever 3: C-L1 (split mhc
+  stage1) принят на железе 2026-09-27 (+4.6-5.9% e2e), закоммичен db0f6b3
+  (дефолт mhc NS=64; парная проверка 2026-09-28: +3.4% в одном окне)
+  ([lever3-chain-anatomy.md](decode-t2-host-delivery/lever3-chain-anatomy.md)).
+  Микробандл C-L2..C-L5 (f_b/g_b row-concat, трио indexer x_proj, in-kernel
+  actquant, слитый topk) отклонён на железе 2026-09-28 и удалён из дерева без
+  коммита; уроки -
+  [../topics/decode-chain-microfusion.md](../topics/decode-chain-microfusion.md).
 - [fix1-radix-track-seqlen/](fix1-radix-track-seqlen/) — баг-фикс с тестом
   «падает до / проходит после» и hardware-верификацией. Вход:
   [TASK.md](fix1-radix-track-seqlen/TASK.md). Статус: COMMITTED (5b72aba).
