@@ -27,6 +27,9 @@
 - **chunked prefill** — разбиение длинного промпта на чанки фиксированной длины
   (`--max-prefill-length`), главный источник багов переиспользования кэша —
   [TASK.md](cases/fix3-snapshot-lru-refresh/TASK.md).
+- **CTA** - cooperative thread array, блок потоков CUDA; CTA на SM - главная
+  цифра occupancy-аудита ядра -
+  [decode-chain-microfusion.md](topics/decode-chain-microfusion.md).
 
 ## F
 
@@ -82,6 +85,9 @@
 
 ## O
 
+- **occupancy** - заполненность SM резидентными CTA; падение occupancy
+  способно съесть выигрыш от слияния ядер (кейс C-L4: -43% e2e) -
+  [decode-chain-microfusion.md](topics/decode-chain-microfusion.md).
 - **offer** — понижение сегмента сессии (KV-путь + снапшоты на границах) в
   SessionTierStore при вытеснении из VRAM —
   [session-cache-tiering.md](topics/session-cache-tiering.md).
