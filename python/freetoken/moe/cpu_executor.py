@@ -225,6 +225,30 @@ def physical_core_cpus() -> list[int]:
     return reps or allowed or [0]
 
 
+def e_like_cpus() -> list[int]:
+    """Logical CPUs whose physical core has no SMT sibling ("E-like").
+
+    The singleton ``thread_siblings_list`` is the sysfs classification: such a
+    core belongs to no P-core sibling group, so gifting it to a starved pool adds
+    a real core instead of contending for another core's load ports. Empty when
+    sysfs topology is unreadable, so widening never fires without evidence.
+    """
+    try:
+        allowed = sorted(os.sched_getaffinity(0))
+    except AttributeError:
+        return []
+    singles: list[int] = []
+    for cpu in allowed:
+        try:
+            with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list") as f:
+                siblings = f.read().strip()
+        except OSError:
+            continue
+        if "," not in siblings and "-" not in siblings:
+            singles.append(cpu)
+    return singles
+
+
 def resolve_threads_and_affinity(
     requested: int, allow_cores: list[int] | None = None
 ) -> tuple[int, list[int]]:
@@ -265,6 +289,53 @@ def resolve_threads_and_affinity(
     return max(1, len(core_ids)), core_ids
 
 
+# Cap of the default minority widening: 4 workers per starved pool is the
+# A/B-validated territory (t2d wave 1: +7.9/+10.4% decode over the 1-worker split).
+_WIDEN_CAP = 4
+
+
+def _widen_starved_minority(
+    pools: list[list[int]], weights: Sequence[int] | None
+) -> list[list[int]]:
+    """Default minority-widening pass over a finished explicit-threads split.
+
+    The weighted split leaves the minority partitions a single worker each, and
+    the one carrying the most layers starves the decode wall (~11.7 GB/s on one
+    E-core vs ~2.5x at four in the t2d wave-1 A/B, +7.9/+10.4% decode). Top the
+    starved pools up with still-unused allowed SMT-free cores, ascending, capped
+    at _WIDEN_CAP workers, costliest partition first (weight descending, ties by
+    pool index). Fires only on a genuinely weighted split (min weight below
+    max): a flat split has no minority to prioritize. The env override
+    FREETOKEN_T2_POOL_THREADS/CPUS still replaces the whole result upstream;
+    auto (threads=0) never reaches here.
+    """
+    if not weights or len(weights) != len(pools) or sum(weights) <= 0:
+        return pools
+    min_w = min(weights)
+    if min_w >= max(weights):
+        return pools
+    candidates = [i for i, p in enumerate(pools) if len(p) == 1]
+    if not candidates:
+        return pools
+    try:
+        allowed = sorted(os.sched_getaffinity(0))
+    except AttributeError:
+        return pools
+    used = {c for p in pools for c in p}
+    e_like = set(e_like_cpus())
+    spare = [c for c in allowed if c in e_like and c not in used]
+    if not spare:
+        return pools
+    # costliest starved minority first: decode cost scales with the partition's
+    # layer count, so the expensive 1-worker pool is the one worth gifting E cores
+    candidates.sort(key=lambda i: (-weights[i], i))
+    for i in candidates:
+        pool = pools[i]
+        while spare and len(pool) < _WIDEN_CAP:
+            pool.append(spare.pop(0))
+    return pools
+
+
 def resolve_pool_affinities(
     num_pools: int, requested: int, weights: Sequence[int] | None = None
 ) -> list[list[int]]:
@@ -290,7 +361,10 @@ def resolve_pool_affinities(
     set so the pools stay disjoint (an over-budget flag is dropped with a warning
     instead of wrapping onto cores that an earlier pool already pins);
     ``requested == 0`` (auto) keeps one worker per core. Degenerate cases (more
-    pools than cores) share cores rather than starve a pool.
+    pools than cores) share cores rather than starve a pool. Explicit mode adds
+    a default minority-widening pass: a lowest-weight pool left with one worker
+    is topped up with unused SMT-free ("E-like") cores, capped at four
+    (see :func:`_widen_starved_minority`).
     """
     reps = physical_core_cpus()
 
@@ -343,7 +417,7 @@ def resolve_pool_affinities(
                 # degenerate (more workers than cores): share cores rather than starve
                 pools.append([order[(start + j) % len(order)] for j in range(n)])
             start += n
-        return pools
+        return _widen_starved_minority(pools, weights)
     pools, start = [], 0
     for i, n in enumerate(_weighted_counts(len(reps), len(reps))):
         # more pools than cores: share a core instead of handing out an empty set

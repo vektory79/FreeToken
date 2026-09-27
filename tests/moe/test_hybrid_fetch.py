@@ -25,6 +25,24 @@ def _balanced_fetch(num_missing: int, frac_q16: int) -> int:
     return min(num_missing, lo if cost(lo) <= cost(lo + 1) else lo + 1)
 
 
+def _patch_rig28(monkeypatch, e_like=True):
+    """Deterministic stand-in for the wave-1 measurement rig: 28 logical cpus,
+    P SMT as adjacent pairs (0,1)..(14,15), E = 16-27. e_like=False models a box
+    where every core is SMT-paired (no E cores)."""
+    import freetoken.moe.cpu_executor as ce
+
+    if e_like:
+        reps = [0, 2, 4, 6, 8, 10, 12, 14] + list(range(16, 28))
+        singles = list(range(16, 28))
+    else:
+        reps = list(range(0, 28, 2))
+        singles = []
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(28)))
+    monkeypatch.setattr(ce, "physical_core_cpus", lambda: list(reps))
+    monkeypatch.setattr(ce, "e_like_cpus", lambda: list(singles))
+    return reps
+
+
 def test_balanced_fetch_tracks_fraction():
     # The split follows fetched : cpu = pcie : (cpu - pcie) up to integer rounding, and
     # never over/under-shoots by more than one expert.
@@ -251,7 +269,7 @@ def test_benchbw_gguf_banks_build_the_executor(monkeypatch):
     assert (ex.H, ex.I, ex.num_experts) == (H, I, E)
 
 
-def test_hybrid_multi_partition_executors_mixed_signatures():
+def test_hybrid_multi_partition_executors_mixed_signatures(monkeypatch):
     """Per-cache executors over the real glm5next signature set -- (18,18,14) and
     (23,23,14) alongside the dominant (18,18,23): the blanket multi-partition
     ValueError rejected this exact shape before per-cache executors existed. Each
@@ -259,6 +277,9 @@ def test_hybrid_multi_partition_executors_mixed_signatures():
     mirror of the GPU path's cache.gguf_types[layer] dispatch), and the thread
     budget must split into DISJOINT per-pool core sets (every pool pins its
     workers, so shared cores would oversubscribe N-wide)."""
+    # deterministic rig without SMT-free cores: the widening default must not
+    # fire here, this test pins the pre-widening 1-worker-per-pool split
+    _patch_rig28(monkeypatch, e_like=False)
     from types import SimpleNamespace
 
     from freetoken.engine.engine import Engine
@@ -368,13 +389,16 @@ def test_resolve_pool_affinities_weights_by_layer_count(monkeypatch):
     invariants are unchanged."""
     from freetoken.moe.cpu_executor import resolve_pool_affinities
 
-    weights = [39, 2, 1]  # the real glm5next file: dominant + two minority partitions
+    weights = [39, 1, 2]  # the real glm5next file order: dominant, 1-layer, 2-layer
     # explicit --moe-cpu-threads: weighted largest-remainder, floor-at-one preserved;
     # below the usable core set the split may still overspend the flag by pools-1
-    # workers (as the even split could) -- this rig has 20 cores + SMT siblings, so
-    # both splits fit; the tight-box trim is pinned by
-    # test_resolve_pool_affinities_weighted_tight_box_never_wraps
-    assert [len(p) for p in resolve_pool_affinities(3, 16, weights=weights)] == [15, 1, 1]
+    # workers (as the even split could); the tight-box trim is pinned by
+    # test_resolve_pool_affinities_weighted_tight_box_never_wraps. Deterministic
+    # rig: the widening default below is topology-dependent.
+    _patch_rig28(monkeypatch)
+    # 16 threads: the starved 2-layer pool tops up to 4 E workers (t2d default)
+    assert [len(p) for p in resolve_pool_affinities(3, 16, weights=weights)] == [15, 1, 4]
+    # 20 threads leave only P SMT siblings idle (no E-like spare): old split stands
     assert [len(p) for p in resolve_pool_affinities(3, 20, weights=weights)] == [19, 1, 1]
 
     # auto: the same weighting over the physical cores, trimmed back to a DISJOINT
@@ -387,7 +411,9 @@ def test_resolve_pool_affinities_weights_by_layer_count(monkeypatch):
     assert sorted(flat) == reps  # disjoint + complete cover of the physical cores
     assert [len(p) for p in pools] == [18, 1, 1]
 
-    # explicit split keeps disjoint physical-first ordered slices
+    # explicit split keeps disjoint physical-first ordered slices (widening off:
+    # no SMT-free classification on this patched rig; covered by its own tests)
+    monkeypatch.setattr("freetoken.moe.cpu_executor.e_like_cpus", lambda: [])
     pools = resolve_pool_affinities(3, 16, weights=weights)
     flat = [c for p in pools for c in p]
     assert len(flat) == len(set(flat)), f"pools share cores: {pools}"
@@ -398,6 +424,152 @@ def test_resolve_pool_affinities_weights_by_layer_count(monkeypatch):
 
     # even split preserved when weights are absent (backward compatibility)
     assert [len(p) for p in resolve_pool_affinities(3, 4)] == [2, 1, 1]
+
+
+def test_resolve_pool_affinities_widens_starved_minority(monkeypatch):
+    """Default minority widening (the t2d layout): on the wave-1 rig at
+    --moe-cpu-threads 16 with the real layer weights [39, 1, 2] (the file's
+    partition order: the 1-layer minority sits mid-list, the 2-layer one last),
+    the starved 2-layer pool must end up with the idle E cores 24-27 -- exactly
+    the layout the env-knob A/B validated at +7.9/+10.4% decode."""
+    from freetoken.moe.cpu_executor import resolve_pool_affinities
+
+    reps = _patch_rig28(monkeypatch)
+    pools = resolve_pool_affinities(3, 16, weights=[39, 1, 2])
+    assert [len(p) for p in pools] == [15, 1, 4]
+    assert pools[0] == reps[:15]  # the dominant pool is untouched
+    assert pools[1] == [23]
+    assert pools[2] == [24, 25, 26, 27]  # ascending, appended after its old core
+    flat = [c for p in pools for c in p]
+    assert len(flat) == len(set(flat)), f"widened pools share cores: {pools}"
+
+
+def test_resolve_pool_affinities_minority_widening_caps_at_four(monkeypatch):
+    """More idle E cores than the cap: the receiving pool stops at 4 workers
+    (the A/B-validated territory); with spare left beyond that, the cheaper
+    starved pool tops up too, still capped."""
+    import freetoken.moe.cpu_executor as ce
+    from freetoken.moe.cpu_executor import resolve_pool_affinities
+
+    e_like = list(range(16, 32))
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(32)))
+    monkeypatch.setattr(ce, "physical_core_cpus", lambda: [0, 2, 4, 6, 8, 10, 12, 14] + e_like)
+    monkeypatch.setattr(ce, "e_like_cpus", lambda: list(e_like))
+    pools = resolve_pool_affinities(3, 16, weights=[39, 1, 2])
+    assert [len(p) for p in pools] == [15, 4, 4]
+    assert pools[2] == [24, 25, 26, 27]  # costliest minority first, capped
+    assert pools[1] == [23, 28, 29, 30]  # then the cheap one, capped, ascending
+
+
+def test_resolve_pool_affinities_no_widening_without_idle_e_like(monkeypatch):
+    """No idle E-like cores -- a topology without E cores, or every allowed core
+    already consumed -- must yield the plain weighted split, identical to the
+    pre-widening algorithm."""
+    from freetoken.moe.cpu_executor import resolve_pool_affinities
+
+    # topology without E cores: every core is SMT-paired, nothing to gift
+    _patch_rig28(monkeypatch, e_like=False)
+    pools = resolve_pool_affinities(3, 16, weights=[39, 1, 2])
+    assert [len(p) for p in pools] == [15, 1, 1]
+    assert pools[1] == [3] and pools[2] == [5]
+
+    # E cores exist but every allowed core is already pinned by a pool
+    import freetoken.moe.cpu_executor as ce
+
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(6)))
+    monkeypatch.setattr(ce, "physical_core_cpus", lambda: [0, 2, 4, 5])
+    monkeypatch.setattr(ce, "e_like_cpus", lambda: [4, 5])
+    pools = resolve_pool_affinities(3, 4, weights=[2, 1, 1])
+    assert [len(p) for p in pools] == [2, 1, 1]
+    assert pools[2] == [5]  # the old algorithm's exact slice
+
+
+def test_resolve_pool_affinities_no_widening_when_minority_not_starved(monkeypatch):
+    """Widening fires only on the starved shape: the lowest-weight pool above
+    one worker, or a flat split with no minority, keeps the old result."""
+    from freetoken.moe.cpu_executor import resolve_pool_affinities
+
+    reps = _patch_rig28(monkeypatch)
+    # lowest weight holds 2 workers: no candidate pool, plain weighted split
+    pools = resolve_pool_affinities(3, 16, weights=[4, 1, 2])
+    # 16*4/7 -> 9, 16/7 -> 2, 32/7 -> 4 +1 largest remainder -> [9, 2, 5]
+    assert [len(p) for p in pools] == [9, 2, 5]
+    assert pools == [list(reps[:9]), list(reps[9:11]), list(reps[11:16])]
+
+    # flat weights: every pool ties for lowest, none is a starved minority
+    pools = resolve_pool_affinities(3, 3, weights=[1, 1, 1])
+    assert [len(p) for p in pools] == [1, 1, 1]
+
+
+def test_resolve_pool_affinities_auto_mode_never_widens(monkeypatch):
+    """threads=0 (auto) keeps its coordinator carve-out semantics: a complete
+    disjoint cover of the physical cores, never a widened minority."""
+    from freetoken.moe.cpu_executor import resolve_pool_affinities
+
+    reps = _patch_rig28(monkeypatch)
+    pools = resolve_pool_affinities(3, 0, weights=[39, 2, 1])
+    flat = [c for p in pools for c in p]
+    assert len(flat) == len(set(flat)), f"auto pools share cores: {pools}"
+    assert sorted(flat) == sorted(reps)  # complete cover, nothing left idle
+    assert [len(p) for p in pools] == [18, 1, 1]
+
+
+def test_engine_t2_env_override_beats_default_widening(monkeypatch):
+    """The FREETOKEN_T2_POOL_* pair still replaces the whole resolution: with
+    env set the executors get exactly the override layout, without it they get
+    the widened default."""
+    from types import SimpleNamespace
+
+    import freetoken.moe.cpu_executor as ce
+    from freetoken.engine.engine import Engine
+
+    reps = _patch_rig28(monkeypatch)
+    # engine keeps its own physical_core_cpus binding for the override's guard
+    monkeypatch.setattr("freetoken.engine.engine.physical_core_cpus", lambda: list(reps))
+    monkeypatch.setattr(os, "cpu_count", lambda: 28)
+
+    captured = []
+
+    class _StubExecutor:
+        def __init__(self, cache, **kw):
+            captured.append((kw["num_threads"], list(kw["allow_cores"])))
+
+    monkeypatch.setattr(ce, "CpuMoeExecutor", _StubExecutor)
+
+    caches = [
+        SimpleNamespace(num_layers=n, set_cpu_executor=lambda ex: None) for n in (39, 1, 2)
+    ]
+    layers = [
+        SimpleNamespace(
+            top_k=2, activation="swiglu_clamp", apply_router_weight_on_input=False,
+            quant_method=None, alpha=1.0, limit=10.0,
+        )
+    ]
+    config = SimpleNamespace(moe_cpu_threads=16, max_running_req=4, cuda_graph_max_bs=2)
+
+    # default boot (no env): the widened t2d layout reaches the executors
+    monkeypatch.delenv("FREETOKEN_T2_POOL_THREADS", raising=False)
+    monkeypatch.delenv("FREETOKEN_T2_POOL_CPUS", raising=False)
+    engine = SimpleNamespace(device=torch.device("cpu"), cpu_moe_executors=[])
+    Engine._init_cpu_moe_executors(engine, config, caches, layers)
+    assert engine.cpu_moe_executors
+    assert captured == [
+        (15, list(reps[:15])),
+        (1, [23]),
+        (4, [24, 25, 26, 27]),
+    ]
+
+    # env spec wins: pool 3 keeps 3 workers where the default would gift 4
+    monkeypatch.setenv("FREETOKEN_T2_POOL_THREADS", "15,1,3")
+    monkeypatch.setenv("FREETOKEN_T2_POOL_CPUS", "0,2,4,6,8,10,12,14,16-22,23,24-26")
+    captured.clear()
+    engine = SimpleNamespace(device=torch.device("cpu"), cpu_moe_executors=[])
+    Engine._init_cpu_moe_executors(engine, config, caches, layers)
+    assert captured == [
+        (15, [0, 2, 4, 6, 8, 10, 12, 14, 16, 17, 18, 19, 20, 21, 22]),
+        (1, [23]),
+        (3, [24, 25, 26]),
+    ]
 
 
 def test_resolve_pool_affinities_weighted_tight_box_never_wraps():
