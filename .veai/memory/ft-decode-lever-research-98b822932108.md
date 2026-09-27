@@ -2,8 +2,8 @@
 name: "ft-decode-lever-research"
 description: GGUF glm5next hybrid decode lever study; A/B verdicts + T1 decomposition; T3 refuted by oracle; offload measured
 type: project
-lastUpdated: 2026-09-26T23:12
-lastRecall: 2026-09-26T23:45
+lastUpdated: 2026-09-27T17:52
+lastRecall: 2026-09-27T18:51
 ---
 
 # Декод GGUF glm5next hybrid: рычаги оптимизации (research, 2026-09-26)
@@ -70,3 +70,8 @@ base / fetch3 / ov0=FREETOKEN_HYBRID_OVERLAP=0 / flagsync0), analyze.py (сво�
 ## 2026-09-26 evening: T1 executed - block decomposed, T3 REFUTED, offload measured
 Instrumentation works: driver v3 (.tasks/decode-research/driver/sitecustomize.py) hooks GraphRunner.replay (decode steps are CUDA-graph REPLAYS - model host code does NOT run per step; _decode_routed only during capture; replay hook + CUDA-event step spans + collect_stats/collect_decode_freq flipped pre-capture). kineto torch.profiler CRASHES the scheduler (native abort at window open) - events-only mode is the only working profiler path on this box. Eager run (--cuda-graph-max-bs 0) needed for the routing histogram (host scatter is not replayed under graphs).
 Findings: hybrid stream span 59.1 ms of ~62 wall (offload 73.6/72.9) - step fully serialized; the block = stream-wait-for-CPU-pool (~40 ms) + fetch copies (~6-8 ms) + kernels. Combined host delivery 2.57 GiB/step at ~41.5 GB/s vs benchbw overlapped pair 72 GB/s concurrent-capable -> the gap is per-layer ping-pong micro-gaps (pool ramp/tails, doorbell dispatch) = the live T2 lever. T3 REFUTED by oracle: oracle_hit 25.7% vs actual LRU 25.1% (dominant 39-layer partition, 8.6 slots/layer, working set 184/288, norm entropy 0.83) - cache policy is dead; only more VRAM slots cuts misses. Offload on user config: 13.72 tok/s (72.9 ms), gather ~33.5-36 GB/s effective vs 43.6 benched - closing it only ties hybrid; offload improvements deprioritized. Eager decode 15.84 ~= graphed 15.82 (CUDA graphs ~neutral at bs=1); miss stats identical across modes. Driver bugs that crashed two boots: KeyError on _e1 (fixed + try/except armor - any driver error now disables the driver, never the engine).
+
+## 2026-09-26/27 night: T2 (lever #1 successor) executed and LANDED in wave 1
+Step 0 phase decomposition refuted wake/dispatch (0.303 ms/step = 0.76%); real lever = minor-pool starvation (pool2 8.28 ms/step on 1 E-core). t2d env-knob (pool2 -> 4 E-cores): +7.9/+10.4% vs same-window control 15.62, battery 24/24, no commit. Rig topology trap (adjacent P-SMT pairs, "0..22" prints are min..max) voided 3 arms - full lesson in memory ft-t2-host-delivery-wave1 + kb/cases/decode-t2-host-delivery/wave1-ab-summary.md. Next candidate lever #2: overlap remaining fetch into 15.44 ms inter-call gaps.
+
+2026-09-27: T2 committed e541423/227e7a3; lever2 refuted (fetch overlapped); C-L1 mhc accepted +5%, see ft-lever3-chain-cl1.

@@ -3,7 +3,7 @@ name: "kb-first-research-workflow"
 description: "Research workflow: kb/ first, questions one-by-one; research+instrumentation in-session; only optimizations split out"
 type: feedback
 lastUpdated: 2026-09-26T22:42
-lastRecall: 2026-09-26T23:45
+lastRecall: 2026-09-26T23:50
 ---
 
 # Research workflow preference (2026-09-26)

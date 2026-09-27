@@ -2,8 +2,8 @@
 name: "ft-decode-research-campaign"
 description: "GGUF decode A/B: split neutral, ov0 -23%, hostfunc -22%, fetch0 -39%; additive step model; .tasks/decode-research"
 type: project
-lastUpdated: 2026-09-26T22:42
-lastRecall: 2026-09-26T23:45
+lastUpdated: 2026-09-27T17:51
+lastRecall: 2026-09-27T19:40
 ---
 
 # decode-research campaign: 5-arm hybrid decode A/B on the user config (2026-09-26)
@@ -38,3 +38,8 @@ Gotchas: temp0 e2e is boot-to-boot nondeterministic again (completion 763/552/54
 - Instrumented hybrid run measured 15.82 tok/s @467 completion tokens (clean rate outside the unopened profiler window; the window never fired - threshold trap documented in ft-decode-stats-instruments-unwired). Another temp0 boot-to-boot length datapoint: 467.
 - The T1 driver now exists: .tasks/decode-research/driver/sitecustomize.py + analyze_trace.py (env-activated, plain boots unaffected); the "Instrumentation gap" above is closed at harness level.
 - New lever discovered for the offload strategy: production gather ~29 GB/s vs benched 43.6 -> see ft-offload-decode-gather-gap.
+
+## Outcome status (2026-09-27)
+All three candidates resolved: T1 done (driver v3 - ft-decode-stats-instruments-unwired); T3 REFUTED by oracle (oracle_hit 25.7% vs LRU 25.1% - cache policy dead, only more VRAM slots cuts misses); offload gather lever measured and DEPRIORITIZED (closing only ties hybrid - ft-offload-decode-gather-gap). T2 wave-1 landed (t2d +7.9/+10.4% vs control 15.62, battery 24/24, NO COMMIT pending user - ft-t2-host-delivery-wave1). Live next candidate: lever #2, overlap remaining fetch into the 15.44 ms inter-call gaps.
+
+UPDATE 2026-09-27 (later same day): the T2 "NO COMMIT pending user" line above is superseded - the pool-widening default flip (e541423) and the env knob (227e7a3) are COMMITTED; see ft-t2-host-delivery-wave1.

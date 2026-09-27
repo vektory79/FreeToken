@@ -25,7 +25,6 @@
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-08f4f089d42d.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-ed33892b6a6b.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; old ~4 GB/s likely IOMMU tax
-- [nsys-silent-no-collection-trap](nsys-silent-no-collection-trap-561ecdc4872d.md) — nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe
 - [ft-dense-q80-gemm-campaign](ft-dense-q80-gemm-campaign-8b567bc03197.md) — dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61%; dense tile64 +40.46%; all committed (HEAD 8e2e4c7)
 - [ft-gguf-v3-mtile-campaign](ft-gguf-v3-mtile-campaign-bc52e0593004.md) — v3 m-tile campaign: grouped MoE tile sweep +67.2% (1706aae); production default MOE_MTILE=32 via 8e2e4c7
 - [measured-advice-over-paper](measured-advice-over-paper-d343b7abbdf3.md) — User rejects paper extrapolations as config advice; demands measured numbers (2026-09-20 VRAM-headroom case)
@@ -49,14 +48,21 @@
 - [ft-serve-shutdown-grace-kills-tier-flush](ft-serve-shutdown-grace-kills-tier-flush-d0b0eee76b02.md) — ft serve tier-flush on llama-swap stop FIXED: worker SIGTERM handler, commit f5e51fd
 - [ft-interleave-cache-wash-repro](ft-interleave-cache-wash-repro-f0766afb3a90.md) — Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x
 - [ft-qwen38-flashnext-tier-fit](ft-qwen38-flashnext-tier-fit-b5f533d1ae86.md) — Qwen3.8 qwen4_exp QSAKVCache tier-fit anchors; QSA corruption hazard RESOLVED by phase-2 codec (ft-tier-phase2-swave)
-- [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-67e8a5a7a071.md) — Tiering: L1 fixed at 10 GiB (no ulimit raise); Qwen3.8 second model, tier must stay OFF until QSA guard lands
 - [ft-serve-llama-swap-metrics-brief](ft-serve-llama-swap-metrics-brief-abf857ee5263.md) — llama-swap stats accepted on HW; endpoint /api/metrics/activity; D4 tail-chunk inflation; page_size=64 quirk
 - [rtx5090-pcie-gen5-bw-cap](rtx5090-pcie-gen5-bw-cap-0bbba261e8c3.md) — RTX 5090 rig (i7-14700KF 8P+12E, AVX2-only): Gen5 DMA cap = IOMMU Translated; iommu=pt restores 46/57 GB/s; probes
 - [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-7ef390fc96b0.md) — GGUF prefill MMQ roofline analysis: step-0 nsys split, v0 no-op, v2 grouped +16.4%, ~758 ceiling unreachable (ALU-bound)
 - [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-5405b1861a61.md) — Hybrid decode per-layer cost model: no fixed handshake floor; CPU-leg x fetch-volume coupling; 26.9 GB/s idle-inflated
-- [ft-offload-decode-gather-gap](ft-offload-decode-gather-gap-c3b70a1e4313.md) — Offload gather ~29 GB/s effective vs benched 43.6 (benchbw pcie_gather_gbs); fixing gives ~18.4 tok/s > hybrid 16.29
 - [kb-first-research-workflow](kb-first-research-workflow-69ea95d4e31a.md) — Research workflow: kb/ first, questions one-by-one; research+instrumentation in-session; only optimizations split out
-- [ft-decode-research-campaign](ft-decode-research-campaign-5f8a6014ab6f.md) — GGUF decode A/B: split neutral, ov0 -23%, hostfunc -22%, fetch0 -39%; additive step model; .tasks/decode-research
 - [cuda-debug-tool-strategy](cuda-debug-tool-strategy-4e3773c6a82d.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; torch.profiler aborts scheduler
 - [ft-decode-stats-instruments-unwired](ft-decode-stats-instruments-unwired-e3ffca136987.md) — Decode T1 driver v3: hook GraphRunner.replay (replay bypasses layer host code); kineto aborts scheduler; events-only
-- [ft-decode-lever-research](ft-decode-lever-research-c60963ff7f3c.md) — GGUF glm5next hybrid decode lever study; A/B verdicts + T1 decomposition; T3 refuted by oracle; offload measured
+- [kb-read-file-virtual-fs-block](kb-read-file-virtual-fs-block-18ef02cfb524.md) — read_file blocked on kb/ (empty content or virtual-FS warning); write/edit work; read via shell or call_code_agent
+- [orchestrator-emission-loop](orchestrator-emission-loop-cadbb56c54cb.md) — Emission loop: agent repeats read_* instead of planned run_command; stop, text-only turn or delegate to call_code_agent
+- [ft-offload-decode-gather-gap](ft-offload-decode-gather-gap-e98b42be1439.md) — Offload gather-gap lever REFUTED by T1: prod 33.5-36 GB/s vs 43.6 bench; closing only ties hybrid; offload deprioritized
+- [plain-language-final-reports](plain-language-final-reports-5688565515c6.md) — Final chat reports must be plain-language step-by-step; dense jargon stays in kb/memory, not user summaries
+- [nsys-silent-no-collection-trap](nsys-silent-no-collection-trap-26ba4458cc42.md) — nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe
+- [ft-t2-host-delivery-wave1](ft-t2-host-delivery-wave1-e613aadbe509.md) — T2 wave-1 + default flip 17.36 tok/s; FREETOKEN_T2_POOL_THREADS knob; adjacent-SMT trap; commits 227e7a3..d751511
+- [ft-lever2-gap-anatomy](ft-lever2-gap-anatomy-7d202d10c248.md) — Lever2 anatomy: fetch already overlapped 28.7 ms; gaps = chain kernels 11.5 ms; C1 doze-fix +1.6-1.8% only lever
+- [ft-decode-research-campaign](ft-decode-research-campaign-ed787f6b658a.md) — GGUF decode A/B: split neutral, ov0 -23%, hostfunc -22%, fetch0 -39%; additive step model; .tasks/decode-research
+- [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-67e8a5a7a071.md) — Phase-1 tiering: SessionTierStore d77d15e/4b6aacb, L1 10 GiB cap; Qwen3.8 QSA hazard resolved by phase-2 codec
+- [ft-decode-lever-research](ft-decode-lever-research-98b822932108.md) — GGUF glm5next hybrid decode lever study; A/B verdicts + T1 decomposition; T3 refuted by oracle; offload measured
+- [ft-lever3-chain-cl1](ft-lever3-chain-cl1-d2170aa3ed30.md) — mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons in kb decode-chain-microfusion + T64-T66
