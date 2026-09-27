@@ -8,14 +8,34 @@ n x n held in registers) -- and the pre-mixed layer input.
 
 Semantics are defined by layers/mhc.py's torch reference (bit-comparable in
 fp32 up to reduction order); tests/layers/test_mhc.py pins the parity. N
-(hc_mult) is a constexpr; only N == 4 is exercised.
+(hc_mult) is a constexpr; only N == 4 is exercised. FREETOKEN_MHC_STAGE1_NS
+defaults to 64 (validated 2026-09-27); set 1 for the legacy unsplit grid.
 """
 
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
+
+
+def _parse_stage1_ns(raw: str | None) -> int:
+    """FREETOKEN_MHC_STAGE1_NS: unset = 64 (validated default, 2026-09-27),
+    1 = legacy stage1 grid, 2..64 = number of split-K partial CTAs per token;
+    anything else fails fast."""
+    if raw is None:
+        return 64
+    ns = int(raw)  # ValueError on non-integer garbage
+    if not 1 <= ns <= 64:
+        raise ValueError(f"FREETOKEN_MHC_STAGE1_NS must be in 1..64, got {raw!r}")
+    return ns
+
+
+# Read once at import: the stage1 grid is baked into the CUDA graph at capture,
+# so the value must stay fixed for the whole process lifetime.
+_MHC_STAGE1_NS = _parse_stage1_ns(os.environ.get("FREETOKEN_MHC_STAGE1_NS"))
 
 
 @triton.jit
@@ -85,18 +105,23 @@ def _mhc_stage2_kernel(
     rms_eps, hc_eps, post_mult,
     SINKHORN: tl.constexpr,
     H: tl.constexpr, N: tl.constexpr, MIX: tl.constexpr, BLK_MIX: tl.constexpr,
-    NS: tl.constexpr,
+    NS: tl.constexpr, BLK_NS: tl.constexpr,
 ):
     """Reduce the split partials and run the tiny gate math (sigmoid gates,
     row-softmax + in-register 4x4 Sinkhorn); emits pre gates for stage 3."""
     t = tl.program_id(0).to(tl.int64)
     offs_mix = tl.arange(0, BLK_MIX)
     mix_mask = offs_mix < MIX
-    offs_s = tl.arange(0, NS)
+    # NS need not be a power of two (knob path); pad the arange and mask.
+    offs_s = tl.arange(0, BLK_NS)
+    s_mask = offs_s < NS
 
-    sqsum = tl.sum(tl.load(sq_part_ptr + t * NS + offs_s))
+    sqsum = tl.sum(tl.load(sq_part_ptr + t * NS + offs_s, mask=s_mask, other=0.0))
     acc = tl.sum(
-        tl.load(mix_part_ptr + (t * NS + offs_s)[:, None] * BLK_MIX + offs_mix[None, :]),
+        tl.load(
+            mix_part_ptr + (t * NS + offs_s)[:, None] * BLK_MIX + offs_mix[None, :],
+            mask=s_mask[:, None] & mix_mask[None, :], other=0.0,
+        ),
         axis=0,
     )
     inv_rms = tl.math.rsqrt(sqsum / (N * H) + rms_eps)
@@ -175,9 +200,10 @@ def mhc_fused_post_pre_triton(
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused hc_post (skipped when ``post_mix is None``) + hc_pre. Three-stage
-    split-K: the GEMV/sq-sum reduction fans out over NS hidden slices. Returns
-    (residual_new [T,N,H] bf16, post [T,N,1] fp32, comb [T,N,N] fp32,
-    layer_input [T,H] bf16)."""
+    split-K: the GEMV/sq-sum reduction fans out over NS hidden slices
+    (FREETOKEN_MHC_STAGE1_NS raises the split count for occupancy; default 64,
+    1 = the legacy geometry). Returns (residual_new [T,N,H] bf16, post [T,N,1]
+    fp32, comb [T,N,N] fp32, layer_input [T,H] bf16)."""
     t, n, h = residual.shape
     mix = 2 * n + n * n
     assert fn.shape == (mix, n * h) and fn.dtype == torch.float32
@@ -190,11 +216,18 @@ def mhc_fused_post_pre_triton(
     comb_out = torch.empty(t, n, n, dtype=torch.float32, device=dev)
     li_out = torch.empty(t, h, dtype=residual.dtype, device=dev)
 
-    block_h = min(512, triton.next_power_of_2(h))
-    # NS feeds a tl.arange in stage 2 -> keep it a power of two.
-    ns = 1
-    while ns * 2 <= min(16, h // block_h):
-        ns *= 2
+    if _MHC_STAGE1_NS > 1:
+        # C-L1 occupancy knob: fan the reduction out over ~N partial CTAs per
+        # token by shrinking the hidden chunk (floor 64); N above the useful
+        # split (tiny h) clamps down to the unsplit legacy grid. Splitting
+        # reorders the fp32 reduction, so knob-on is not bitwise vs default.
+        block_h = min(64, triton.next_power_of_2(h))
+        ns = min(_MHC_STAGE1_NS, triton.cdiv(h, block_h))
+    else:
+        block_h = min(512, triton.next_power_of_2(h))
+        ns = 1
+        while ns * 2 <= min(16, h // block_h):
+            ns *= 2
     split = triton.cdiv(triton.cdiv(h, ns), block_h) * block_h
     ns = triton.cdiv(h, split)
     blk_mix = triton.next_power_of_2(mix)
@@ -219,6 +252,7 @@ def mhc_fused_post_pre_triton(
         rms_eps, hc_eps, post_mult,
         SINKHORN=sinkhorn_repeat,
         H=h, N=n, MIX=mix, BLK_MIX=blk_mix, NS=ns,
+        BLK_NS=triton.next_power_of_2(ns),
         num_warps=1,
     )
     _mhc_stage3_kernel[(t, triton.cdiv(h, 1024))](
