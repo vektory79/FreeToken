@@ -24,7 +24,9 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -1076,6 +1078,85 @@ void fp8_roundtrip_bf16(const bf16_t* src, bf16_t* dst, int K) {
 
 // --------------------------------- executor ---------------------------------
 
+// --------------------- T2 phase trace (debug instrumentation) ---------------------
+// FREETOKEN_T2_PHASE_TRACE=<path>: one line per dispatched cpu_moe call with
+// steady_clock ns stamps [doorbell seen | dispatch done | first worker start |
+// last worker done | done-flag written], pool/layer ids and per-worker row counts.
+// Gate off: a single static-flag branch per site; scheduling and math untouched.
+// Records buffer in memory, flush every 256 calls and at process exit - never
+// per-call IO, no fsync; overhead when on is a few us per call.
+namespace t2trace {
+constexpr int kMaxW = 64;  // per-worker row counters kept per record
+
+inline int64_t now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+inline int next_pool() {
+  static std::atomic<int> c{0};
+  return c.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline uint64_t next_seq() {
+  static std::atomic<uint64_t> c{0};
+  return c.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Read once at .so load; hot sites branch on this static only.
+const bool on = std::getenv("FREETOKEN_T2_PHASE_TRACE") != nullptr;
+
+struct Rec {
+  uint64_t seq;
+  int64_t t_door, t_disp, t_first, t_last, t_flag;  // steady_clock ns
+  int32_t pool, layer_slot, layer_id, nworkers;
+  uint32_t rows[kMaxW];
+};
+
+struct Sink {
+  std::mutex mtx;
+  std::vector<Rec> buf;
+  std::ofstream out;
+
+  void append(const Rec& r) {
+    std::lock_guard<std::mutex> lk(mtx);
+    buf.push_back(r);
+    if (buf.size() >= 256) flush();
+  }
+
+  // Caller holds mtx. Stream flush to the OS only; never fsync.
+  void flush() {
+    if (buf.empty()) return;
+    if (!out.is_open()) {
+      out.open(std::getenv("FREETOKEN_T2_PHASE_TRACE"), std::ios::app);
+      out << "# seq pool layer_slot layer_id nworkers t_door_ns t_disp_ns t_first_ns"
+             " t_last_ns t_flag_ns rows_per_worker[0..nworkers-1]\n";
+    }
+    for (const Rec& r : buf) {
+      out << r.seq << ' ' << r.pool << ' ' << r.layer_slot << ' ' << r.layer_id << ' '
+          << r.nworkers << ' ' << r.t_door << ' ' << r.t_disp << ' ' << r.t_first << ' '
+          << r.t_last << ' ' << r.t_flag;
+      const int nw = std::min<int32_t>(r.nworkers, kMaxW);
+      for (int i = 0; i < nw; ++i) out << ' ' << r.rows[i];
+      out << '\n';
+    }
+    out.flush();
+    buf.clear();
+  }
+
+  ~Sink() {
+    std::lock_guard<std::mutex> lk(mtx);
+    flush();
+  }
+};
+
+inline Sink& sink() {
+  static Sink s;  // flushed at process exit
+  return s;
+}
+}  // namespace t2trace
+
 struct CpuMoeExecutor;
 
 struct MoeTask {
@@ -1944,6 +2025,18 @@ struct CpuMoeExecutor {
   std::vector<MoeTask*> owned_tasks;  // persistent task descriptors (graph-stable)
   std::vector<int> core_ids;          // worker tid -> logical CPU to pin to (may be empty)
 
+  // T2 phase-trace staging (read/written only when FREETOKEN_T2_PHASE_TRACE is set;
+  // one dispatch in flight per executor, so plain fields suffice).
+  int t2_pool = t2trace::next_pool();  // executor ordinal, process-wide
+  struct {
+    uint64_t seq = 0;
+    int64_t t_door = 0, t_disp = 0;
+    int32_t layer_slot = -1, layer_id = -1;
+  } t2;
+  std::atomic<int64_t> t2_first{0};       // earliest worker start; INT64_MAX reset in submit
+  std::atomic<int64_t> t2_last{0};        // set by the completing worker
+  uint64_t t2_rows[t2trace::kMaxW] = {};  // worker tid -> rows this call
+
   // ---- Flag-based GPU<->CPU handshake (replaces the per-layer cudaLaunchHostFunc pair) ----
   // A tiny GPU kernel bumps ready_flags[slot] at submit; this coordinator thread busy-polls
   // it, runs the slot's task on the worker pool, and sets done_flags[slot], which a GPU
@@ -2598,12 +2691,16 @@ struct CpuMoeExecutor {
     }
   }
 
-  void run_task_body(const MoeTask* t) {
+  void run_task_body(const MoeTask* t, int tid) {
+    // Work volume for the T2 trace: register-only until the final snapshot, so the
+    // gate-off cost is a few adds per grabbed tile and nothing else.
+    uint64_t rows = 0;
     int local_sense = 0;
     for (;;) {
       int64_t p = p1_next.fetch_add(1, std::memory_order_relaxed);
       if (p >= p1_total) break;
       do_pass1(t, p);
+      rows += std::min<int64_t>(IBLK, I - (p % n_iblk) * IBLK);
     }
     barrier(local_sense);
     // Row-major fp4: prepare the intermediate rows (per token,route) before the down
@@ -2615,6 +2712,7 @@ struct CpuMoeExecutor {
         int64_t r = prt_next.fetch_add(1, std::memory_order_relaxed);
         if (r >= prt_total) break;
         prep_g_row(r);
+        rows += 1;
       }
       barrier(local_sense);
     }
@@ -2622,7 +2720,9 @@ struct CpuMoeExecutor {
       int64_t p = p2_next.fetch_add(1, std::memory_order_relaxed);
       if (p >= p2_total) break;
       do_pass2(t, p);
+      rows += std::min<int64_t>(HBLK, H - (p % n_hblk) * HBLK);
     }
+    if (t2trace::on) t2_rows[std::min(tid, t2trace::kMaxW - 1)] = rows;
   }
 
   void worker_loop(int tid) {
@@ -2637,8 +2737,17 @@ struct CpuMoeExecutor {
         my_gen = cur_gen;
         t = cur_task;
       }
-      run_task_body(t);
+      if (t2trace::on) {
+        // Min-CAS across workers: the earliest start stamps t2_first.
+        const int64_t v = t2trace::now_ns();
+        int64_t prev = t2_first.load(std::memory_order_relaxed);
+        while (v < prev &&
+               !t2_first.compare_exchange_weak(prev, v, std::memory_order_relaxed)) {
+        }
+      }
+      run_task_body(t, tid);
       if (done_count.fetch_add(1) + 1 == num_threads) {
+        if (t2trace::on) t2_last.store(t2trace::now_ns(), std::memory_order_relaxed);
         completed.store(my_gen, std::memory_order_release);
         {
           std::lock_guard<std::mutex> lk(sync_mtx);
@@ -2665,6 +2774,11 @@ struct CpuMoeExecutor {
     done_count.store(0, std::memory_order_relaxed);
     bar_count.store(0, std::memory_order_relaxed);
     bar_sense.store(0, std::memory_order_relaxed);
+    if (t2trace::on) {
+      t2_first.store(INT64_MAX, std::memory_order_relaxed);
+      t2_last.store(0, std::memory_order_relaxed);
+      for (int i = 0; i < num_threads && i < t2trace::kMaxW; ++i) t2_rows[i] = 0;
+    }
     // ds_fp4: FP8 round-trip the per-token input once, up front (single-threaded;
     // tiny for decode, and done before the workers are woken below).
     if (needs_di) {
@@ -2735,6 +2849,25 @@ struct CpuMoeExecutor {
     const uint64_t target = submitted.load(std::memory_order_acquire);
     std::unique_lock<std::mutex> lk(sync_mtx);
     sync_cv.wait(lk, [&] { return completed.load(std::memory_order_acquire) >= target; });
+  }
+
+  // T2 trace: emit this call's record. Safe after sync(): the completed/sync_cv
+  // acquire chain makes every worker's rows/first/last writes visible here.
+  void t2_call_end(int64_t t_flag) {
+    t2trace::Rec r{};
+    r.seq = t2.seq;
+    r.t_door = t2.t_door;
+    r.t_disp = t2.t_disp;
+    r.t_first = t2_first.load(std::memory_order_relaxed);
+    r.t_last = t2_last.load(std::memory_order_relaxed);
+    r.t_flag = t_flag;
+    r.pool = t2_pool;
+    r.layer_slot = t2.layer_slot;
+    r.layer_id = t2.layer_id;
+    r.nworkers = num_threads;
+    const int nw = std::min(num_threads, t2trace::kMaxW);
+    for (int i = 0; i < nw; ++i) r.rows[i] = static_cast<uint32_t>(t2_rows[i]);
+    t2trace::sink().append(r);
   }
 
   void submit_with_cuda_stream(uintptr_t stream, uintptr_t task) {
@@ -2819,11 +2952,19 @@ struct CpuMoeExecutor {
             t = (L < static_cast<int>(flag_task.size())) ? flag_task[L] : nullptr;
           }
           if (t != nullptr) {
+            if (t2trace::on) {
+              t2.seq = t2trace::next_seq();
+              t2.t_door = t2trace::now_ns();
+              t2.layer_slot = L;
+              t2.layer_id = t->layer_id;
+            }
             submit(t);
+            if (t2trace::on) t2.t_disp = t2trace::now_ns();
             sync();
           }
           // Release: the workers' y stores are visible before the GPU sees done.
           flag_store_release(&done_flags[L], 1);
+          if (t2trace::on) t2_call_end(t2trace::now_ns());
           if (L < static_cast<int>(flag_served.size())) ++flag_served[L];
           any = true;
         }
@@ -2865,17 +3006,35 @@ struct CpuMoeExecutor {
   // Eager (non-graph) path: run one task to completion on the pool.
   void run_task(uintptr_t task) {
     MoeTask* t = reinterpret_cast<MoeTask*>(task);
+    if (t2trace::on) {
+      // No doorbell / done-flag here: t_door == call entry, t_flag == sync end.
+      t2.seq = t2trace::next_seq();
+      t2.t_door = t2trace::now_ns();
+      t2.layer_slot = -1;
+      t2.layer_id = t->layer_id;
+    }
     submit(t);
+    if (t2trace::on) t2.t_disp = t2trace::now_ns();
     sync();
+    if (t2trace::on) t2_call_end(t2trace::now_ns());
   }
 
   static void CUDART_CB submit_cb(void* ud) {
     MoeTask* t = reinterpret_cast<MoeTask*>(ud);
+    if (t2trace::on) {
+      // Host-func path: no doorbell; t_door == submit callback entry.
+      t->exec->t2.seq = t2trace::next_seq();
+      t->exec->t2.t_door = t2trace::now_ns();
+      t->exec->t2.layer_slot = -1;
+      t->exec->t2.layer_id = t->layer_id;
+    }
     t->exec->submit(t);
+    if (t2trace::on) t->exec->t2.t_disp = t2trace::now_ns();
   }
   static void CUDART_CB sync_cb(void* ud) {
     MoeTask* t = reinterpret_cast<MoeTask*>(ud);
     t->exec->sync();
+    if (t2trace::on) t->exec->t2_call_end(t2trace::now_ns());
   }
 };
 
