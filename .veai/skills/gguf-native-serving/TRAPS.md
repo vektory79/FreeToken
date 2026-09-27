@@ -1,4 +1,4 @@
-# TRAPS.md - 63 ловушки для native GGUF serving (T01-T63, рецепты D01-D10)
+# TRAPS.md - 66 ловушек для native GGUF serving (T01-T66, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -357,6 +357,31 @@ radix; артефакты .tasks/fix3-snapshot-lru-refresh/; коммиты 9732
   (first / largest-new / last) могут сфабриковать или замаскировать "full
   misses" - сверяйся с сырыми per-chunk строками до любой интерпретации A/B
   replay.
+
+## Декод-микрофьюжн кампания 2026-09-27/28 (GPU chain) T64-T66
+
+Ловушки кампании микро-бандла C-L2..C-L5 GPU-цепочки декода (артефакты
+.tasks/decode-research/; дистиллят с полными числами -
+kb/topics/decode-chain-microfusion.md; все четыре env-ручки валидированы на
+железе и удалены из дерева без коммита).
+
+- **T64** (kernel, occupancy) In-kernel fusion preprocessing-шага
+  (quantize_q8_1 внутрь mul_mat_vec_q, FREETOKEN_FUSED_ACTQ): пуски легли
+  ровно по прогнозу (442 -> 126/шаг), но раздутый smem-резидентный q8_1-ряд
+  обрушил occupancy ВСЕХ сайтов MMVQ (5.5-8.7x: 27.1 -> 236.9 us p50 на
+  nrows=4096; класс 6.31 -> 45.37 ms/шаг) при e2e -43%. Изменение ядра
+  верифицируй CTAs/SM + achieved GB/s в nsys, НЕ счётчиком пусков.
+- **T65** (kernel, design) Слитый topk (FREETOKEN_TOPK_FUSED) с tie-семантикой
+  бит-в-бит (включая unstable-bitonic скрэмбл ничьих) проиграл ~20x (226.8 us
+  против ~11 us ATen-каскада): one-block-per-slice сериализует работу, которую
+  ATen размазывает по блокам/проходам. Фьюжн обязан воспроизводить
+  occupancy-структуру референса, а не только выходы; корректностные тесты
+  доказывают выходы, не throughput.
+- **T66** (loader, FTW) Load-time слияние весов обязано эмитить слитые ключи в
+  КАЖДОМ reader-пути: C-L5/C-L2 эмитили только из raw-GGUF reader, а FTW-буты
+  (реплей conversion-time имён тензоров) падали KeyError на загрузке (~21 c,
+  rc=2, WeightLoadError). После любого loader-фьюжна - обнови FTW conversion
+  path И бут-тест на FTW-чекпоинте, не только raw GGUF.
 
 ## Debugging
 
