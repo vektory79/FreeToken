@@ -1,6 +1,6 @@
 # TASK: T2 - совмещённая доставка host-DRAM в декоде гибрида (микро-простои пинг-понга)
 
-Status: NOT STARTED. Composed 2026-09-26 из исхода decode-research кампании
+Status: WAVE 1 DONE 2026-09-26 - wave1-ab-summary.md; t2d (pool2 -> 4 E-cores 24-27) +7.9/+10.4% vs control, battery 24/24; committed 2026-09-27: 227e7a3 (t2 pool env override), e541423 (default widening), e10b424 (cpu moe phase trace). Composed 2026-09-26 из исхода decode-research кампании
 (`.tasks/decode-research/`, вердикты в памяти `ft-decode-research-campaign` /
 `ft-decode-lever-research`). Read CONTRIBUTING.md first - он обязателен. Якоря
 строк проверены 2026-09-26 против HEAD 0ff8495 (vektory79); перед правками
@@ -125,6 +125,7 @@ CUDA-event спаны шагов + collect_stats/freq; дамп `stats_<tag>.jso
 - Инструментация cpu_moe_ext.cpp требует rebuild: `python setup.py
   build_ext --inplace` (clang++ host, CC/CXX scoped - см. память
   ft-gguf-kernel-jit-toolchain).
+- AOT rebuild of cpu_moe_ext.cpp needs gcc (clang rejects __builtin_cpu_supports("avxvnni")); CC/CXX=clang is only for the runtime gguf JIT.
 
 ## Точные команды
 

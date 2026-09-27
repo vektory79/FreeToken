@@ -13,7 +13,9 @@ Specification / Acceptance / Checklist.
   доставка host-DRAM в декоде гибрида (микро-простои пинг-понга ног, 41.5 из
   72 GB/s) — единственный живой рычаг декода после decode-research 2026-09-26;
   опровергнутые направления перечислены внутри, чтобы не тратить сессии.
-  Вход: [TASK.md](decode-t2-host-delivery/TASK.md). Статус: NOT STARTED.
+  Вход: [TASK.md](decode-t2-host-delivery/TASK.md). Статус: WAVE 1 DONE
+  2026-09-26 ([wave1-ab-summary.md](decode-t2-host-delivery/wave1-ab-summary.md),
+  committed 2026-09-27: e541423 + 227e7a3 + e10b424).
 - [fix1-radix-track-seqlen/](fix1-radix-track-seqlen/) — баг-фикс с тестом
   «падает до / проходит после» и hardware-верификацией. Вход:
   [TASK.md](fix1-radix-track-seqlen/TASK.md). Статус: COMMITTED (5b72aba).
