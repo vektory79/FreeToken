@@ -32,6 +32,9 @@ _MAX_SNAPSHOTS = 3
 _DIGEST = 16
 _JOURNAL_NAME = "journal.log"
 _BLOB_NAME = "blob.bin"
+# Clean-shutdown sidecar (P2): written only after a completed shutdown_tier; lets boot
+# replay skip the per-record payload crc re-read. Absent/stale/torn -> full verification.
+_MARKER_NAME = "shutdown.marker"
 # Scheduled compaction (runtime, no CLI flag): rewrite the blob once dead bytes exceed
 # this share of the blob AND the blob is above the floor (no churn on small installs).
 _COMPACT_DEAD_FRACTION = 0.25
@@ -263,12 +266,21 @@ class SessionTierStore:
         self._journal_path = ""
         self._blob_fd = -1
         self._journal_fd = -1
+        # Generation carried by the clean-shutdown marker: monotonic across shutdowns of
+        # this directory (seeded from the marker at a fast-path boot), guarding against a
+        # compacted journal shrinking back to a stale marker's recorded size.
+        self._marker_generation = 0
+        # Whether the marker file is believed to be on disk right now: gates the durable
+        # unlink in invalidate_shutdown_marker so the discard hot path pays neither the
+        # dir fsync nor the ENOENT syscall when no marker exists.
+        self._marker_present = False
         # Blob bytes freed by L2 discards (regions read as zero holes) until compaction
         # reclaims them; boot replay recomputes this from the recovered record set.
         if self.dir is not None:
             os.makedirs(self.dir, exist_ok=True)
             self._blob_path = os.path.join(self.dir, _BLOB_NAME)
             self._journal_path = os.path.join(self.dir, _JOURNAL_NAME)
+            self._marker_present = os.path.exists(os.path.join(self.dir, _MARKER_NAME))
             self._blob_fd = os.open(self._blob_path,
                                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
             self._journal_fd = os.open(self._journal_path,
@@ -641,6 +653,10 @@ class SessionTierStore:
             self._close_staging(t)
             t.state = "abandoned"
             self._counters["prefetch_abandon"] += 1
+        # Discard mutates no on-disk bytes (journal and blob eof untouched), so the
+        # marker's size checks cannot see it: without this explicit drop the next boot
+        # could fast-path-resurrect the evicted segment.
+        self.invalidate_shutdown_marker()
 
     def _supersede(self, seg: _Segment) -> None:
         # L1 resources first: _discard only accounts the L2 padded span (a no-op when the
@@ -926,6 +942,103 @@ class SessionTierStore:
             logger.info("session tier: flushed %d live segments to L2", count)
         return count
 
+    # ---------------------------------------------------- clean-shutdown marker (P2)
+
+    def invalidate_shutdown_marker(self) -> None:
+        """Drop the clean-shutdown marker. Called at the START of a graceful shutdown
+        (before any flush/compact mutation) and after every runtime mutation the marker's
+        size checks cannot self-invalidate (a discard rewrites neither the journal nor the
+        blob). An interrupted shutdown must never leave a marker behind: the next boot
+        would fast-path a state that was never fully reached. The unlink is made durable
+        with a directory fsync - without it a power loss can resurrect the deleted name,
+        and if its sizes still match, a fast-path boot resurrects an evicted segment. The
+        dir fsync is paid only when a marker actually exists (_marker_present)."""
+        if not self.enabled or not self._journal_path or not self._marker_present:
+            return
+        try:
+            os.unlink(os.path.join(self.dir, _MARKER_NAME))
+            dfd = os.open(self.dir, os.O_RDONLY)   # make the unlink itself durable
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except FileNotFoundError:
+            pass                      # absent already: the common case
+        except OSError as e:
+            logger.warning("session tier: shutdown marker unlink failed (%s); "
+                           "next boot re-verifies the full replay", e)
+            return                    # on-disk state unknown: keep the flag up
+        self._marker_present = False
+
+    def write_shutdown_marker(self) -> None:
+        """End-of-shutdown barrier: journal size, blob eof and a monotonic generation,
+        fsync'ed and atomically renamed into place. Meaningful only when every journal/
+        blob mutation since boot followed the durable blob-before-journal order and the
+        shutdown finished (flush + compact + final fsyncs). The generation guards against
+        a size coincidence: a compaction can legitimately shrink the journal back to a
+        stale marker's recorded size."""
+        if not self.enabled or not self._journal_path:
+            return
+        try:
+            rec = {"journal_bytes": os.path.getsize(self._journal_path),
+                   "blob_eof": os.path.getsize(self._blob_path),
+                   "generation": self._marker_generation + 1}
+            payload = json.dumps(rec, sort_keys=True).encode()
+            tmp = os.path.join(self.dir, _MARKER_NAME + ".new")
+            with open(tmp, "wb") as f:
+                f.write(struct.pack("<II", len(payload), zlib.crc32(payload)) + payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.rename(tmp, os.path.join(self.dir, _MARKER_NAME))
+            self._marker_present = True
+            self._marker_generation = rec["generation"]
+            dfd = os.open(self.dir, os.O_RDONLY)   # make the rename itself durable
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError as e:
+            logger.warning("session tier: shutdown marker write failed (%s); "
+                           "next boot re-verifies the full replay", e)
+
+    def _read_shutdown_marker(self, journal_bytes: int) -> tuple[bool, dict | None]:
+        """Boot-time validity check: the marker parses, its crc holds, and BOTH recorded
+        sizes match the files on disk. Returns (valid, parsed) - parsed is the marker's
+        JSON dict when it json-parsed to a dict, else None, so the caller can report a
+        present-but-rejected marker with its recorded sizes. Missing/garbled/mismatched
+        -> (False, ...): full verification path, behavior unchanged. The in-memory
+        generation is seeded from ANY crc-valid marker (stale ones too) so the next
+        write stays strictly monotonic; the on-disk presence refreshes _marker_present."""
+        mpath = os.path.join(self.dir, _MARKER_NAME)
+        self._marker_present = os.path.exists(mpath)
+        if not self._marker_present:
+            return False, None
+        try:
+            with open(mpath, "rb") as f:
+                framed = f.read()
+            plen, crc = struct.unpack_from("<II", framed, 0)
+            if 8 + plen != len(framed) or zlib.crc32(framed[8:]) != crc:
+                return False, None
+            mk = json.loads(framed[8:])
+            # A crc-valid payload is still arbitrary JSON: a non-dict (list/number)
+            # would AttributeError on .get below and kill the whole boot replay, so
+            # guard explicitly instead of widening the except (which would swallow
+            # genuine bugs).
+            if not isinstance(mk, dict):
+                return False, None
+            gen = mk.get("generation")
+            if isinstance(gen, int) and gen > 0:
+                # Seed BEFORE the size match: a stale marker must still raise the
+                # in-memory floor, or the next write could emit a generation <= the
+                # rejected one.
+                self._marker_generation = max(self._marker_generation, gen)
+            ok = (mk.get("journal_bytes") == journal_bytes
+                  and mk.get("blob_eof") == os.path.getsize(self._blob_path)
+                  and isinstance(gen, int) and gen > 0)
+            return ok, mk
+        except (OSError, ValueError, struct.error):
+            return False, None
+
     def _journal_append(self, seg: _Segment, off: int, nbytes: int, crc: int) -> bool:
         rec = {
             "path_key": seg.path_key.hex(), "blen": seg.boundary_len,
@@ -964,32 +1077,56 @@ class SessionTierStore:
                 break
             records.append(json.loads(payload))
             pos += 8 + plen
-        if pos != len(journal):
+        torn = pos != len(journal)
+        if torn:
             logger.warning("session tier: journal tail truncated/torn, "
                            "%d of %d bytes recovered", pos, len(journal))
-        # Payload-crc validation: a record whose blob region no longer matches (holes left
-        # by compaction, a torn append that advanced EOF) is dead - drop, never resurrect.
-        blob_fd = -1
-        if self._blob_path and os.path.exists(self._blob_path):
-            try:
-                blob_fd = os.open(self._blob_path, os.O_RDONLY)
-            except OSError:
-                blob_fd = -1
-        if blob_fd >= 0:
-            kept, dropped = [], 0
-            for rec in records:
-                ok = True
-                if "crc" in rec:
-                    try:
-                        ok = zlib.crc32(os.pread(blob_fd, rec["n"], rec["off"])) == rec["crc"]
-                    except OSError:
-                        ok = False
-                (kept.append(rec) if ok else None)
-                dropped += 0 if ok else 1
-            os.close(blob_fd)
-            records = kept
-            if dropped:
-                logger.info("session tier: replay dropped %d dead/torn records", dropped)
+        # Clean-shutdown fast path: after a graceful shutdown every record followed the
+        # durable blob-before-journal order, so the payload crc re-read below is pure
+        # redundancy (~22 s on a 41 GiB L2). Marker sizes matching the on-disk files plus
+        # an intact tail prove the state is exactly the shutdown checkpoint. Missing or
+        # stale marker, torn tail: fall through to the full verification, which owns
+        # crash convergence - behavior unchanged.
+        fast, marker = False, None
+        if not torn:
+            fast, marker = self._read_shutdown_marker(len(journal))
+        if not fast and self._marker_present and not torn:
+            # An existing-but-rejected marker is worth one info line; an ABSENT marker
+            # (the common first-boot / crash case) stays silent as before.
+            recorded = (f"journal_bytes={marker.get('journal_bytes')} "
+                        f"blob_eof={marker.get('blob_eof')} "
+                        f"generation={marker.get('generation')}"
+                        if marker else "unreadable")
+            blob = (os.path.getsize(self._blob_path)
+                    if os.path.exists(self._blob_path) else -1)
+            logger.info("session tier: clean-shutdown marker present but rejected "
+                        "(%s; actual journal_bytes=%d blob_eof=%d); "
+                        "full payload verification", recorded, len(journal), blob)
+        if not fast:
+            # Payload-crc validation: a record whose blob region no longer matches (holes
+            # left by compaction, a torn append that advanced EOF) is dead - drop, never
+            # resurrect.
+            blob_fd = -1
+            if self._blob_path and os.path.exists(self._blob_path):
+                try:
+                    blob_fd = os.open(self._blob_path, os.O_RDONLY)
+                except OSError:
+                    blob_fd = -1
+            if blob_fd >= 0:
+                kept, dropped = [], 0
+                for rec in records:
+                    ok = True
+                    if "crc" in rec:
+                        try:
+                            ok = zlib.crc32(os.pread(blob_fd, rec["n"], rec["off"])) == rec["crc"]
+                        except OSError:
+                            ok = False
+                    (kept.append(rec) if ok else None)
+                    dropped += 0 if ok else 1
+                os.close(blob_fd)
+                records = kept
+                if dropped:
+                    logger.info("session tier: replay dropped %d dead/torn records", dropped)
         with self._lock:
             for t in list(self._tickets.values()):   # boot replay: no ticket survives it
                 self._tickets.pop(id(t), None)
@@ -1018,7 +1155,11 @@ class SessionTierStore:
                 (s.l2_n + _BLK - 1) // _BLK * _BLK
                 for s in self._segments.values() if s.in_l2))
         if records:
-            logger.info("session tier: replayed %d journal records", len(records))
+            if fast:
+                logger.info("session tier: replay fast-path (clean shutdown marker), "
+                            "%d records", len(records))
+            else:
+                logger.info("session tier: replayed %d journal records", len(records))
         return len(records)
 
     # ------------------------------------------------------------- log compaction
@@ -1056,6 +1197,9 @@ class SessionTierStore:
         if not self.enabled or self._blob_fd < 0:
             return 0
         with self._lock:
+            # The rewrite moves both files: a marker a previous shutdown left behind no
+            # longer describes this state the moment the rewrite starts.
+            self.invalidate_shutdown_marker()
             records = self._parse_journal()
             # Survival keyed by EXACT record identity (path, offset, length), NOT last-wins
             # per path: a crashed discard + replay can leave TWO live segments on one

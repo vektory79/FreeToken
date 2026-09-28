@@ -144,6 +144,10 @@ L2 SSD:  фиксированный буфер Y GiB, O_DIRECT (io_uring/libaio,
 - Персистентность: append-only журнал на SSD (blob+fsync, затем запись);
   бут = replay журнала + ленивый restore; graceful shutdown = flush живого
   (~3.7 GiB ~ 0.74 с @5 ГБ/с) + компакт чекпоинта; crash-safe по построению.
+- Маркер чистой остановки (P2): sidecar shutdown.marker, записанный только
+  завершённым shutdown_tier, даёт буту fast-path реплея без CRC-перечитки
+  блоба (минус ~22 с на 41 GiB L2, бут A/B 2026-09-27); инвалидация на
+  shutdown/compact/discard - [P2-NOTES.md](../cases/boot-shutdown-io/P2-NOTES.md).
 - RAM: аллокация одним куском + mlock на старте (pinned, предсказуемо).
 - Конкурентность: refcount сегментов (restore один раз на сегмент),
   сериализация restore на сегмент; дедуп страниц даёт шаринг системных

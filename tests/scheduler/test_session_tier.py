@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import json
+import logging
 import os
+import struct
 import time
+import zlib
 from types import SimpleNamespace
 
 import pytest
@@ -395,6 +399,52 @@ def _boot(cfg_dir):
     """Boot simulation on an existing tier directory: replay then probe."""
     store = SessionTierStore(_cfg(d=cfg_dir))
     return store, store.replay_journal()
+
+
+def _graceful_stop(store):
+    """Mirror CacheManager.shutdown_tier's marker discipline: drop any previous marker
+    FIRST, flush + compact, then write the end-of-shutdown barrier."""
+    store.invalidate_shutdown_marker()
+    store.flush_live()
+    store.compact()
+    store.write_shutdown_marker()
+
+
+class _LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _tier_log_capture():
+    """The module logger does not propagate (init_logger), so caplog cannot see it."""
+    lg = logging.getLogger("freetoken.scheduler.session_tier")
+    cap = _LogCapture()
+    lg.addHandler(cap)
+    try:
+        yield cap
+    finally:
+        lg.removeHandler(cap)
+
+
+def _counting_pread(monkeypatch):
+    """Wrap the module's os.pread with a pass-through counter: the full verification
+    path preads every record's payload, the fast path must not touch the blob at all."""
+    import freetoken.scheduler.session_tier as st
+
+    real = os.pread
+    calls = {"n": 0}
+
+    def counting(fd, n, off):
+        calls["n"] += 1
+        return real(fd, n, off)
+
+    monkeypatch.setattr(st.os, "pread", counting)
+    return calls
 
 
 def test_journal_replay_after_sigkill_truncated_tail(tmp_path):
@@ -949,3 +999,232 @@ def test_compact_keeps_both_resurrected_records_after_crash_replay(tmp_path):
     assert reborn.restore(h2) == ([data for _, data in pages2], [_snap("b")])
     h1 = reborn.probe(keys1)[1]             # seg1 still indexed and readable
     assert reborn.restore(h1) == ([data for _, data in pages1], [_snap("a")])
+
+
+# --------------------------------------------------- P2: clean-shutdown marker
+
+
+def _marker_path(d):
+    return os.path.join(str(d), "shutdown.marker")
+
+
+def test_shutdown_marker_fast_path_replay(tmp_path, monkeypatch):
+    """P2 (a): a completed graceful shutdown writes the fsync'ed marker; the next boot
+    takes the fast path (no payload pread at all) and the data is intact."""
+    d = tmp_path / "tier"
+    store = SessionTierStore(_cfg(d=str(d)))
+    keys, pages = _chain([(1, 0), (1, 1), (1, 2)])
+    assert store.offer(b"path", 3, pages, _snap("s"))
+    _graceful_stop(store)
+    assert os.path.exists(_marker_path(d))
+
+    def boom(*args, **kwargs):
+        raise AssertionError("payload pread must not happen on the fast path")
+
+    monkeypatch.setattr("freetoken.scheduler.session_tier.os.pread", boom)
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d))
+    assert n == 1
+    assert "session tier: replay fast-path (clean shutdown marker), 1 records" in cap.messages
+    hit = boot.probe(keys)
+    assert hit is not None and hit[0] == 3
+    out, snaps = boot.restore(hit[1])
+    assert out == [x for _, x in pages] and snaps == [_snap("s")]
+
+
+def test_shutdown_marker_missing_or_stale_takes_full_path(tmp_path, monkeypatch):
+    """P2 (b): no marker, or a marker whose sizes no longer match (a runtime append after
+    the previous stop) -> full per-record crc verification, records intact."""
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2)]
+    # (i) no marker: old directories without one keep the full path
+    d1 = tmp_path / "no-marker"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d1)))
+    for i, (keys, pages) in enumerate(chains, start=1):
+        assert store.offer(f"path-{i}".encode(), 3, pages, _snap(f"{i}"))
+    calls = _counting_pread(monkeypatch)
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d1))
+    assert n == 2 and calls["n"] == 2
+    assert not any("fast-path" in m for m in cap.messages)
+    for i, (keys, pages) in enumerate(chains, start=1):
+        hit = boot.probe(keys)
+        assert boot.restore(hit[1]) == ([x for _, x in pages], [_snap(f"{i}")])
+
+    # (ii) stale marker: a runtime append after the graceful stop invalidates the sizes
+    monkeypatch.undo()
+    d2 = tmp_path / "stale"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d2)))
+    for i, (keys, pages) in enumerate(chains, start=1):
+        assert store.offer(f"path-{i}".encode(), 3, pages, _snap(f"{i}"))
+    _graceful_stop(store)
+    k3 = chain_page_key(None, (3,))
+    assert store.offer(b"path-3", 1, [(k3, bytes([3]) * PAGE)])   # runtime, post-marker
+    calls = _counting_pread(monkeypatch)
+    boot, n = _boot(str(d2))
+    assert n == 3 and calls["n"] == 3                             # full verification ran
+
+
+def test_shutdown_marker_full_path_drops_dead_keeps_live(tmp_path):
+    """P2 (b): a stale marker plus a corrupted payload region (torn append / hole) ->
+    full path, the dead record is dropped with the crash-path report, the live ones
+    restore byte-identically."""
+    d = tmp_path / "dead"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2, 3)]
+    for i, (keys, pages) in enumerate(chains, start=1):
+        assert store.offer(f"path-{i}".encode(), 3, pages, _snap(f"{i}"))
+    _graceful_stop(store)
+    seg1 = store._by_path(b"path-1")
+    with open(os.path.join(str(d), "blob.bin"), "r+b") as f:   # tear record 1's payload
+        f.seek(seg1.l2_off)
+        f.write(b"\xde" * seg1.l2_n)
+    k4 = chain_page_key(None, (4,))
+    assert store.offer(b"path-4", 1, [(k4, bytes([4]) * PAGE)])  # marker now stale
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d))
+    assert n == 3
+    assert "session tier: replay dropped 1 dead/torn records" in cap.messages
+    assert not any("fast-path" in m for m in cap.messages)
+    assert boot.probe([chain_page_key(None, (1,))]) is None
+    for i in (2, 3, 4):
+        keys = chains[i - 1][0] if i <= 3 else [k4]
+        hit = boot.probe(keys)
+        assert hit is not None
+        pages_out, _ = boot.restore(hit[1])
+        assert pages_out == [x for _, x in (chains[i - 1][1] if i <= 3
+                                            else [(k4, bytes([4]) * PAGE)])]
+
+
+def test_shutdown_marker_invalidated_before_shutdown_crash(tmp_path, monkeypatch):
+    """P2 (c): a crash mid-shutdown_tier after a VALID marker from the previous stop must
+    not give a false fast path. The marker is dropped at shutdown_tier start, before any
+    flush mutation; the mid-flush crash then leaves no marker (and a torn tail)."""
+    d = tmp_path / "midstop"
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2)]
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    for i, (keys, pages) in enumerate(chains, start=1):
+        assert store.offer(f"path-{i}".encode(), 3, pages, _snap(f"{i}"))
+    _graceful_stop(store)
+    assert os.path.exists(_marker_path(d))
+
+    boot2 = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot2.replay_journal() == 2                           # legitimate fast path
+    k3 = chain_page_key(None, (3,))
+    assert boot2.offer(b"path-3", 1, [(k3, bytes([3]) * PAGE)])  # runtime since the stop
+
+    # graceful shutdown #2 begins: the marker is gone BEFORE the flush mutates anything
+    boot2.invalidate_shutdown_marker()
+    assert not os.path.exists(_marker_path(d))
+    # crash mid-flush: a torn journal tail (SIGKILL mid-append)
+    with open(os.path.join(str(d), "journal.log"), "ab") as f:
+        f.write(b"\x40\x00\x00\x00partial paylo")
+    calls = _counting_pread(monkeypatch)
+    with _tier_log_capture() as cap:
+        boot3, n = _boot(str(d))
+    assert n == 3                                                # live set intact
+    assert calls["n"] == 3                                       # full verification ran
+    assert not any("fast-path" in m for m in cap.messages)
+    assert any("journal tail truncated/torn" in m for m in cap.messages)
+    for i, (keys, pages) in enumerate(chains, start=1):
+        hit = boot3.probe(keys)
+        assert boot3.restore(hit[1]) == ([x for _, x in pages], [_snap(f"{i}")])
+    hit = boot3.probe([k3])
+    assert boot3.restore(hit[1])[0] == [bytes([3]) * PAGE]
+
+
+def test_fast_path_and_full_path_identical_state(tmp_path):
+    """P2 (d): on the same on-disk state the fast path and the full verification rebuild
+    exactly the same store state - same segments (ids, keys, offsets, LRU stamps), index
+    and byte accounting."""
+    d = tmp_path / "parity"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2, 3)]
+    for i, (keys, pages) in enumerate(chains, start=1):
+        assert store.offer(f"path-{i}".encode(), 3, pages, _snap(f"{i}"))
+    _graceful_stop(store)
+
+    boot_fast = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    n_fast = boot_fast.replay_journal()
+    os.unlink(_marker_path(d))                    # force the full path on the same data
+    boot_full = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    n_full = boot_full.replay_journal()
+
+    def state(st):
+        return {sid: (seg.path_key, seg.boundary_len, tuple(seg.page_keys),
+                      tuple(seg.page_lens), tuple(seg.snap_lens), seg.blob,
+                      seg.l2_off, seg.l2_n, seg.last_validation)
+                for sid, seg in st._segments.items()}
+
+    assert n_fast == n_full == 3
+    assert state(boot_fast) == state(boot_full)
+    assert boot_fast._index == boot_full._index
+    assert boot_fast._ssd_used == boot_full._ssd_used
+    assert boot_fast._blob_eof == boot_full._blob_eof
+    assert boot_fast._dead_bytes == boot_full._dead_bytes
+    # generation: the fast path seeds it from the marker; the full path ran without one
+    assert boot_fast._marker_generation >= boot_full._marker_generation
+
+
+def test_shutdown_marker_discard_invalidates(tmp_path, monkeypatch):
+    """TP A1: a runtime discard rewrites no on-disk bytes (journal and blob eof
+    untouched), so the marker's size checks cannot see it - the discard must drop the
+    marker explicitly, or the next boot fast-paths a state that no longer matches the
+    index and resurrects the evicted segment."""
+    d = tmp_path / "disc"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    keys, pages = _chain([(1, 0), (1, 1), (1, 2)])
+    assert store.offer(b"path", 3, pages, _snap("s"))
+    _graceful_stop(store)
+    assert os.path.exists(_marker_path(d))
+    assert store.evict_store(1) == 1             # runtime discard
+    assert not os.path.exists(_marker_path(d))   # dropped immediately
+    calls = _counting_pread(monkeypatch)
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d))
+    assert n == 1                                # resurrect semantics unchanged
+    assert calls["n"] == 1                       # full verification ran (no fast path)
+    assert not any("fast-path" in m for m in cap.messages)
+
+
+def test_read_shutdown_marker_garbage_variants(tmp_path):
+    """TP B1: any garbage marker file (empty, short, bad crc, crc-valid non-dict JSON)
+    reads back False without raising out of the boot replay."""
+    d = tmp_path / "garbage"
+    store = SessionTierStore(_cfg(d=str(d)))
+    payload = json.dumps([1, 2, 3]).encode()     # crc-valid but NOT a dict
+    variants = [b"",
+                b"\x01\x02\x03",
+                b"\x10\x00\x00\x00short",
+                struct.pack("<II", 999, zlib.crc32(b"junk")) + b"junk",
+                struct.pack("<II", len(payload), zlib.crc32(payload)) + payload]
+    for i, framed in enumerate(variants):
+        with open(_marker_path(d), "wb") as f:
+            f.write(framed)
+        res = store._read_shutdown_marker(0)
+        # tolerate both the bool (pre-A2-fix) and (ok, parsed) tuple return shapes
+        ok = res[0] if isinstance(res, tuple) else res
+        assert ok is False, f"garbage variant {i} must not validate"
+
+
+def test_shutdown_marker_generation_monotonic_across_stale(tmp_path, monkeypatch):
+    """TP A2: a crc-valid but size-stale marker must still raise the in-memory
+    generation floor - otherwise the next graceful stop emits a generation <= the
+    rejected one and the monotonicity guarantee is void."""
+    d = tmp_path / "gen"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    keys, pages = _chain([(1, 0), (1, 1), (1, 2)])
+    assert store.offer(b"path", 3, pages, _snap("s"))
+    _graceful_stop(store)                        # marker generation 1
+    rec = {"journal_bytes": 123456, "blob_eof": 654321, "generation": 7}
+    payload = json.dumps(rec, sort_keys=True).encode()
+    with open(_marker_path(d), "wb") as f:       # stale sizes, valid crc, higher gen
+        f.write(struct.pack("<II", len(payload), zlib.crc32(payload)) + payload)
+    calls = _counting_pread(monkeypatch)
+    boot, n = _boot(str(d))
+    assert n == 1 and calls["n"] == 1            # stale sizes -> full verification
+    boot.write_shutdown_marker()                 # graceful stop on this boot
+    with open(_marker_path(d), "rb") as f:
+        framed = f.read()
+    plen, _ = struct.unpack_from("<II", framed, 0)
+    mk = json.loads(framed[8:8 + plen])
+    assert mk["generation"] > 7                  # strictly monotonic (pre-fix: 1)

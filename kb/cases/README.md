@@ -33,6 +33,14 @@ Specification / Acceptance / Checklist.
   (L0 VRAM -> L1 RAM 30 GiB -> L2 SSD 100 GiB): pull-on-evict с адаптивной
   селекцией, контент-адресный стор, журнал-персистентность; фазы 1/2, приёмка
   на фазу 1. Вход: [TASK.md](session-cache-tiering/TASK.md). Статус: PLANNED.
+- [boot-shutdown-io/](boot-shutdown-io/) - исследование старта/остановки
+  ft serve на GLM-5.3 GGUF FTW: три измеренных узких места I/O (фаза банков
+  ~4.3 ГБ/с - многопоточный потолок диска, реплей L2 22-24 с - CRC-перечитка
+  блоба, флаш 200-600 МБ/с - QD1 и fsync на сегмент) и три брифа фиксов
+  P1/P2/P3 со спецификациями и приёмкой. Вход:
+  [TASK.md](boot-shutdown-io/TASK.md). Статус: RESEARCH VERIFIED (железо
+  2026-09-27); P2 реализовано (CPU 46/46 + 70/70, железо отложено) -
+  [P2-NOTES.md](boot-shutdown-io/P2-NOTES.md); P1/P3 OPEN.
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).

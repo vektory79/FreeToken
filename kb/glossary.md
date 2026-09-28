@@ -72,6 +72,11 @@
   главный рычаг headroom — [vram-headroom.md](methods/vram-headroom.md).
 - **MTILE** — env-knob `FREETOKEN_GGUF_MOE_MTILE` / `FREETOKEN_GGUF_DENSE_MTILE`,
   шаблонный m-tile MoE/dense GEMM ядра — [ab-mtile.md](methods/ab-mtile.md).
+- **маркер чистой остановки** — sidecar `shutdown.marker` в каталоге тира:
+  JSON {journal_bytes, blob_eof, generation} в crc-обрамлении, пишется только
+  завершённым shutdown_tier и разрешает буту fast-path реплея L2 без
+  CRC-перечитки блоба —
+  [P2-NOTES.md](cases/boot-shutdown-io/P2-NOTES.md).
 
 ## N
 

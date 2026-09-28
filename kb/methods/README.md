@@ -21,6 +21,7 @@
 | [vram-headroom.md](vram-headroom.md) | Матрица memory-ratio / kv-reserve / max-prefill: сколько FREE VRAM покупает каждый knob и какой ценой | При OOM/падениях префилла и выборе конфига serving |
 | [wave1-notes.md](wave1-notes.md) | Волна 1: N-split kda_in_proj, все изменения анкоммитнуты до валидации | Как организовать волну без коммитов |
 | [wave2-candidate-a.md](wave2-candidate-a.md) | Волна 2: Candidate A, компилят-тайм варианты тайла + knob | Как подготовить вариант к измерению |
+| [test-fails-before.md](test-fails-before.md) | Fails-before эмпирически: stash+md5, single-revert probe, ловушка caplog | Перед любым багфиксом и новыми тестами волны |
 
 Типовые вопросы и входные точки:
 

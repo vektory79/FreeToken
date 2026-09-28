@@ -929,6 +929,9 @@ class CacheManager:
         boundaries; a KV-only tree offers every live boundary (its tip per session)."""
         if self.tier_store is None:
             return 0
+        # Drop the previous stop's marker BEFORE any flush/compact mutation: a half-
+        # finished shutdown must never leave a valid clean-shutdown marker behind.
+        self.tier_store.invalidate_shutdown_marker()
         if self._tier_on:
             if self.is_hybrid:
                 self._tier_offer(self.prefix_cache.snapshot_victim_paths())
@@ -939,6 +942,8 @@ class CacheManager:
         self.tier_store.drop_tickets()           # safety net for anything untracked
         flushed = self.tier_store.flush_live()
         self.tier_store.compact()
+        # Barrier after the final fsyncs: the next boot may skip the payload re-read.
+        self.tier_store.write_shutdown_marker()
         line = self.tier_store.stats_line()
         if line:
             logger.info("session tier final: %s", line)
