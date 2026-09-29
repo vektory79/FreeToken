@@ -120,3 +120,14 @@ gguf-сигнатуры. Заметьте: цифра ~293 tok/s в ранних
   [vram-budget.md](vram-budget.md); переиспользование radix-кэша -
   [radix-cache-reuse.md](radix-cache-reuse.md); термины -
   [glossary.md](../glossary.md).
+
+## Пул чтения загрузчика (волна P1 boot-shutdown-io)
+
+Волна P1 перестроила форму чтения фазы банков: вместо вилки 16x8 (до 128
+конкурентных 8-МиБ чтений, до 9 вложенных пулов) - один ограниченный общий
+пул `_run_shared_reads` (ThreadPoolExecutor(8), sub-read `_BANK_SUB_CHUNK =
+2 МиБ`, задачи layer-major), env-knob `FREETOKEN_BANK_POOL_WORKERS`
+с clamp-warning и разовой лог-строкой read-конфигурации на бут. Пин-контракт
+(`tracker.note` ровно один на слой, born-pinned) не тронут. Механика, числа и
+план железной A/B - [../cases/boot-shutdown-io/P1-NOTES.md](../cases/boot-shutdown-io/P1-NOTES.md);
+libaio/io_uring отложены за этот шов как отдельное решение.
