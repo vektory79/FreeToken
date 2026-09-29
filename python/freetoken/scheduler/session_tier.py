@@ -328,9 +328,9 @@ class SessionTierStore:
                                        os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
             self._ssd_used = os.path.getsize(self._blob_path)
             self._blob_eof = self._ssd_used
-            logger.info("session tier on: L1=%.2f GiB, L2 dir=%s cap=%.2f GiB used=%.2f GiB",
-                        self.ram_bytes / 2**30, self.dir, self.ssd_bytes / 2**30,
-                        self._ssd_used / 2**30)
+            # Provisional watermark seed only: replay_journal() reseeds _ssd_used from
+            # the live record set and owns the "session tier on" line, which must
+            # report the live figure on both boot paths.
 
     # ------------------------------------------------------------------ probe
 
@@ -1308,12 +1308,21 @@ class SessionTierStore:
                 seg.last_validation = rec["ts"]
                 self._segments[seg.seg_id] = seg
                 self._touch_index(seg)
-            # Crash recovery can leave dead blob regions (holes from an interrupted
-            # compaction, discarded-on-other-boot records): recompute from the live set
-            # so the runtime watermark starts from the true count.
-            self._dead_bytes = max(0, self._ssd_used - sum(
-                (s.l2_n + _BLK - 1) // _BLK * _BLK
-                for s in self._segments.values() if s.in_l2))
+            # Cap accounting must count only the live record set, never the blob-size
+            # watermark: the blob carries holes (discards, previous generations), and a
+            # watermark-seeded _ssd_used over-evicts or refuses the entire next flush
+            # (P3 iron Finding 1). Both boot paths seed identically here; _blob_eof
+            # stays the never-decreased watermark - hole-safe record reservation.
+            live = sum((s.l2_n + _BLK - 1) // _BLK * _BLK
+                       for s in self._segments.values() if s.in_l2)
+            # _blob_eof is the never-decreased watermark: exact dead even on a re-replay.
+            self._dead_bytes = max(0, self._blob_eof - live)
+            self._ssd_used = live
+        # Moved here from __init__: before replay only the blob-size watermark exists,
+        # after the reseed above _ssd_used is the live figure both paths must report.
+        logger.info("session tier on: L1=%.2f GiB, L2 dir=%s cap=%.2f GiB used=%.2f GiB",
+                    self.ram_bytes / 2**30, self.dir, self.ssd_bytes / 2**30,
+                    self._ssd_used / 2**30)
         if records:
             if fast:
                 logger.info("session tier: replay fast-path (clean shutdown marker), "

@@ -1168,6 +1168,53 @@ def test_fast_path_and_full_path_identical_state(tmp_path):
     assert boot_fast._marker_generation >= boot_full._marker_generation
 
 
+def test_fast_path_boot_seeds_ssd_used_from_live_records(tmp_path):
+    """P3 iron Finding 1: a fast-path boot must seed cap accounting (_ssd_used) from the
+    live journal records, like the full path - not from the blob-size watermark, which
+    carries holes (discards, previous generations). A watermark-seeded _ssd_used
+    over-evicts on the next stop or refuses the entire flush (tier erased).
+    _blob_eof stays the never-decreased watermark: hole-safe record reservation.
+    The 'session tier on' line reports the live figure on both boot paths."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2)]
+    for i, (keys, pages) in enumerate(chains, start=1):
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    # L2-only mode: offers flush straight into the blob; the graceful stop writes the
+    # marker with blob_eof == getsize so the next boot takes the fast path.
+    # Holes: grow the blob past the live set without journaling anything - 32 MiB so the
+    # watermark and the live sum differ visibly in the GiB-rendered 'used=' log line.
+    garbage = 32 * 2**20
+    with open(os.path.join(d, "blob.bin"), "ab") as f:
+        f.write(b"\x00" * garbage)
+    _graceful_stop(store)                     # marker blob_eof == getsize -> fast path
+    blob_size = os.path.getsize(os.path.join(d, "blob.bin"))
+    live = sum((s.l2_n + 4096 - 1) // 4096 * 4096
+               for s in store._segments.values() if s.in_l2)
+    assert blob_size == live + garbage        # the watermark carries real holes
+
+    with _tier_log_capture() as cap:
+        boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+        assert boot.replay_journal() == 2     # fast path (marker sizes match)
+    # fails-before: the watermark (blob size) seeded the cap accounting
+    assert boot._ssd_used == live
+    assert boot._blob_eof == blob_size        # P3 invariant: watermark untouched
+    assert boot._dead_bytes == garbage        # holes stay real for maybe_compact
+    on = [m for m in cap.messages if "session tier on" in m]
+    assert len(on) == 1 and "used=0.00 GiB" in on[0]
+
+    # Full path on the same on-disk state: identical accounting and log figure.
+    os.unlink(_marker_path(d))
+    with _tier_log_capture() as cap:
+        boot_full = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+        assert boot_full.replay_journal() == 2
+    assert boot_full._ssd_used == live
+    assert boot_full._blob_eof == blob_size
+    assert boot_full._dead_bytes == garbage
+    on = [m for m in cap.messages if "session tier on" in m]
+    assert len(on) == 1 and "used=0.00 GiB" in on[0]
+
+
 def test_shutdown_marker_discard_invalidates(tmp_path, monkeypatch):
     """TP A1: a runtime discard rewrites no on-disk bytes (journal and blob eof
     untouched), so the marker's size checks cannot see it - the discard must drop the
