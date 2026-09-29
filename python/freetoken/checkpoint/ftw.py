@@ -54,7 +54,12 @@ ALIGN = 4096  # O_DIRECT block alignment (== page size on this platform)
 DEFAULT_SHARD_LIMIT = 8 << 30  # 8 GiB; must be a multiple of ALIGN
 _SHARD_FMT = "freetoken-{:05d}.ftw"
 _DEFAULT_CHUNK = 8 << 20
-_BANK_CONCURRENCY = 4
+# Bank-load read shape (P1): ONE shared bounded pool instead of a per-task nested-pool
+# fork. Sub-reads are capped at _BANK_SUB_CHUNK so the pool's few workers always have a
+# deep queue of ~1-2 MiB preadv in flight (the fio 1xQD32x1M precedent) rather than a
+# few 8 MiB ones; FREETOKEN_BANK_POOL_WORKERS overrides the pool size for the iron A/B.
+_BANK_SUB_CHUNK = 2 << 20
+_BANK_POOL_WORKERS_ENV = "FREETOKEN_BANK_POOL_WORKERS"
 _ALPHA_NAMES = ("gate_up_alpha", "down_alpha")
 # Per-layer expert-bank entry name (converter streaming path, see checkpoint/convert.py):
 # each layer of a bank is its own FTW tensor instead of one flat [num_layers*E, ...] region.
@@ -317,45 +322,123 @@ class FTWReader:
         if remaining:
             raise ValueError("tensor range exceeds FTW shards")
 
-    def read_into(self, dest: memoryview, entry: dict, *, workers: int = 8,
-                  chunk: int = _DEFAULT_CHUNK) -> None:
-        """Read one tensor's bytes into ``dest`` (length >= entry nbytes rounded to ALIGN)."""
-        self._ensure_mode()
-        jobs = []  # (file, file_off, dest_off, length) all ALIGN-aligned
+    def _plan_jobs(self, dest: memoryview, entry: dict, chunk: int) -> list[tuple]:
+        """Split one entry's byte range into (file, file_off, dest_off, length) read
+        jobs -- all ALIGN-aligned, the tail rounded up into the region's padding."""
+        jobs = []
         for file, file_off, dest_off, length in self._pieces(entry["global_off"], entry["nbytes"]):
             rlen = _align_up(length)  # round the tail up; padding is in-region, harmless
             for c in range(0, rlen, chunk):
                 jobs.append((file, file_off + c, dest_off + c, min(chunk, rlen - c)))
+        return jobs
+
+    def _read_job(self, dest: memoryview, job: tuple) -> None:
+        """Execute one planned read job -- the shared code of every read path."""
+        file, fo, do, ln = job
+        if self._direct:
+            try:
+                _pread_into(self._fd(file), dest[do:do + ln], fo)
+            except OSError as e:
+                raise OSError(f"shard {file}: {e}") from e
+        else:
+            mv = self._map(file)
+            if fo + ln > len(mv):
+                raise OSError(
+                    f"unexpected EOF reading FTW: shard {file} has "
+                    f"{len(mv)} bytes, need {ln} at offset {fo}"
+                )
+            dest[do:do + ln] = mv[fo:fo + ln]
+
+    def read_into(self, dest: memoryview, entry: dict, *, workers: int = 8,
+                  chunk: int = _DEFAULT_CHUNK) -> None:
+        """Read one tensor's bytes into ``dest`` (length >= entry nbytes rounded to ALIGN)."""
+        self._ensure_mode()
+        jobs = self._plan_jobs(dest, entry, chunk)
 
         # Open/map each distinct shard once, single-threaded, so the pool only reuses handles.
         touch = self._fd if self._direct else self._map
         for file in {j[0] for j in jobs}:
             touch(file)
 
-        if self._direct:
-            def rd(job):
-                file, fo, do, ln = job
-                try:
-                    _pread_into(self._fd(file), dest[do:do + ln], fo)
-                except OSError as e:
-                    raise OSError(f"shard {file}: {e}") from e
-        else:
-            def rd(job):
-                file, fo, do, ln = job
-                mv = self._map(file)
-                if fo + ln > len(mv):
-                    raise OSError(
-                        f"unexpected EOF reading FTW: shard {file} has "
-                        f"{len(mv)} bytes, need {ln} at offset {fo}"
-                    )
-                dest[do:do + ln] = mv[fo:fo + ln]
-
         if len(jobs) <= 1:
             for j in jobs:
-                rd(j)
+                self._read_job(dest, j)
         else:
             with ThreadPoolExecutor(workers) as ex:
-                list(ex.map(rd, jobs))
+                list(ex.map(lambda j: self._read_job(dest, j), jobs))
+
+
+def _bank_pool_workers(requested: int) -> int:
+    """Size of the one shared bank-read pool; FREETOKEN_BANK_POOL_WORKERS overrides for the iron A/B sweep."""
+    raw = os.environ.get(_BANK_POOL_WORKERS_ENV, "").strip()
+    if not raw:
+        return requested
+    try:
+        wanted = int(raw)
+    except ValueError:
+        logger.warning(
+            f"ignoring non-integer {_BANK_POOL_WORKERS_ENV}={raw!r}; using pool={requested}"
+        )
+        return requested
+    clamped = max(1, min(16, wanted))
+    if clamped != wanted:  # 0/-5 -> 1, 64 -> 16: never clamp silently
+        logger.warning(
+            f"{_BANK_POOL_WORKERS_ENV}={raw!r} out of range 1..16, clamped to pool={clamped}"
+        )
+    return clamped
+
+
+def _run_shared_reads(reader: FTWReader, tasks, *, workers: int, chunk: int) -> None:
+    """Read every ``(dest, entry, on_done)`` task through ONE bounded shared pool.
+
+    The pool's queue holds all sub-read jobs at once (the deep queue), so its few
+    workers always have the next ``preadv`` ready; jobs are pulled in submission order,
+    which the caller submits layer-major, so the concurrent reads land on nearby FTW
+    regions instead of fanning a nested pool per task across every shard. ``on_done``
+    runs exactly once per task after its last job completes (the pin step) -- on a pool
+    thread for a read task, on the calling thread via the zero-byte shortcut below; a
+    failed job skips it, and the first error is re-raised after the pool drains."""
+    reader._ensure_mode()
+    planned = [(dest, reader._plan_jobs(dest, entry, chunk)) for dest, entry, _ in tasks]
+    touch = reader._fd if reader._direct else reader._map
+    for file in {j[0] for _, jobs in planned for j in jobs}:
+        touch(file)
+    logger.info(
+        f"FTW bank reads: {len(tasks)} tasks, {sum(len(j) for _, j in planned)} jobs, "
+        f"pool={workers}, sub-chunk={chunk // 1024} KiB, "
+        f"backend={'direct' if reader._direct else 'mmap'}"
+    )
+
+    err: list[BaseException] = []
+    ex = ThreadPoolExecutor(workers, thread_name_prefix="ftw-bank-read")
+    try:
+        for (dest, jobs), (_dest, _entry, on_done) in zip(planned, tasks):
+            if not jobs:  # a zero-byte entry: settle it exactly like a read one
+                on_done()
+                continue
+            state = {"left": len(jobs), "failed": False}
+            lock = threading.Lock()
+
+            def _after(fut, state=state, lock=lock, on_done=on_done):
+                exc = fut.exception()
+                with lock:
+                    state["failed"] |= exc is not None
+                    state["left"] -= 1
+                    last, failed = state["left"] == 0, state["failed"]
+                if exc is not None and not err:
+                    err.append(exc)
+                if last and not failed:
+                    try:
+                        on_done()
+                    except BaseException as exc2:
+                        err.append(exc2)
+
+            for job in jobs:
+                ex.submit(reader._read_job, dest, job).add_done_callback(_after)
+    finally:
+        ex.shutdown(wait=True)
+    if err:
+        raise err[0]
 
 
 def _transient_buffer(nbytes: int) -> mmap.mmap:
@@ -439,6 +522,10 @@ def load_ftw_banks(
     """Reconstruct the offload :class:`ExpertBanks` from the FTW's ``experts_bank``
     entries, on the per-layer host bank contract (one ``[num_experts, ...]``
     HostBank per layer per bank; see ``moe.offload_cache.set_bank_sources``).
+
+    Reads go through ONE bounded shared pool (``workers`` threads, sub-reads capped at
+    ``_BANK_SUB_CHUNK``, tasks submitted layer-major); ``FREETOKEN_BANK_POOL_WORKERS``
+    overrides the pool size. The pin contract (exactly one settle per bank) is unchanged.
 
     ``layer_residency`` (default: all pinned) settles each layer's banks per its ``HostResidency`` label as reads complete: PINNED -> cudaHostRegister, LOCKED -> mlock (CPU-executor resident, no pin quota spent).
     The applied labels are echoed back on ``ExpertBanks.layer_residency``.
@@ -591,37 +678,39 @@ def load_ftw_banks(
     total_bytes = sum(e["nbytes"] for e in bank_entries)
     bar = byte_bar(total_bytes, "Loading expert banks (FTW)")
 
-    # Jobs are per (bank, layer) -- many small reads, so a wider pool; each bank pins
-    # as its read completes, overlapping cudaHostRegister with the remaining reads.
-    n_jobs = len(alpha_entries) + len(row_jobs) + len(layer_jobs)
+    # Tasks are submitted layer-major (alphas first, they are tiny): each worker of the
+    # one shared pool keeps reading nearby FTW regions instead of fanning a nested pool
+    # per task across every shard. Each bank settles exactly once as its own read
+    # completes, overlapping cudaHostRegister with the remaining reads.
     try:
         with PinPipeline() as pins:
 
-            def _read_alpha(e):
+            def _on_done(bank, layer_id, nbytes):
+                def _finish():
+                    bar.update(nbytes)
+                    if layer_id is None:
+                        pins.submit(bank)
+                    else:
+                        pins.submit(bank, residency[layer_id])
+                return _finish
+
+            tasks = []  # (layer_id, name, dest, entry, on_done)
+            for e in alpha_entries:
                 bank = alpha_hb[e["name"]]
-                reader.read_into(bank.memoryview(), e, workers=workers, chunk=chunk)
-                pins.submit(bank)
-                bar.update(e["nbytes"])
-
-            def _read_row(job):
-                _name, bank, win_off, win_len, layer_bytes, layer_id = job
-                reader.read_into(bank.memoryview(), {"global_off": win_off, "nbytes": win_len},
-                                 workers=workers, chunk=chunk)
-                pins.submit(bank, residency[layer_id])
-                bar.update(layer_bytes)
-
-            def _read_layer(job):
-                _name, bank, entry, layer_id = job
-                reader.read_into(bank.memoryview(), entry, workers=workers, chunk=chunk)
-                pins.submit(bank, residency[layer_id])
-                bar.update(entry["nbytes"])
-
-            with ThreadPoolExecutor(min(max(_BANK_CONCURRENCY, 16), max(n_jobs, 1))) as ex:
-                futures = [ex.submit(_read_alpha, e) for e in alpha_entries]
-                futures += [ex.submit(_read_row, job) for job in row_jobs]
-                futures += [ex.submit(_read_layer, job) for job in layer_jobs]
-                for f in futures:
-                    f.result()
+                tasks.append((-1, e["name"], bank.memoryview(), e,
+                              _on_done(bank, None, e["nbytes"])))
+            for name, bank, win_off, win_len, layer_bytes, layer_id in row_jobs:
+                entry = {"global_off": win_off, "nbytes": win_len}
+                tasks.append((layer_id, name, bank.memoryview(), entry,
+                              _on_done(bank, layer_id, layer_bytes)))
+            for name, bank, entry, layer_id in layer_jobs:
+                tasks.append((layer_id, name, bank.memoryview(), entry,
+                              _on_done(bank, layer_id, entry["nbytes"])))
+            tasks.sort(key=lambda t: (t[0], t[1]))
+            _run_shared_reads(
+                reader, [(dest, entry, on_done) for _, _, dest, entry, on_done in tasks],
+                workers=_bank_pool_workers(workers), chunk=min(chunk, _BANK_SUB_CHUNK),
+            )
     finally:
         bar.close()
         reader.close()
