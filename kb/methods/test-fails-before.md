@@ -3,7 +3,7 @@ title: "Fails-before тесты: эмпирическое доказательс
 date: 2026-09-28
 hardware: "CPU-прогоны pytest (без VRAM), метод не зависит от железа"
 commits: "методика выработана в волне P2 boot-shutdown-io (vektory79, правки анкоммичены); прецеденты: kb/cases/session-cache-tiering, fix3-snapshot-lru-refresh"
-status: "validated (волна P2, тесты test_session_tier.py 46/46 и 70/70 CPU)"
+status: "validated (волна P2, тесты test_session_tier.py 46/46 и 70/70 CPU); расширен точечным ревертом в волне P3 (2026-09-29)"
 tags: [pytest, fails-before, caplog, test-methodology, regression]
 ---
 
@@ -43,6 +43,18 @@ tags: [pytest, fails-before, caplog, test-methodology, regression]
   этот порядок, а не писать файл напрямую: иначе тест проверяет другой
   инвариант (например, про прочность rename-семантики), которого в проде нет.
 
+## Точечный реверт правки при далеко ушедшем HEAD (волна P3)
+
+Когда пре-фиксное состояние недостижимо stash-приёмом (правка накатана поверх
+правок соседних волн, HEAD далеко ушёл), fails-before доказывается точечным
+ревертом самой TP-правки волны из рабочего дерева: реверт конкретной правки ->
+прогон незатронутых тестов (ожидается красный) -> возврат правки. Прецедент:
+в волне P3 красный ДО для пре-существующего HEAD-бага stale journal fd после
+компакции доказан ревертом фикса `compact()`
+([P3-NOTES.md](../cases/boot-shutdown-io/P3-NOTES.md), "Баги волны"). Для
+нескольких TP-правок ревертируется по одной - это single-revert probe из
+протокола выше, только ревертится правка волны, а не произвольная.
+
 ## Когда применять
 
 - Любой багфикс (требование CONTRIBUTING) - шаги 1-4 обязательны.
@@ -54,6 +66,8 @@ tags: [pytest, fails-before, caplog, test-methodology, regression]
 ## Связанное
 
 - Волна, где метод отработан: [P2-NOTES.md](../cases/boot-shutdown-io/P2-NOTES.md).
+- Прецедент точечного реверта при далеко ушедшем HEAD (волна P3):
+  [P3-NOTES.md](../cases/boot-shutdown-io/P3-NOTES.md).
 - Требование CONTRIBUTING о тестах к багфиксам: [CONTRIBUTING.md](../../CONTRIBUTING.md).
 - Прецедент fail-before/pass-after багов, найденных железом:
   [session-cache-tiering.md](../topics/session-cache-tiering.md).

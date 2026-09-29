@@ -49,6 +49,10 @@
 - **GEMV / GEMM** — матрично-векторное (декод) и матрично-матричное (префилл)
   умножение; базовые операции всех ядерных кампаний —
   [ggml-cpu-kernel-study.md](findings/gguf-glm5next-hybrid/ggml-cpu-kernel-study.md).
+- **групповой fdatasync** — один fdatasync делает группу сегментов (~1 ГиБ по
+  объёму) durable перед журнальными записями этой группы; инвариант durable
+  "журнал после блоба группы" сохранён, окно потери при краше расширено с
+  сегмента до группы - [P3-NOTES.md](cases/boot-shutdown-io/P3-NOTES.md).
 
 ## H
 
@@ -105,6 +109,10 @@
 - **RestoreTicket** — асинхронный тикет предвыборки сегмента из стора; cap
   _MAX_RESTORE_TICKETS=2, 0 отключает механизм —
   [session-cache-tiering.md](topics/session-cache-tiering.md).
+- **резерв офсетов** — предварительное резервирование span офсетов блоба L2
+  (`_blob_eof` + padded-размер, `_reserve_blob_span`) под параллельные pwrite
+  группы сегментов; cap-чек учитывает pending-байты группы -
+  [P3-NOTES.md](cases/boot-shutdown-io/P3-NOTES.md).
 
 ## S
 

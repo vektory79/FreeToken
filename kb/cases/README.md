@@ -39,8 +39,10 @@ Specification / Acceptance / Checklist.
   блоба, флаш 200-600 МБ/с - QD1 и fsync на сегмент) и три брифа фиксов
   P1/P2/P3 со спецификациями и приёмкой. Вход:
   [TASK.md](boot-shutdown-io/TASK.md). Статус: RESEARCH VERIFIED (железо
-  2026-09-27); P2 реализовано (CPU 46/46 + 70/70, железо отложено) -
-  [P2-NOTES.md](boot-shutdown-io/P2-NOTES.md); P1/P3 OPEN.
+  2026-09-27); P2 реализовано и принято железом (fast-path 0 с +
+  SIGKILL-конвергенция) - [P2-NOTES.md](boot-shutdown-io/P2-NOTES.md); P3
+  реализовано в CPU-волне (62/62 + 70/70, незакоммичено, железная рука
+  отложена) - [P3-NOTES.md](boot-shutdown-io/P3-NOTES.md); P1 OPEN.
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
