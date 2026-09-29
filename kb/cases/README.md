@@ -43,11 +43,14 @@ Specification / Acceptance / Checklist.
   SIGKILL-конвергенция) - [P2-NOTES.md](boot-shutdown-io/P2-NOTES.md); P3
   закоммичен (de26ba1) и принят железом функционально (~1.4-1.8x;
   throughput-цель не достигнута: узкое место продюсер; фиксы приёмок -
-  ab3a117) - [P3-NOTES.md](boot-shutdown-io/P3-NOTES.md); P1 реализован
-  CPU-волной (анкоммичено @ 23b18a4, железная приёмка отложена; libaio/io_uring
-  - открытый фоллоу-ап) - [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4-P6
+  ab3a117) - [P3-NOTES.md](boot-shutdown-io/P3-NOTES.md); P1 закоммичен
+  (94d5e4a) и принят железом частично (фаза 28 -> 25 с = 1.12x,
+  throughput-гейт >= 5.5 ГБ/с не взят; CPU-гейт пройден: sys 2.3x меньше;
+  свип пула плоский - следующий рычаг io_uring/пин-конвейер) -
+  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4-P6
   брифы зафиксированы (OPEN): продюсер флаша, семантика shutdown-кэпа,
-  env-override констант флаша.
+  env-override констант флаша; P7 бриф зафиксирован (OPEN, отдельная
+  сессия): io_uring/libaio ctypes глубокая очередь чтения FTW-банков.
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).

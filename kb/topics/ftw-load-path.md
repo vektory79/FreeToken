@@ -128,6 +128,11 @@ gguf-сигнатуры. Заметьте: цифра ~293 tok/s в ранних
 пул `_run_shared_reads` (ThreadPoolExecutor(8), sub-read `_BANK_SUB_CHUNK =
 2 МиБ`, задачи layer-major), env-knob `FREETOKEN_BANK_POOL_WORKERS`
 с clamp-warning и разовой лог-строкой read-конфигурации на бут. Пин-контракт
-(`tracker.note` ровно один на слой, born-pinned) не тронут. Механика, числа и
-план железной A/B - [../cases/boot-shutdown-io/P1-NOTES.md](../cases/boot-shutdown-io/P1-NOTES.md);
-libaio/io_uring отложены за этот шов как отдельное решение.
+(`tracker.note` ровно один на слой, born-pinned) не тронут. Механика -
+[../cases/boot-shutdown-io/P1-NOTES.md](../cases/boot-shutdown-io/P1-NOTES.md).
+Железная A/B (2026-09-29/30, флаги оператора, фаза = бар загрузки, 125 ГиБ):
+база 4.46 ГБ/с (28 с) -> 5.00 ГБ/с (25 с, pool=4, повтор бит-в-бит);
+pool=6/8 - 4.81 (26 с). Throughput-гейт >= 5.5 ГБ/с не взят (1.12x, свип
+пула плоский - размер пула исчерпан); CPU-гейт пройден: sys-время фазы
+2.3x меньше. Следующий рычаг - io_uring/libaio за швом `_run_shared_reads`
+либо оверлап пин-конвейера (открыто).
