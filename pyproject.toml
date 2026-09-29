@@ -35,6 +35,9 @@ classifiers = [
 # there is no lockfile.
 dependencies = [
     "apache-tvm-ffi==0.1.13.post3", # pin it
+    # session_tier: hardware (SSE4.2) CRC32C for the L2 journal payload checksums;
+    # 2.9 = last-verified (Python 3.13/3.14 wheels), <3 = next-major ceiling.
+    "crc32c>=2.9,<3",
     "einops>=0.8,<1",
     "fastapi>=0.115,<1",
     # slot_cache: the device-side LRU admission kernel behind the MoE expert cache.

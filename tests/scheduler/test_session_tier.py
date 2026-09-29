@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import struct
+import threading
 import time
 import zlib
 from types import SimpleNamespace
@@ -520,10 +521,12 @@ def test_offer_rejected_when_both_tiers_exhausted(tmp_path):
 # ------------------------------------------------- Review-2: N2 / N3 / N5
 
 
-def test_short_blob_append_resyncs_eof_and_next_record_is_clean(tmp_path, monkeypatch):
-    """N2 fails-before: a failed append advanced the O_APPEND fd's real EOF but not
-    _blob_eof, so the next record's journal offset pointed below its data and restore
-    returned garbage/padding."""
+def test_short_blob_pwrite_hole_kept_watermark_past_it_next_record_clean(tmp_path, monkeypatch):
+    """N2 fails-before: a failed/short blob write must not desync the tail watermark - the
+    next record's journal offset must still point at its own data and restore must return
+    clean bytes. The watermark intentionally STAYS past the aborted span (the hole is
+    never referenced and is reclaimed by the next compaction); the O_APPEND-era lseek
+    resync is gone by design, not by accident."""
     import os as _os
 
     from freetoken.kvcache.utils import chain_page_key
@@ -531,17 +534,17 @@ def test_short_blob_append_resyncs_eof_and_next_record_is_clean(tmp_path, monkey
     store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path)))
     k1 = chain_page_key(None, (1,))
     data1 = bytes([1]) * PAGE
-    real_write = _os.write
+    real_pwrite = _os.pwrite
     calls = {"n": 0}
 
-    def flaky(fd, buf):
+    def flaky(fd, buf, offset):
         calls["n"] += 1
         if calls["n"] == 1:
-            real_write(fd, buf[:len(buf) // 2])
+            real_pwrite(fd, buf[:len(buf) // 2], offset)
             raise OSError(5, "simulated partial write")
-        return real_write(fd, buf)
+        return real_pwrite(fd, buf, offset)
 
-    monkeypatch.setattr("freetoken.scheduler.session_tier.os.write", flaky)
+    monkeypatch.setattr("freetoken.scheduler.session_tier.os.pwrite", flaky)
     assert store.offer(b"p1", 1, [(k1, data1)]) is False      # N3: no raise out of offer
     assert store.probe([k1]) is None                           # the aborted record is gone
     k2 = chain_page_key(None, (2,))
@@ -553,14 +556,14 @@ def test_short_blob_append_resyncs_eof_and_next_record_is_clean(tmp_path, monkey
     assert got[0] == data2                                     # fails-before: garbage bytes
 
 
-def test_offer_never_raises_on_write_or_fsync_oserror(tmp_path, monkeypatch):
-    """N3: OSError from the blob write or the blob fsync must not reach the eviction hot
-    path - offer returns False and leaves no journal entry."""
+def test_offer_never_raises_on_pwrite_or_fdatasync_oserror(tmp_path, monkeypatch):
+    """N3: OSError from the blob pwrite or the blob fdatasync must not reach the eviction
+    hot path - offer returns False and leaves no journal entry."""
     from freetoken.kvcache.utils import chain_page_key
 
     k = chain_page_key(None, (7,))
     pages = [(k, bytes([7]) * PAGE)]
-    for target in ("os.write", "os.fsync"):
+    for target in ("os.pwrite", "os.fdatasync"):
         sub = tmp_path / target.replace(".", "_")
         store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(sub)))
 
@@ -1228,3 +1231,589 @@ def test_shutdown_marker_generation_monotonic_across_stale(tmp_path, monkeypatch
     plen, _ = struct.unpack_from("<II", framed, 0)
     mk = json.loads(framed[8:8 + plen])
     assert mk["generation"] > 7                  # strictly monotonic (pre-fix: 1)
+
+
+# --------------------------------------------------------------- P3 flush write path
+
+
+def _gold_payload(store, seg):
+    """Sequential-path gold: the exact bytes the record occupies in the blob (payload
+    plus zero padding to _BLK, as the O_DIRECT reader's aligned window expects)."""
+    payload = bytearray()
+    for i, ln in enumerate(seg.page_lens):
+        payload += store._pool.read(seg.l1_page_offs[i], ln)
+    for i, ln in enumerate(seg.snap_lens):
+        if ln:
+            payload += store._pool.read(seg.l1_snap_offs[i], ln)
+    padded = (len(payload) + 4095) // 4096 * 4096
+    return bytes(payload) + b"\0" * (padded - len(payload))
+
+
+def test_flush_live_parallel_write_bytes_identical(tmp_path):
+    """P3: the grouped parallel pwrite flush produces blob bytes byte-identical to the
+    sequential append path - same payloads, same zero padding, journal offsets true."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    chains = []
+    for i in range(1, 6):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages, f"{i}"))
+    assert len([s for s in store._segments.values() if s.in_l1]) == 5
+    gold = {name: _gold_payload(store, store._by_path(name)) for name, _, _, _ in chains}
+
+    assert store.flush_live() == 5
+    with open(os.path.join(d, "blob.bin"), "rb") as f:
+        blob = f.read()
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 5
+    for name, keys, pages, tag in chains:
+        seg = boot._by_path(name)
+        assert seg.in_l2
+        want = gold[name]
+        assert blob[seg.l2_off:seg.l2_off + seg.l2_n] == want[:seg.l2_n]
+        pad = blob[seg.l2_off + seg.l2_n:seg.l2_off + len(want)]
+        assert pad == b"\0" * len(pad)          # padding zeros, byte-identical
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        got_p, got_s = boot.restore(hit[1])
+        assert got_p == [data for _, data in pages] and got_s == [_snap(tag)]
+
+
+def test_flush_live_writes_segments_in_parallel(tmp_path, monkeypatch):
+    """P3 fails-before: the flush path must overlap segment writes - concurrent os.pwrite
+    entries prove >1 writer; the old sequential os.write append never overlaps (and never
+    calls pwrite at all)."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    assert len([s for s in store._segments.values() if s.in_l1]) == 4
+
+    real_pwrite = os.pwrite
+    state = {"entered": 0, "max": 0}
+    lock = threading.Lock()
+
+    def overlap_probe(fd, buf, offset):
+        with lock:
+            state["entered"] += 1
+            state["max"] = max(state["max"], state["entered"])
+        deadline = time.time() + 5.0
+        while state["entered"] < 2 and time.time() < deadline:
+            time.sleep(0.001)                   # bounded wait: never hangs the test
+        try:
+            return real_pwrite(fd, buf, offset)
+        finally:
+            with lock:
+                state["entered"] -= 1
+
+    monkeypatch.setattr(st_mod.os, "pwrite", overlap_probe)
+    assert store.flush_live() == 4
+    assert state["max"] >= 2                    # fails-before: sequential path gives 0/1
+
+
+def test_flush_crash_between_groups_keeps_journaled_prefix(tmp_path, monkeypatch):
+    """P3 crash sim: a SIGKILL after some flush journal records - the journaled records
+    (their groups were made durable first) survive replay, the durable-but-unjournaled
+    tail is dropped, and the journal holds only complete crc-valid records (no torn
+    record is possible: blob durability precedes every journal append)."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    chains = []
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages, f"{i}"))
+
+    real_append = SessionTierStore._journal_append
+    calls = {"n": 0}
+
+    def die_after_two(self, *args):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            return False                        # "crash": the record never becomes durable
+        return real_append(self, *args)
+
+    monkeypatch.setattr(SessionTierStore, "_journal_append", die_after_two)
+    assert store.flush_live() == 2              # the other two segments stay in L1
+    monkeypatch.undo()
+
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 2
+    for name, keys, pages, tag in chains[:2]:
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        got_p, got_s = boot.restore(hit[1])
+        assert got_p == [data for _, data in pages]
+        assert got_s == [_snap(tag)]
+    for name, keys, pages, tag in chains[2:]:
+        assert boot.probe(keys) is None         # unjournaled durable tail: dropped,
+        # never resurrected
+
+    raw = (tmp_path / "tier" / "journal.log").read_bytes()
+    pos, nrec = 0, 0
+    while pos + 8 <= len(raw):
+        plen, crc = struct.unpack_from("<II", raw, pos)
+        assert pos + 8 + plen <= len(raw)       # no torn record: header never lies
+        payload = raw[pos + 8:pos + 8 + plen]
+        assert zlib.crc32(payload) == crc
+        pos += 8 + plen
+        nrec += 1
+    assert nrec == 2 and pos == len(raw)        # journaled prefix is exactly the whole file
+
+
+def test_flush_group_fdatasync_failure_aborts_group(tmp_path, monkeypatch):
+    """Invariant guard: if the group fdatasync fails, NO journal record of the group may
+    appear - the journal only ever follows durable blob bytes."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1)])
+        assert store.offer(f"p{i}".encode(), 2, pages, _snap(f"{i}"))
+
+    def boom(fd):
+        raise OSError(5, "simulated fdatasync failure")
+
+    monkeypatch.setattr(st_mod.os, "fdatasync", boom)
+    assert store.flush_live() == 0
+    monkeypatch.undo()
+    assert (tmp_path / "tier" / "journal.log").read_bytes() == b""
+    assert len([s for s in store._segments.values() if s.in_l1]) == 3   # nothing lost
+    assert store._ssd_used == 0                 # aborted group took no capacity accounting
+
+
+def test_flush_volume_groups_all_durable(tmp_path, monkeypatch):
+    """Grouping by volume: with a tiny group budget every segment becomes its own group;
+    the durable order (fdatasync before that group's journal records) still yields a
+    complete journal and byte-identical restores."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    chains = []
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((keys, pages))
+    assert store.flush_live() == 3
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 3
+    for keys, pages in chains:
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+# ------------------------------------------------------------ CRC versioning (P3.3)
+
+
+def _journal_records_raw(path):
+    """Parse a journal file end-to-end; returns (records, fully_parsed)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    pos, recs = 0, []
+    while pos + 8 <= len(raw):
+        plen, crc = struct.unpack_from("<II", raw, pos)
+        assert pos + 8 + plen <= len(raw)       # frame format unchanged by the versioning
+        payload = raw[pos + 8:pos + 8 + plen]
+        assert zlib.crc32(payload) == crc       # frame crc stays zlib for every record
+        recs.append(json.loads(payload))
+        pos += 8 + plen
+    return recs, pos == len(raw)
+
+
+def _blob_region(d, rec):
+    with open(os.path.join(d, "blob.bin"), "rb") as f:
+        f.seek(rec["off"])
+        return f.read(rec["n"])
+
+
+def _rewrite_records(d, transform):
+    """Rewrite the journal file record-by-record: transform(rec) may mutate or drop the
+    crc_alg field; frames stay zlib."""
+    jpath = os.path.join(d, "journal.log")
+    recs, _ = _journal_records_raw(jpath)
+    with open(jpath, "wb") as f:
+        for rec in recs:
+            transform(rec)
+            payload = json.dumps(rec, sort_keys=True).encode()
+            f.write(struct.pack("<II", len(payload), zlib.crc32(payload)) + payload)
+
+
+def test_new_records_carry_crc32c_and_verify(tmp_path):
+    """P3.3: new journal records carry crc_alg=crc32c with a Castagnoli payload crc and
+    verify through the replay full path; restores stay byte-exact."""
+    import crc32c
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    chains = []
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages))
+    assert store.flush_live() == 3
+
+    recs, whole = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert whole and len(recs) == 3
+    for rec in recs:
+        assert rec["crc_alg"] == "crc32c"                       # fails-before: no field
+        assert rec["crc"] == crc32c.crc32c(_blob_region(d, rec))
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 3                           # full-path crc32c verify
+    for name, keys, pages in chains:
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_legacy_zlib_records_without_field_verify(tmp_path, monkeypatch):
+    """Backward compat: a catalog whose records carry zlib crc32 WITHOUT crc_alg (every
+    pre-P3.3 directory) takes the full verification path and replays intact."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    chains = []
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages))
+    assert store.flush_live() == 3
+
+    def to_legacy(rec):
+        rec.pop("crc_alg")
+        rec["crc"] = zlib.crc32(_blob_region(d, rec))
+
+    _rewrite_records(d, to_legacy)
+    calls = _counting_pread(monkeypatch)
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 3                           # full path, no drops
+    assert calls["n"] == 3                                      # every payload re-read
+    for name, keys, pages in chains:
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_mixed_zlib_and_crc32c_catalog(tmp_path):
+    """A catalog mixing legacy zlib records (no field) and crc32c records (field) replays
+    completely: the verifier selects the algorithm per record."""
+    import crc32c
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    names = []
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        names.append(f"p{i}".encode())
+    assert store.flush_live() == 4
+
+    seen_algs = set()
+
+    def mix(rec):
+        data = _blob_region(d, rec)
+        if len(seen_algs) % 2 == 0:             # keep alternating: even -> legacy zlib
+            rec.pop("crc_alg")
+            rec["crc"] = zlib.crc32(data)
+            seen_algs.add("zlib")
+        else:
+            rec["crc"] = crc32c.crc32c(data)    # odd -> keep crc32c field
+            seen_algs.add("crc32c")
+
+    _rewrite_records(d, mix)
+    assert seen_algs == {"zlib", "crc32c"}
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 4
+    for i, name in enumerate(names, start=1):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_corrupted_crc32c_record_dropped(tmp_path):
+    """A crc32c record whose blob region no longer matches is dead: dropped at replay
+    (with the dropped-report intact), its neighbors survive."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    keys_by_name = {}
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        keys_by_name[f"p{i}".encode()] = keys
+    assert store.flush_live() == 3
+
+    recs, _ = _journal_records_raw(os.path.join(d, "journal.log"))
+    victim = recs[1]
+    with open(os.path.join(d, "blob.bin"), "r+b") as f:   # corrupt the middle record
+        f.seek(victim["off"])
+        f.write(b"\xAA" * 16)
+    with _tier_log_capture() as cap:
+        boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+        assert boot.replay_journal() == 2
+    assert any("replay dropped 1 dead/torn records" in m for m in cap.messages)
+    hit = boot.probe(keys_by_name[b"p2"])
+    assert hit is None                                     # the victim stays dead
+    for name, i in ((b"p1", 1), (b"p3", 3)):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_crc32c_records_take_p2_fast_path(tmp_path):
+    """P2 fast-path intact: after a graceful stop the boot replays crc32c records via
+    the marker with ZERO payload re-reads; the full path stays the crash fallback."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    for i in range(1, 3):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    _graceful_stop(store)
+
+    real_pread = os.pread
+    counter = {"n": 0}
+
+    def counting(fd, n, off):
+        counter["n"] += 1
+        return real_pread(fd, n, off)
+
+    st_mod.os.pread = counting
+    try:
+        boot, n = _boot(d)
+        assert n == 2
+        assert counter["n"] == 0                    # fast path: no payload crc re-read
+    finally:
+        st_mod.os.pread = real_pread
+
+
+# ----------------------------------------------------- TP fixes (review A/B, P3)
+
+
+def test_flush_live_survives_cap_eviction_mid_iteration(tmp_path, monkeypatch):
+    """A1 fails-before: flush_live iterated self._segments.values() directly while a
+    mid-loop cap eviction (_flush_group -> _reserve_blob_span -> _evict_oldest_l2 ->
+    _discard) deleted from the same dict -> RuntimeError. Port of boot-shutdown-io/
+    p3-plan/repro_flushlive_dict.py: with the shrunk cap, reserving the first flush
+    segment evicts BOTH runtime-demoted L2 victims mid-iteration."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 2048)   # force a mid-loop group flush
+    store = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    assert [s.seg_id for s in store._segments.values() if s.in_l2]  # runtime L2 victims
+
+    store.ssd_bytes = 4096                    # reserving s3 evicts BOTH L2 victims
+    # ... mid-iteration, then s3's fresh span is itself the victim s4's reserve needs
+    count = store.flush_live()                # fails-before: RuntimeError here
+    assert count == 2                         # s3 written, then sacrificed for s4
+    assert not [s for s in store._segments.values() if s.in_l2 and s.seg_id <= 2]
+    boot = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    # p1/p2 records resurrect too: a runtime discard rewrites no journal, and their blob
+    # regions were never overwritten (documented resurrect semantics).
+    assert boot.replay_journal() == 4
+    for i in (1, 2, 3, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_partial_pwrite_failure_keeps_segment_in_l1(tmp_path, monkeypatch):
+    """B1: one segment's pwrite fails inside a group -> flush_live counts M-1, the
+    journal holds only successes, the failed segment stays in L1 with clean blob fields,
+    _ssd_used accounts M-1 records, boot replays M-1 and the survivors are byte-exact."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    chains = []
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages))
+
+    real_pwrite = os.pwrite
+    calls = {"n": 0}
+
+    def flaky(fd, buf, offset):
+        calls["n"] += 1
+        if calls["n"] == 1:                   # exactly one group segment fails
+            raise OSError(5, "simulated pwrite failure")
+        return real_pwrite(fd, buf, offset)
+
+    monkeypatch.setattr(st_mod.os, "pwrite", flaky)
+    assert store.flush_live() == 3            # the failed one is not counted
+    monkeypatch.undo()
+    assert store._ssd_used == 3 * 4096        # no accounting for the aborted span
+    failed = [s for s in store._segments.values() if s.in_l1]
+    assert len(failed) == 1 and failed[0].blob == "" and failed[0].l2_off == -1
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 3
+    for name, keys, pages in chains:
+        hit = boot.probe(keys)
+        if name.decode() == failed[0].path_key.decode():
+            assert hit is None                # unjournaled: dropped, not resurrected
+        else:
+            assert hit is not None and hit[0] == 3
+            assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_failed_write_hole_skipped_by_next_group_no_dropped(tmp_path, monkeypatch):
+    """B2: a failed group-1 write leaves a hole; the next group reserves AFTER it (the
+    watermark intentionally stays past the hole). Boot takes the full path, no record
+    references the hole, and 'replay dropped' is ABSENT - nothing looks dead."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    chains = []
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages))
+
+    real_pwrite = os.pwrite
+    calls = {"n": 0}
+
+    def flaky(fd, buf, offset):
+        calls["n"] += 1
+        if calls["n"] == 1:                   # group 1's single segment fails
+            raise OSError(5, "simulated pwrite failure")
+        return real_pwrite(fd, buf, offset)
+
+    monkeypatch.setattr(st_mod.os, "pwrite", flaky)
+    assert store.flush_live() == 2
+    monkeypatch.undo()
+
+    recs, whole = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert whole and len(recs) == 2
+    assert all(rec["off"] >= 4096 for rec in recs)   # the hole [0, 4096) is unreferenced
+    with _tier_log_capture() as cap:
+        boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+        assert boot.replay_journal() == 2
+    assert not any("replay dropped" in m for m in cap.messages)   # nothing looks dead
+    for name, keys, pages in chains[1:]:
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_marker_valid_after_failed_flush_boot_fast_path(tmp_path, monkeypatch):
+    """B3: a graceful stop after a flush with a failed write leaves a VALID marker (the
+    compacted sizes are self-consistent); boot takes the fast path with zero payload
+    re-reads and the unjournaled failed segment is dropped. Triage A2 pin: the watermark
+    is NOT trimmed on failure - trimming would race the parallel writers and break the
+    never-decreased invariant; the hole is reclaimed by compaction instead."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # deterministic group order
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    keys_by_name = {}
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        keys_by_name[f"p{i}".encode()] = keys
+
+    victim_page0 = _page_data((1, 0))         # p1's first page: fail its writes forever
+    real_pwrite = os.pwrite
+
+    def flaky(fd, buf, offset):
+        if bytes(buf[:PAGE]) == victim_page0:
+            raise OSError(5, "simulated pwrite failure")
+        return real_pwrite(fd, buf, offset)
+
+    monkeypatch.setattr(st_mod.os, "pwrite", flaky)
+    assert store.flush_live() == 2            # p1 fails, p2/p3 journal
+    _graceful_stop(store)                     # p1's retry fails too; marker written
+    monkeypatch.undo()
+
+    calls = _counting_pread(monkeypatch)
+    boot, n = _boot(d)
+    assert n == 2 and calls["n"] == 0         # fast path accepted, no payload re-reads
+    assert boot.probe(keys_by_name[b"p1"]) is None    # unjournaled tail: dropped
+    for name in (b"p2", b"p3"):
+        i = int(name[1:])
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_flush_compact_offer_boot_two_generations(tmp_path):
+    """Triage (7)+(B8): flush -> compact -> runtime offer -> boot-2. The runtime offer
+    writes PAST the compact-resynced _blob_eof (the lseek resync at compact), its record
+    lands at the truncated file's real EOF, and BOTH generations of records (pre-compact
+    survivors and the post-compact offer) replay and restore byte-exactly."""
+    d = tmp_path / "tier"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))   # L2-only runtime offers
+    for i in (1, 2, 3):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    assert store.evict_store(1) == 1          # p1 is now dead
+    assert store.compact() == 1               # blob truncated, _blob_eof resynced
+    eof = store._blob_eof
+    assert eof == 3 * 4096                    # p1's head hole + two live records at
+    # ... their ORIGINAL offsets: the file ends at the last live record
+    keys4, pages4 = _chain([(4, 0), (4, 1), (4, 2)])
+    assert store.offer("p4".encode(), 3, pages4, _snap("4"))
+    recs, whole = _journal_records_raw(str(d / "journal.log"))
+    assert whole and len(recs) == 3
+    assert recs[-1]["off"] == eof             # the offer wrote past the resynced EOF
+
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 3         # both generations alive
+    for i in (2, 3, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_group_reserve_respects_ssd_cap(tmp_path):
+    """Cap-regression fix: _ssd_used lags until the group's journal records land, so the
+    group's reserve loop must count its pending reservations - otherwise the whole group
+    reserves past the ssd cap (HEAD enforced a strict per-segment cap: at exhaustion a
+    segment is REFUSED and stays in L1). Accounting must converge with what the journal
+    actually occupies, and _blob_eof (never decreased) is unaffected."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=4 * 4096, d=d))   # cap = 4 records
+    chains = []
+    for i in range(1, 9):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages))
+    assert len([s for s in store._segments.values() if s.in_l1]) == 8
+
+    assert store.flush_live() == 4            # fails-before: 8, the whole group over cap
+    assert store._ssd_used == 4 * 4096        # exactly the cap, never past it
+    recs, whole = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert whole and len(recs) == 4           # only the admitted segments are journaled
+    failed = [s for s in store._segments.values() if s.in_l1]
+    assert len(failed) == 4                   # rejected segments stay in L1 (HEAD way)
+    assert all(s.blob == "" and s.l2_off == -1 for s in failed)
+    for i in range(5, 9):
+        keys, _ = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.probe(keys) is not None  # still served from L1
+
+    boot = SessionTierStore(_cfg(ram=16384, ssd=4 * 4096, d=d))
+    assert boot.replay_journal() == 4
+    assert boot._ssd_used == 4 * 4096         # accounting converged with the journal
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]

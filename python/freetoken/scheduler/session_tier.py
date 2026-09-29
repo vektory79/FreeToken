@@ -3,11 +3,17 @@
 A segment is one session path [0:N] of KV pages plus up to 3 GDN snapshot byte blobs.
 Pages are content-addressed by chain page keys so shared subagent prefixes dedup and
 appends are incremental. L1 is one mlock'ed contiguous allocation; L2 is append-only
-blob files guarded by a fsync-ordered journal (blob + fsync BEFORE journal record), so
-a SIGKILL mid-append can only truncate the tail, never corrupt accepted records.
+blob files guarded by a fsync-ordered journal (blob bytes durable BEFORE journal
+record), so a SIGKILL mid-append can only truncate the tail, never corrupt accepted
+records. The shutdown flush writes whole groups in parallel pwrite bursts with ONE
+group fdatasync before the group's journal records: the crash loss window widens
+from one segment to one group (replay drops the unjournaled blob tail), corruption
+is still impossible. Journal payload checksums are versioned per record (crc_alg):
+new records carry hardware CRC32C, old catalogs' zlib-crc32 records replay unchanged.
 """
 from __future__ import annotations
 
+import crc32c
 import ctypes
 import json
 import mmap
@@ -18,6 +24,7 @@ import threading
 import time
 import zlib
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from queue import SimpleQueue
 from typing import Protocol, Sequence
@@ -43,10 +50,43 @@ _COMPACT_FLOOR_BYTES = 256 << 20
 # staging tickets, each holding one mlocked host buffer with the segment bytes until
 # adopt/abandon. The scheduler's idle hook (via the cache manager) is the only caller.
 _MAX_RESTORE_TICKETS = 2
+# P3 flush write path (flush_live only): segments are batched into volume groups -
+# within a group the payloads go out as parallel pwrite bursts (the blob fd has no
+# O_APPEND) and ONE fdatasync makes the whole group durable before its journal records.
+# Runtime demotions (offer/evict pressure) stay single-segment in _write_blob.
+_FLUSH_GROUP_BYTES = 1 << 30
+_FLUSH_WRITERS = 8
 # Guards the cumulative mlock accounting (_Pool._locked_total): it is mutated from the
 # scheduler thread (pool construction, staging alloc, free_block) AND the reader thread
 # (staging close at ticket finalize).
 _LOCKED_TOTAL_LOCK = threading.Lock()
+
+# Journal payload-crc algorithm versioning: a record with "crc_alg":"crc32c" carries a
+# Castagnoli crc (hardware SSE4.2 via the crc32c package); a record without the field is
+# legacy zlib-crc32. The journal frame itself (<II len, crc32>) stays zlib: it is
+# KB-sized (vs GiB payloads) and its algorithm cannot be known before the record is
+# parsed, so there is no cheap way to version it.
+_CRC32C_ALG = "crc32c"
+
+
+def _calc_payload_crc(data, alg: str) -> int:
+    """Payload checksum for a NEW journal record (alg is always _CRC32C_ALG today)."""
+    if alg == _CRC32C_ALG:
+        return crc32c.crc32c(data)
+    return zlib.crc32(data)
+
+
+def _match_payload_crc(data, alg: str | None, crc: int) -> bool:
+    """Verify a record's payload checksum by its crc_alg field. An absent field is the
+    legacy zlib format; an UNKNOWN algorithm can never verify, so the record is dead
+    (replay drops it - never resurrect). Downgrade contract: an older zlib-only binary
+    replaying a crc32c journal drops those records as dead - the journal stays
+    well-formed (frames are still zlib), the price is those segments' data, no corruption."""
+    if alg == _CRC32C_ALG:
+        return crc32c.crc32c(data) == crc
+    if alg is None or alg == "zlib":
+        return zlib.crc32(data) == crc
+    return False
 
 
 class SnapshotSource(Protocol):
@@ -259,8 +299,8 @@ class SessionTierStore:
         self._next_seg = 1
         self._l1_used = 0
         self._ssd_used = 0
-        # Append position in the blob (O_APPEND writes at real EOF); never decreased.
-        # _ssd_used is capacity accounting only and shrinks on L2 discard.
+        # Blob tail reservation watermark (pwrite appends at reserved offsets); never
+        # decreased. _ssd_used is capacity accounting only and shrinks on L2 discard.
         self._blob_eof = 0
         self._blob_path = ""
         self._journal_path = ""
@@ -281,8 +321,9 @@ class SessionTierStore:
             self._blob_path = os.path.join(self.dir, _BLOB_NAME)
             self._journal_path = os.path.join(self.dir, _JOURNAL_NAME)
             self._marker_present = os.path.exists(os.path.join(self.dir, _MARKER_NAME))
-            self._blob_fd = os.open(self._blob_path,
-                                    os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            # No O_APPEND: appends are pwrite at reserved offsets (pwrite on an O_APPEND
+            # fd would ignore the offset); _blob_eof is the reservation watermark.
+            self._blob_fd = os.open(self._blob_path, os.O_WRONLY | os.O_CREAT, 0o644)
             self._journal_fd = os.open(self._journal_path,
                                        os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
             self._ssd_used = os.path.getsize(self._blob_path)
@@ -555,40 +596,135 @@ class SessionTierStore:
         self._counters["demotions"] += 1
         return True
 
-    def _write_blob(self, seg: _Segment, payload: bytes | None) -> bool:
-        """Append one blob record (padded to _BLK for the O_DIRECT reader), fsync, then
-        the journal record - the fsync order is what makes replay crash-safe. Every
-        failure path returns False: no journal entry, no capacity accounting, and the
-        real O_APPEND EOF is re-synced so the next record's offset stays true."""
-        need = sum(seg.page_lens) + sum(seg.snap_lens)
+    def _reserve_blob_span(self, need: int, pending: int = 0) -> tuple[int, int] | None:
+        """Cap-check (evicting oldest L2 first), then reserve the record's padded span at
+        the blob tail. Returns (off, padded), or None when the cap cannot be met.
+        pending is the volume reserved earlier in the same flush group but not yet
+        journaled (_ssd_used lags until the group's records land in _journal_and_account):
+        counting it keeps the HEAD strict cap at reserve granularity, so a group can
+        never reserve past the ssd cap by up to a group volume."""
         padded = (need + _BLK - 1) // _BLK * _BLK
-        if self.ssd_bytes and self._ssd_used + padded > self.ssd_bytes:
-            self._evict_oldest_l2(need)
-        if self.ssd_bytes and self._ssd_used + padded > self.ssd_bytes:
-            return False
-        # Full-write loop: os.write may short-write (and silently truncate >= ~2 GiB
-        # payloads). A failed/short append STILL advanced the fd's real EOF: lseek back
-        # to it and re-sync _blob_eof, or the NEXT record's journal offset would point
-        # below its data (corrupt restores).
-        view = memoryview(payload + b"\0" * (padded - len(payload)))
-        try:
-            while view:
-                n = os.write(self._blob_fd, view)
-                if n <= 0:
-                    raise OSError("short blob append")
-                view = view[n:]
-            os.fsync(self._blob_fd)
-        except OSError as e:
-            logger.warning("session tier: blob append failed (%s); record aborted", e)
-            self._blob_eof = os.lseek(self._blob_fd, 0, os.SEEK_END)
-            return False
+        if self.ssd_bytes and self._ssd_used + pending + padded > self.ssd_bytes:
+            self._evict_oldest_l2(need, pending)
+            if self.ssd_bytes and self._ssd_used + pending + padded > self.ssd_bytes:
+                return None
         off = self._blob_eof
         self._blob_eof += padded
+        return off, padded
+
+    def _pwrite_span(self, off: int, view: memoryview) -> None:
+        """Full-write loop at an explicit offset (pwrite may short-write). A failed or
+        short write leaves the reserved span as a hole: the reservation watermark is
+        already past it and no journal record will ever point into it, so the old
+        O_APPEND lseek resync is unnecessary."""
+        pos = 0
+        while pos < len(view):
+            n = os.pwrite(self._blob_fd, view[pos:], off + pos)
+            if n <= 0:
+                raise OSError("short blob write")
+            pos += n
+
+    def _journal_and_account(self, seg: _Segment, off: int, need: int, padded: int,
+                             crc: int, crc_alg: str = _CRC32C_ALG) -> bool:
+        """Journal one durable record and take the capacity accounting. False = the blob
+        bytes are durable but unrecoverable across a boot: abort cleanly (the segment
+        keeps its L1 residency; no journal entry, no accounting)."""
         seg.blob, seg.l2_off, seg.l2_n = _BLOB_NAME, off, need
-        if not self._journal_append(seg, off, need, zlib.crc32(payload)):
-            return False   # bytes are durable but unrecoverable across a boot: abort cleanly
+        if not self._journal_append(seg, off, need, crc, crc_alg):
+            return False
         self._ssd_used += padded
         return True
+
+    def _write_blob(self, seg: _Segment, payload: bytes | None) -> bool:
+        """Append one blob record (padded to _BLK for the O_DIRECT reader): pwrite at the
+        reserved offset, ONE fdatasync, then the journal record - the durable order is
+        what makes replay crash-safe. Every failure path returns False: no journal entry,
+        no capacity accounting. Single-segment path (runtime offer/evict pressure); the
+        shutdown flush batches segments through _flush_group instead."""
+        need = sum(seg.page_lens) + sum(seg.snap_lens)
+        r = self._reserve_blob_span(need)
+        if r is None:
+            return False
+        off, padded = r
+        view = memoryview((payload if payload is not None else b"")
+                          + b"\0" * (padded - need))
+        try:
+            self._pwrite_span(off, view)
+            os.fdatasync(self._blob_fd)
+        except OSError as e:
+            logger.warning("session tier: blob append failed (%s); record aborted", e)
+            return False
+        return self._journal_and_account(seg, off, need, padded,
+                                         _calc_payload_crc(view[:need], _CRC32C_ALG))
+
+    def _flush_group(self, segs: list[_Segment]) -> int:
+        """P3 shutdown-flush path: reserve every segment's span up-front, build the
+        payloads, write them as parallel pwrite bursts at the reserved offsets, ONE
+        fdatasync for the whole group, then the group's journal records. Durable-order
+        invariant unchanged - a journal record still appears only after the blob bytes
+        of its group are durable - but the crash loss window widens from one segment to
+        the whole group: a SIGKILL between the fdatasync and the journal appends leaves
+        the group's bytes durable and unjournaled, and replay drops that blob tail
+        (segments stay in L1 in a process that survives). Returns the demoted count."""
+        if self._blob_fd < 0:
+            return 0
+        stage: list[tuple[_Segment, int, int, int]] = []
+        pending = 0                              # reserved-but-unjournaled group volume
+        for seg in segs:
+            need = sum(seg.page_lens) + sum(seg.snap_lens)
+            r = self._reserve_blob_span(need, pending)
+            if r is None:
+                logger.warning("session tier: L2 cap reached, cannot demote seg %d",
+                               seg.seg_id)
+                continue
+            stage.append((seg, r[0], need, r[1]))
+            pending += r[1]
+        if not stage:
+            return 0
+        payloads = []
+        for seg, off, need, padded in stage:
+            payload = bytearray()
+            for i, ln in enumerate(seg.page_lens):
+                payload += self._pool.read(seg.l1_page_offs[i], ln)
+            for i, ln in enumerate(seg.snap_lens):
+                if ln:
+                    payload += self._pool.read(seg.l1_snap_offs[i], ln)
+            payload += b"\0" * (padded - len(payload))
+            payloads.append(payload)
+        failed: set[int] = set()
+
+        def _write_one(i: int) -> None:
+            seg, off, need, padded = stage[i]
+            try:
+                self._pwrite_span(off, memoryview(payloads[i]))
+            except OSError as e:
+                logger.warning("session tier: blob write failed for seg %d (%s); "
+                               "record aborted", seg.seg_id, e)
+                failed.add(i)
+
+        if len(stage) == 1:
+            _write_one(0)
+        else:
+            with ThreadPoolExecutor(max_workers=min(_FLUSH_WRITERS, len(stage))) as ex:
+                list(ex.map(_write_one, range(len(stage))))
+        # Group fdatasync: every byte written above is durable BEFORE any journal record
+        # of the group appears.
+        try:
+            os.fdatasync(self._blob_fd)
+        except OSError as e:
+            logger.warning("session tier: blob fdatasync failed (%s); group aborted", e)
+            return 0
+        count = 0
+        for i, (seg, off, need, padded) in enumerate(stage):
+            if i in failed:
+                continue
+            crc = _calc_payload_crc(memoryview(payloads[i])[:need], _CRC32C_ALG)
+            if not self._journal_and_account(seg, off, need, padded, crc):
+                continue
+            self._release_l1(seg)
+            self._counters["demotions"] += 1
+            count += 1
+        return count
 
     def _release_l1(self, seg: _Segment) -> None:
         for i, key in enumerate(seg.page_keys):
@@ -625,9 +761,9 @@ class SessionTierStore:
         self.maybe_compact()   # discard pressure is the other watermark check point
         return count
 
-    def _evict_oldest_l2(self, keep: int) -> None:
+    def _evict_oldest_l2(self, keep: int, pending: int = 0) -> None:
         l2 = [s for s in self._segments.values() if s.in_l2 and s.refs == 0]
-        while self.ssd_bytes and self._ssd_used + keep > self.ssd_bytes and l2:
+        while self.ssd_bytes and self._ssd_used + pending + keep > self.ssd_bytes and l2:
             victim = min(l2, key=lambda s: (s.last_validation, s.seg_id))
             self._discard(victim)
             l2.remove(victim)
@@ -930,14 +1066,30 @@ class SessionTierStore:
     # --------------------------------------------------------------- lifecycle
 
     def flush_live(self) -> int:
-        """Graceful shutdown: demote every live L1 segment into L2. Returns the count."""
+        """Graceful shutdown: demote every live L1 segment into L2. Returns the count.
+        Segments are batched into ~_FLUSH_GROUP_BYTES volume groups; each group is
+        written in parallel pwrite bursts and made durable with ONE fdatasync before
+        its journal records (see _flush_group for the widened crash loss window)."""
         if not self.enabled:
             return 0
         count = 0
         with self._lock:
+            group: list[_Segment] = []
+            vol = 0
+            # Snapshot: a mid-loop cap eviction (_flush_group -> _reserve_blob_span ->
+            # _evict_oldest_l2 -> _discard) deletes from _segments while we iterate.
             for seg in list(self._segments.values()):
-                if seg.in_l1 and seg.refs == 0 and self._demote(seg):
-                    count += 1
+                if not seg.in_l1 or seg.refs != 0:
+                    continue
+                padded = (sum(seg.page_lens) + sum(seg.snap_lens)
+                          + _BLK - 1) // _BLK * _BLK
+                if group and vol + padded > _FLUSH_GROUP_BYTES:
+                    count += self._flush_group(group)
+                    group, vol = [], 0
+                group.append(seg)
+                vol += padded
+            if group:
+                count += self._flush_group(group)
         if count:
             logger.info("session tier: flushed %d live segments to L2", count)
         return count
@@ -1039,7 +1191,8 @@ class SessionTierStore:
         except (OSError, ValueError, struct.error):
             return False, None
 
-    def _journal_append(self, seg: _Segment, off: int, nbytes: int, crc: int) -> bool:
+    def _journal_append(self, seg: _Segment, off: int, nbytes: int, crc: int,
+                        crc_alg: str = _CRC32C_ALG) -> bool:
         rec = {
             "path_key": seg.path_key.hex(), "blen": seg.boundary_len,
             "page_keys": [k.hex() for k in seg.page_keys],
@@ -1047,8 +1200,13 @@ class SessionTierStore:
             "blob": seg.blob, "off": off, "n": nbytes, "ts": seg.last_validation,
             # payload checksum: replay drops records whose blob region no longer matches
             # (holes after compaction, torn/short appends) - the convergence mechanism.
+            # crc_alg versions the algorithm: new records carry hardware CRC32C; records
+            # without the field are legacy zlib-crc32 (old catalogs replay unchanged).
+            # The journal frame crc below stays zlib: see the versioning note at the top.
             "crc": crc,
         }
+        if crc_alg:
+            rec["crc_alg"] = crc_alg
         payload = json.dumps(rec, sort_keys=True).encode()
         try:
             os.write(self._journal_fd,
@@ -1118,7 +1276,9 @@ class SessionTierStore:
                     ok = True
                     if "crc" in rec:
                         try:
-                            ok = zlib.crc32(os.pread(blob_fd, rec["n"], rec["off"])) == rec["crc"]
+                            ok = _match_payload_crc(os.pread(blob_fd, rec["n"],
+                                                             rec["off"]),
+                                                    rec.get("crc_alg"), rec["crc"])
                         except OSError:
                             ok = False
                     (kept.append(rec) if ok else None)
@@ -1226,9 +1386,14 @@ class SessionTierStore:
                 os.close(fd)
             os.rename(tmp, self._blob_path)   # atomic: old blob intact until here
             os.close(self._blob_fd)
-            self._blob_fd = os.open(self._blob_path,
-                                    os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            self._blob_fd = os.open(self._blob_path, os.O_WRONLY | os.O_CREAT, 0o644)
             self._rewrite_journal(keep)
+            # The rename above orphaned the open journal fd: it still points at the old
+            # (now unlinked) inode, so subsequent appends would be lost at reboot. Reopen
+            # the fresh file - same O_APPEND discipline as at __init__.
+            os.close(self._journal_fd)
+            self._journal_fd = os.open(self._journal_path,
+                                       os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
             self._ssd_used = sum((r["n"] + _BLK - 1) // _BLK * _BLK
                                  for r in keep)
             # Runtime compaction is new (phase 1 ran it shutdown-only): re-sync _blob_eof
