@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-native-serving-skill"
-description: "gguf-native-serving skill ledger: TRAPS T01-T63; fix3 self-update committed a20519e; campaign validated"
+description: "gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag"
 type: project
-lastUpdated: 2026-09-21T19:06
-lastRecall: 2026-09-26T23:45
+lastUpdated: 2026-09-27T22:10
+lastRecall: 2026-09-28T17:53
 ---
 
 # GGUF native serving skill: reusable methodology for any model family
@@ -30,3 +30,8 @@ At the END of every session that produced reusable knowledge (root causes with c
 ## UPDATE (2026-09-21): the fix3 skill self-update (4 files, 77+/5-) is COMMITTED as a20519e "docs(skill): add fix3 campaign knowledge (T59-T63, expected classes)" atop be57ee8 - the "modified-UNSTAGED/user-gated" status above is superseded. TRAPS T60 re-anchored to cache.py:364-379 and T59 to scheduler.py:464-473 (+padding-sink gloss) by the review fix-wave BEFORE the commit; T61 anchored 322-338 (full skip region superset of the :323-332 comment block).
 
 ## STATUS FINAL (2026-09-21): skill self-update COMMITTED a20519e (5th fix3 commit; 4 files 77+/5-). Growing-history A/B + ratio-8 probe complete (see fix3-hybrid-cache-loss-donation): pre-fix 5/5 full misses on the real pattern, post-fix 0/5; ratio 8 = retention headroom only.
+
+## UPDATE (2026-09-28): decode-chain-microfusion campaign self-update COMMITTED a8fb231 "docs(skill): add chain microfusion traps t64-t66" (atop db0f6b3, vektory79)
+- TRAPS.md now T01-T66: T64 in-kernel actquant fusion collapsed MMVQ occupancy (launch counts dropped, 5.5-8.7x slowdown - check CTAs/SM + GB/s, not launch counts); T65 fused topk single-block-per-slice: exact ATen tie semantics but ~20x slower (semantics port != performance-model port); T66 load-time fused weights must emit checkpoint keys in every reader path (raw-GGUF vs FTW) or FTW boots KeyError.
+- Full numbers: kb/topics/decode-chain-microfusion.md (committed d76c3ce).
+- NOTE: a8fb231 touched ONLY TRAPS.md - the SKILL.md "63 traps" counter and ORCHESTRATION sec.10 counters were NOT synced in that pass; a future self-update pass should sync them to T66 (verify current on-disk state first).

@@ -3,7 +3,7 @@ name: "ft-lever2-gap-anatomy"
 description: "Lever2 anatomy: fetch already overlapped 28.7 ms; gaps = chain kernels 11.5 ms; C1 doze-fix +1.6-1.8% only lever"
 type: project
 lastUpdated: 2026-09-27T15:47
-lastRecall: 2026-09-27T21:39
+lastRecall: 2026-09-30T22:35
 ---
 
 # Lever #2 (gap overlap) RESOLVED: fetch was already overlapped - gaps are the GPU kernel chain (2026-09-27)

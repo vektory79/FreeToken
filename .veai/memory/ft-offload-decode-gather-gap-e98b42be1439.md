@@ -3,7 +3,7 @@ name: "ft-offload-decode-gather-gap"
 description: "Offload gather-gap lever REFUTED by T1: prod 33.5-36 GB/s vs 43.6 bench; closing only ties hybrid; offload deprioritized"
 type: project
 lastUpdated: 2026-09-27T02:47
-lastRecall: 2026-09-27T17:48
+lastRecall: 2026-09-30T22:35
 ---
 
 # Offload decode gather gap: premise REFUTED by T1 measurement (2026-09-26)

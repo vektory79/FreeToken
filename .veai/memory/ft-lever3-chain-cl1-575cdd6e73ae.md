@@ -1,9 +1,9 @@
 ---
 name: "ft-lever3-chain-cl1"
-description: "mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons in kb decode-chain-microfusion + T64-T66"
+description: "mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons distilled+committed 61397a2/d76c3ce/a8fb231"
 type: project
-lastUpdated: 2026-09-27T21:48
-lastRecall: 2026-09-27T22:01
+lastUpdated: 2026-09-27T22:09
+lastRecall: 2026-09-27T22:09
 ---
 
 # Lever 3 / C-L1: mhc stage1 NS-split ACCEPTED on hardware (2026-09-27) - uncommitted
@@ -37,3 +37,9 @@ C-L2 small bf16 GEMV fusion (+0.2-0.25%), C-L3 fused router topk (+0.5-0.7%, MED
 - Revert: 14 tracked files checkout to HEAD + 3 untracked deleted (agent caught 2 more bundle members beyond the brief: moe.py, attention/dsv4_indexer.py - both imported freetoken.kernel.topk). After-inventory = exactly the preserve set (.veai/**, kb/** incl. lever2/lever3/microfix docs + README.md, .tasks/**). Stray root arm_ctl_r2.json was a byte-identical duplicate of the .tasks copy - deleted. Rebuild rc=0 (plain gcc), import ok, 139 pytest pass, FTW production-path confirm arm 17.89 tok/s / p50 54.6 ms (in band), census clean. HEAD stays db0f6b3.
 - Distillation: kb/topics/decode-chain-microfusion.md (atomic article, 6 lessons: launch-count != speedup / occupancy collapse; semantics port != performance-model port; FTW reader-path key emission rule; sub-1% effects unmeasurable e2e; paired same-window A/B as house standard; occupancy audit pays both ways on 170 SMs) + .veai/skills/gguf-native-serving/TRAPS.md T64-T66 + kb/README.md + kb/topics/README.md + kb/cases/README.md status + glossary CTA/occupancy. Linter OK, links verified.
 - Uncommitted in tree now: only kb/ docs (this distillation + lever2/lever3/microfix docs + README) and .veai/** churn - user decides the docs commit.
+
+## 2026-09-28: kb docs COMMITTED (user order)
+- 61397a2 docs(kb): t2 lever2/lever3 anatomy + microfix ab results (case folder 3 docs + kb/cases/README.md)
+- d76c3ce docs(kb): decode chain microfusion lessons distill (topics article + kb/README.md + kb/topics/README.md + glossary CTA/occupancy)
+- a8fb231 docs(skill): TRAPS T64-T66 (.veai/skills/gguf-native-serving/TRAPS.md only)
+- .veai/memory churn deliberately left uncommitted (agent memory, not project kb). The "uncommitted kb docs" status in the sections above is superseded.

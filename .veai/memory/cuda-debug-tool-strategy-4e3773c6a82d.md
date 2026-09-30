@@ -3,7 +3,7 @@ name: "cuda-debug-tool-strategy"
 description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; torch.profiler aborts scheduler"
 type: project
 lastUpdated: 2026-09-26T22:58
-lastRecall: 2026-09-27T17:48
+lastRecall: 2026-09-30T22:37
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation

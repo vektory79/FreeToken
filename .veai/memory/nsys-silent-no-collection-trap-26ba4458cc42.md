@@ -3,7 +3,7 @@ name: "nsys-silent-no-collection-trap"
 description: "nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe"
 type: project
 lastUpdated: 2026-09-27T15:46
-lastRecall: 2026-09-27T19:40
+lastRecall: 2026-09-30T22:37
 ---
 
 # nsys silent no-collection trap: rc=0 does NOT imply a report was produced

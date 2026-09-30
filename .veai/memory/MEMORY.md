@@ -11,7 +11,6 @@
 - [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-08c4102d02ca.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-7b70b4071ae8.md) — Skill merge-main-into-vektory79 (.veai/skills): merge origin/main into vektory79; duplicates->main; boot-smoke
 - [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
-- [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-bfc2e865360a.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-3ab3f82469b1.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
@@ -34,10 +33,8 @@
 - [ftw-index-scans-silent-none](ftw-index-scans-silent-none-98c041aefd3e.md) — GGUF/FTW signature scans degrade to None silently (expert_banks.py:285/:406/:517), not raw errors
 - [git-integration-preferences](git-integration-preferences-90e2d8dc168a.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
 - [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-82d7aac85712.md) — GGUF glm5next VRAM headroom: 0.80/400k winner needs >=29.28 GiB free at boot; flips with desktop VRAM swing; options
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-cc4c4d1258e6.md) — gguf-native-serving skill ledger: TRAPS T01-T63; fix3 self-update committed a20519e; campaign validated
 - [fix3-hybrid-cache-loss-donation](fix3-hybrid-cache-loss-donation-09364e19044a.md) — Fix-3 campaign LANDED+VALIDATED: donation fixes user's periodic full loss (5/5 -> 0/5 misses, 4.3x turns 2-6); 5 commits
 - [kb-authoring-user-requirements](kb-authoring-user-requirements-d5e5128874ab.md) — User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity
-- [local-llm-vram-protocol](local-llm-vram-protocol-99ff7827a0e7.md) — Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model
 - [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md
 - [process-hygiene-protocol](process-hygiene-protocol-74ae16a3c293.md) — Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment
 - [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-6668ba48ee3d.md) — HybridRadixCache test integrity rules + tiering store tests carry own det-clock fixture
@@ -62,7 +59,19 @@
 - [nsys-silent-no-collection-trap](nsys-silent-no-collection-trap-26ba4458cc42.md) — nsys start/stop can silently no-op (rc=0, no report) when injection wrapper not swapped; verify with mini-probe
 - [ft-t2-host-delivery-wave1](ft-t2-host-delivery-wave1-e613aadbe509.md) — T2 wave-1 + default flip 17.36 tok/s; FREETOKEN_T2_POOL_THREADS knob; adjacent-SMT trap; commits 227e7a3..d751511
 - [ft-lever2-gap-anatomy](ft-lever2-gap-anatomy-7d202d10c248.md) — Lever2 anatomy: fetch already overlapped 28.7 ms; gaps = chain kernels 11.5 ms; C1 doze-fix +1.6-1.8% only lever
-- [ft-decode-research-campaign](ft-decode-research-campaign-ed787f6b658a.md) — GGUF decode A/B: split neutral, ov0 -23%, hostfunc -22%, fetch0 -39%; additive step model; .tasks/decode-research
 - [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-67e8a5a7a071.md) — Phase-1 tiering: SessionTierStore d77d15e/4b6aacb, L1 10 GiB cap; Qwen3.8 QSA hazard resolved by phase-2 codec
-- [ft-decode-lever-research](ft-decode-lever-research-98b822932108.md) — GGUF glm5next hybrid decode lever study; A/B verdicts + T1 decomposition; T3 refuted by oracle; offload measured
-- [ft-lever3-chain-cl1](ft-lever3-chain-cl1-d2170aa3ed30.md) — mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons in kb decode-chain-microfusion + T64-T66
+- [ft-lever3-chain-cl1](ft-lever3-chain-cl1-575cdd6e73ae.md) — mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons distilled+committed 61397a2/d76c3ce/a8fb231
+- [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a5f991dc9f99.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-e52457d2cc1e.md) — gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag
+- [ft-serve-boot-shutdown-io-research](ft-serve-boot-shutdown-io-research-6d55b44776e7.md) — HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore
+- [local-llm-vram-protocol](local-llm-vram-protocol-c8f46ab09a59.md) — Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model
+- [ft-p1-ftw-pool-wave](ft-p1-ftw-pool-wave-51dde77307cc.md) — P1 FTW bank-pool: COMMITTED 94d5e4a; HW accepted partially: 1.12x, sys 2.3x, gate open
+- [ft-decode-research-campaign](ft-decode-research-campaign-0fabb44fa748.md) — GGUF decode 5-arm A/B + additive step model + T1 block decomposition; harness .tasks/decode-research
+- [ft-decode-lever-research](ft-decode-lever-research-e9917fbc0e8e.md) — GGUF glm5next hybrid decode lever study: R1-R3 hypothesis closures, FA N/A for GDN+DSA arch, user-config gotcha
+- [ft-p5-committed-p8p9-briefs](ft-p5-committed-p8p9-briefs-30ab54ca8cb5.md) — P5 committed 94e4783 + docs 512b511; P8 watermark-no-op and P9 file-shrink briefs fixated; campaign status
+- [ft-p7-io-uring-wave](ft-p7-io-uring-wave-7992331df29c.md) — P7 io_uring ctypes wave: opt-in uncommitted, QD lever refuted (26s/5.16), CPU gate sys x1.45, settle-order lesson
+- [ft-fix-329-cap-accounting](ft-fix-329-cap-accounting-437b211cf22a.md) — Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid
+- [ft-p3-parallel-flush-wave](ft-p3-parallel-flush-wave-97975cd582d2.md) — P3 parallel pwrite + group fdatasync + crc32c; stale journal-fd HEAD bug; committed de26ba1; iron producer-bound
+- [ft-p4-flush-pipeline-wave](ft-p4-flush-pipeline-wave-be739d5c5a36.md) — P4 zero-copy pwritev flush pipeline + P6 env overrides; iron accepted 2.18-2.46 GB/s; commits b99a103, dd349a6
+- [ft-p2-shutdown-marker-wave](ft-p2-shutdown-marker-wave-dcfe8ba89f9d.md) — P2 clean-shutdown marker fast-path in replay_journal; committed 621d100, kb 9efdfbf; iron accepted (replay 22s->0s)
+- [ft-p5-lru-research](ft-p5-lru-research-726100c46d5c.md) — P5 LRU already in prod; wipe was :329 degenerate; P5-minimum overflow observability committed 94e4783; iron accepted

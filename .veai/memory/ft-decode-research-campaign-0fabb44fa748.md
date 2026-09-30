@@ -1,9 +1,9 @@
 ---
 name: "ft-decode-research-campaign"
-description: "GGUF decode A/B: split neutral, ov0 -23%, hostfunc -22%, fetch0 -39%; additive step model; .tasks/decode-research"
+description: "GGUF decode 5-arm A/B + additive step model + T1 block decomposition; harness .tasks/decode-research"
 type: project
-lastUpdated: 2026-09-27T17:51
-lastRecall: 2026-09-27T19:40
+lastUpdated: 2026-09-29T23:00
+lastRecall: 2026-09-30T22:35
 ---
 
 # decode-research campaign: 5-arm hybrid decode A/B on the user config (2026-09-26)
@@ -43,3 +43,6 @@ Gotchas: temp0 e2e is boot-to-boot nondeterministic again (completion 763/552/54
 All three candidates resolved: T1 done (driver v3 - ft-decode-stats-instruments-unwired); T3 REFUTED by oracle (oracle_hit 25.7% vs LRU 25.1% - cache policy dead, only more VRAM slots cuts misses); offload gather lever measured and DEPRIORITIZED (closing only ties hybrid - ft-offload-decode-gather-gap). T2 wave-1 landed (t2d +7.9/+10.4% vs control 15.62, battery 24/24, NO COMMIT pending user - ft-t2-host-delivery-wave1). Live next candidate: lever #2, overlap remaining fetch into the 15.44 ms inter-call gaps.
 
 UPDATE 2026-09-27 (later same day): the T2 "NO COMMIT pending user" line above is superseded - the pool-widening default flip (e541423) and the env knob (227e7a3) are COMMITTED; see ft-t2-host-delivery-wave1.
+
+## T1 decomposition (2026-09-26 evening, driver v3) - single copy of the T1 findings
+Hybrid stream span 59.1 ms of ~62 wall (offload 73.6/72.9) - step fully serialized; the 44 ms block = stream-wait-for-CPU-pool (~40 ms) + fetch copies (~6-8 ms) + kernels. Combined host delivery 2.57 GiB/step at ~41.5 GB/s vs benchbw overlapped-pair 72 GB/s concurrent-capable -> the gap is per-layer ping-pong micro-gaps (pool ramp/tails, doorbell dispatch) = the live T2 lever. Eager decode 15.84 ~= graphed 15.82 (CUDA graphs ~neutral at bs=1); miss stats identical across modes. Driver armor: any driver error disables the driver, never the engine (two boots were lost to a KeyError on _e1 before this fix).

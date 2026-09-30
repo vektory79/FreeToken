@@ -3,7 +3,7 @@ name: "rtx5090-pcie-gen5-bw-cap"
 description: "RTX 5090 rig (i7-14700KF 8P+12E, AVX2-only): Gen5 DMA cap = IOMMU Translated; iommu=pt restores 46/57 GB/s; probes"
 type: project
 lastUpdated: 2026-09-26T21:54
-lastRecall: 2026-09-26T21:53
+lastRecall: 2026-09-28T18:54
 ---
 
 # RTX 5090 PCIe Gen5 bandwidth cap on work.vektory79.me - ROOT CAUSE: IOMMU Translated mode (fixed 2026-09-12)
