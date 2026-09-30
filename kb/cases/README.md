@@ -47,7 +47,10 @@ Specification / Acceptance / Checklist.
   (94d5e4a) и принят железом частично (фаза 28 -> 25 с = 1.12x,
   throughput-гейт >= 5.5 ГБ/с не взят; CPU-гейт пройден: sys 2.3x меньше;
   свип пула плоский - следующий рычаг io_uring/пин-конвейер) -
-  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4-P6
+  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4 CPU-волна завершена
+  (zero-copy pwritev из L1-пула + конвейер групп; STOP GATE READY,
+  незакоммичено @ 5f9abcc, железная рука отложена - VRAM и пре-реквизит
+  env-override P6) - [P4-NOTES.md](boot-shutdown-io/P4-NOTES.md); P4-P6
   брифы зафиксированы (OPEN): продюсер флаша, семантика shutdown-кэпа,
   env-override констант флаша; P7 бриф зафиксирован (OPEN, отдельная
   сессия): io_uring/libaio ctypes глубокая очередь чтения FTW-банков.

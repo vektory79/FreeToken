@@ -3,7 +3,7 @@ title: "Ярусное вытеснение кеша сессий: RAM и SSD б
 date: 2026-09-22
 hardware: RTX 5090 32GB; NVMe Samsung 990 EVO Plus; RAM host
 branch-commits: "vektory79 @ d77d15e (фаза 1), 4b6aacb (закалка железа), 2348da5 (фаза-2 S-wave), 88102dd (кодеки QSA/KpoolDSA, KV-only tier, async prefetch), e5dd1f2 (supersede вложенных сегментов на offer)"
-status: фазы 1-2 реализованы и подтверждены железом (2026-09-22/23); supersede вложенных сегментов на offer реализован и измерен железом 2026-09-25 - честный no-op на гибридном flush (результаты в конце статьи)
+status: фазы 1-2 реализованы и подтверждены железом (2026-09-22/23); supersede вложенных сегментов на offer реализован и измерен железом 2026-09-25 - честный no-op на гибридном flush (результаты в конце статьи); P4 конвейер флаша групп реализован CPU-волной 2026-09-30 (незакоммичено @ 5f9abcc)
 tags: [tiering, session-cache, snapshot-offload, pinned-host, o-direct, nvme, hybrid, radix]
 ---
 
@@ -156,6 +156,20 @@ L2 SSD:  фиксированный буфер Y GiB, O_DIRECT (io_uring/libaio,
   краше расширено с сегмента до группы; payload/journal CRC переведён на
   аппаратный CRC32C с per-record версией алгоритма (zlib-директории совместимы,
   даунгрейд безопасен) - [P3-NOTES.md](../cases/boot-shutdown-io/P3-NOTES.md).
+- Конвейер флаша групп (P4): zero-copy запись без сборки payload -
+  набор iovecs pwritev прямо из memoryview-срезов L1-пула (страницы
+  несмежны из-за дедупа/refs - смежность не нужна; чанки 512 iov), pad
+  из статического `_ZERO_BLK` (байт-идентичность блоба), цепочечный
+  CRC32C по need-байтам (crc32c освобождает GIL с ~32 КиБ - crc билдера
+  перекрывается с записью); конвейер групп: билдер-поток строит группу
+  N+1, консьюмер пишет группу N (pwritev -> один fdatasync -> журнал
+  группы); синхронизация `_PendingVolume` (Condition) + `_account_lock`
+  (нереентрантный leaf-lock; правило "билдер не берёт `_lock`" - иначе
+  дедлок); P3-семантика жертвы восстановлена bounded drain-retry
+  (граница 60 с, fallback pending=0 может временно перекрыть кэп на
+  объём группы - только shutdown-flush); инвариант durable-до-журнала и
+  окно потери "группа" не тронуты (волна 2026-09-30, незакоммичено
+  @ 5f9abcc) - [P4-NOTES.md](../cases/boot-shutdown-io/P4-NOTES.md).
 - RAM: аллокация одним куском + mlock на старте (pinned, предсказуемо).
 - Конкурентность: refcount сегментов (restore один раз на сегмент),
   сериализация restore на сегмент; дедуп страниц даёт шаринг системных
