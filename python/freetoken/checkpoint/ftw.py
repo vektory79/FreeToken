@@ -60,6 +60,13 @@ _DEFAULT_CHUNK = 8 << 20
 # few 8 MiB ones; FREETOKEN_BANK_POOL_WORKERS overrides the pool size for the iron A/B.
 _BANK_SUB_CHUNK = 2 << 20
 _BANK_POOL_WORKERS_ENV = "FREETOKEN_BANK_POOL_WORKERS"
+# Bank-read backend (P7): io_uring keeps QD 32-64 reads in flight from one thread where a
+# blocking-preadv pool worker holds QD~1 (the fio 1xQD32x1M = 6.45 GB/s precedent);
+# FREETOKEN_FTW_IO_BACKEND=io_uring|auto|direct opts in, garbage -> default + warning.
+_IO_BACKEND_ENV = "FREETOKEN_FTW_IO_BACKEND"
+_IO_QD_ENV = "FREETOKEN_FTW_IO_QD"
+_IO_QD_DEFAULT = 32
+_IO_BACKENDS = ("io_uring", "auto", "direct")
 _ALPHA_NAMES = ("gate_up_alpha", "down_alpha")
 # Per-layer expert-bank entry name (converter streaming path, see checkpoint/convert.py):
 # each layer of a bank is its own FTW tensor instead of one flat [num_layers*E, ...] region.
@@ -388,21 +395,71 @@ def _bank_pool_workers(requested: int) -> int:
     return clamped
 
 
-def _run_shared_reads(reader: FTWReader, tasks, *, workers: int, chunk: int) -> None:
-    """Read every ``(dest, entry, on_done)`` task through ONE bounded shared pool.
+def _resolve_io_backend() -> str:
+    """P7 bank-read backend; FREETOKEN_FTW_IO_BACKEND=io_uring|auto|direct (unset -> direct).
+    ``auto`` is an alias of ``io_uring``: same ring attempt, same one-warning fallback."""
+    raw = os.environ.get(_IO_BACKEND_ENV, "").strip()
+    if not raw:
+        return "direct"
+    if raw in _IO_BACKENDS:
+        return raw
+    logger.warning(f"ignoring unknown {_IO_BACKEND_ENV}={raw!r}; using backend=direct")
+    return "direct"
 
-    The pool's queue holds all sub-read jobs at once (the deep queue), so its few
-    workers always have the next ``preadv`` ready; jobs are pulled in submission order,
-    which the caller submits layer-major, so the concurrent reads land on nearby FTW
-    regions instead of fanning a nested pool per task across every shard. ``on_done``
-    runs exactly once per task after its last job completes (the pin step) -- on a pool
-    thread for a read task, on the calling thread via the zero-byte shortcut below; a
-    failed job skips it, and the first error is re-raised after the pool drains."""
+
+def _io_qd() -> int:
+    """Queue depth of the io_uring ring; FREETOKEN_FTW_IO_QD overrides (1..128, clamped with warning)."""
+    raw = os.environ.get(_IO_QD_ENV, "").strip()
+    if not raw:
+        return _IO_QD_DEFAULT
+    try:
+        wanted = int(raw)
+    except ValueError:
+        logger.warning(f"ignoring non-integer {_IO_QD_ENV}={raw!r}; using qd={_IO_QD_DEFAULT}")
+        return _IO_QD_DEFAULT
+    clamped = max(1, min(128, wanted))
+    if clamped != wanted:  # 0/-3 -> 1, 999 -> 128: never clamp silently
+        logger.warning(f"{_IO_QD_ENV}={raw!r} out of range 1..128, clamped to qd={clamped}")
+    return clamped
+
+
+def _run_shared_reads(reader: FTWReader, tasks, *, workers: int, chunk: int) -> None:
+    """Read every ``(dest, entry, on_done)`` task through ONE bounded queue: the io_uring
+    ring when FREETOKEN_FTW_IO_BACKEND opts in (QD-deep, one thread), else the shared pool.
+
+    The queue holds all sub-read jobs at once (the deep queue), so the submitter always
+    has the next read ready; jobs are pulled in submission order, which the caller submits
+    layer-major, so the concurrent reads land on nearby FTW regions instead of fanning a
+    nested pool per task across every shard. ``on_done`` runs exactly once per task after
+    its last job completes (the pin step); a failed job skips it, and the first error is
+    re-raised after the queue drains."""
     reader._ensure_mode()
     planned = [(dest, reader._plan_jobs(dest, entry, chunk)) for dest, entry, _ in tasks]
     touch = reader._fd if reader._direct else reader._map
     for file in {j[0] for _, jobs in planned for j in jobs}:
         touch(file)
+
+    backend = _resolve_io_backend()
+    if backend != "direct" and reader._direct:
+        try:
+            from freetoken.checkpoint import ftw_uring
+        except ImportError as exc:
+            logger.warning(
+                f"{_IO_BACKEND_ENV}={backend}: io_uring module unavailable ({exc}); using pool fallback"
+            )
+        else:
+            try:
+                ftw_uring.run_ring_reads(reader, planned, tasks, workers=workers, chunk=chunk, qd=_io_qd())
+                return
+            except ftw_uring.IoUringUnavailable as exc:
+                logger.warning(
+                    f"{_IO_BACKEND_ENV}={backend}: io_uring unavailable ({exc}); using pool fallback"
+                )
+    elif backend != "direct":
+        logger.warning(
+            f"{_IO_BACKEND_ENV}={backend}: io_uring backend ignored under mmap fallback"
+        )
+
     logger.info(
         f"FTW bank reads: {len(tasks)} tasks, {sum(len(j) for _, j in planned)} jobs, "
         f"pool={workers}, sub-chunk={chunk // 1024} KiB, "
