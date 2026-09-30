@@ -56,11 +56,21 @@ Specification / Acceptance / Checklist.
   [P4-NOTES.md](boot-shutdown-io/P4-NOTES.md); P6 закоммичен (dd349a6:
   env-override `FREETOKEN_FLUSH_WRITERS` / `FREETOKEN_FLUSH_GROUP_BYTES`
   для железной A/B флаша: резолверы в точке использования, WARNING без
-  silent clamp) - [P6-NOTES.md](boot-shutdown-io/P6-NOTES.md); бриф P5
-  зафиксирован
-  (OPEN): семантика shutdown-кэпа (решение пользователя до старта); P7
-  бриф зафиксирован (OPEN, отдельная сессия): io_uring/libaio ctypes
-  глубокая очередь чтения FTW-банков.
+  silent clamp) - [P6-NOTES.md](boot-shutdown-io/P6-NOTES.md); P5 закрыт
+  2026-09-30 P5-минимумом: LRU-admission оставлен как есть (решение
+  пользователя; исторический wipe был вырождением бага cap-accounting,
+  закрыт ab3a117), добавлена overflow-наблюдаемость флаша (одна лог-строка
+  при cap-эвикциях; код закоммичен 94e4783) и принят железом
+  2026-09-30 (все гейты: over-cap стоп - флаш 2.91 ГБ/с, эвикции
+  84 records ~0 с, компакт-доминанта 81.3 с / 0.60 ГБ/с QD1;
+  LRU-симметрия HIT/MISS; wipe/truncate не случился; открытые
+  кандидаты - компакт: watermark no-op на офферах, сжатие файла,
+  темп 0.60 ГБ/с) -
+  [P5-NOTES.md](boot-shutdown-io/P5-NOTES.md); P7 бриф зафиксирован (OPEN,
+  отдельная сессия): io_uring/libaio ctypes глубокая очередь чтения
+  FTW-банков; из железной руки P5 зафиксированы брифы P8 (watermark no-op
+  + честный dead-учёт) и P9 (реальное сжатие файла компактом + темп)
+  (OPEN, компакт-рычаги).
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
