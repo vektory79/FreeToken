@@ -3,7 +3,7 @@ title: "Старт и остановка ft serve: измеренные узки
 date: 2026-09-27
 hardware: "RTX 5090 32GB; NVMe Samsung 990 EVO Plus 2TB (/media/ai = nvme0n1); i7-14700KF, 28 лог. ядер"
 branch-commits: "vektory79 - якоря и измерения P1/P2 на 655da16; P1 реализован на 94d5e4a; P3 и фиксы железных приёмок на de26ba1/ab3a117; P4 реализован CPU-волной на 5f9abcc (незакоммичено); фиксы целить в ту же ветку"
-бриф P7 зафиксирован (io_uring/libaio ctypes глубокая очередь чтения FTW-банков, OPEN, отдельная сессия); P4 CPU-волна завершена (STOP GATE READY, незакоммичено @ 5f9abcc), железная рука отложена - [P4-NOTES.md](P4-NOTES.md)"
+бриф P7 зафиксирован (io_uring/libaio ctypes глубокая очередь чтения FTW-банков, OPEN, отдельная сессия); P4 CPU-волна завершена (STOP GATE READY, незакоммичено @ 5f9abcc), железная рука отложена - [P4-NOTES.md](P4-NOTES.md); P6 CPU-волна завершена (env-override рукояток флаша, незакоммичено @ fc3396f) - [P6-NOTES.md](P6-NOTES.md)"
 tags: [boot, shutdown, ftw, banks, session-tier, replay, flush, nvme, io, brief]
 ---
 
@@ -361,6 +361,18 @@ CPU-тесты семантики (fails-before: текущий код стир�
 
 **Приёмка.** Fails-before тест (env выставлен -> значения применены в пути
 флаша); батарея зелёная; один PR; идёт ПЕРЕД железной рукой P4.
+
+**Ход волны (CPU, 2026-09-30).** Реализовано, НЕ закоммичено (session_tier.py
++ тесты, vektory79 @ fc3396f): резолверы `_flush_writers`/
+`_flush_group_bytes` читают env в точке использования (unset -> запрошенная
+константа, monkeypatch-тесты работают); мусор/ниже минимума (writers < 1,
+group_bytes < 1 МиБ) -> дефолт + WARNING через init_logger, никакого silent
+clamp; whitespace-only = unset; резолв ОДИН раз на флаш в `flush_live` и
+передача вниз параметром (TP ревью: иначе до G+1 одинаковых warning и разъезд
+залогированной/применённой конфигурации); одна строка "session tier: flush
+pipeline: writers=N group_bytes=N" на флаш-фазу. Тесты 79/79 + 70/70, 6
+новых, fails-before вербатим. Механика и тест-уроки - [P6-NOTES.md](P6-NOTES.md).
+Железная рука P4 - потребитель рукояток.
 
 # Задача P7: io_uring/libaio глубокая очередь чтения FTW-банков (ctypes)
 

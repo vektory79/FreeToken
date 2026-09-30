@@ -3,7 +3,7 @@ title: "Env-knob гигиена: изоляция переменных окру�
 date: 2026-09-29
 hardware: "CPU-прогоны pytest (без VRAM), метод не зависит от железа"
 commits: "методика выработана в CPU-волне P1 boot-shutdown-io (vektory79 @ 23b18a4, правки анкоммичены; триаж ревью волны)"
-status: "validated (волна P1: delenv-фикс + clamp-warning + разовый logger.info конфига пула; test_ftw_bank_pool 10/10)"
+status: "validated (волна P1: delenv-фикс + clamp-warning + разовый logger.info конфига пула; test_ftw_bank_pool 10/10; расширено волной P6 boot-shutdown-io: резолвер env в точке использования, один резолв на операцию)"
 tags: [pytest, env-var, monkeypatch, delenv, autouse, configuration, logging, ab-methodology]
 ---
 
@@ -43,6 +43,33 @@ tags: [pytest, env-var, monkeypatch, delenv, autouse, configuration, logging, ab
    call-site один);
 3. если операция может уйти в другой бэкенд (direct/mmap) - бэкенд входит
    в ту же строку конфига.
+
+## Паттерн P6: резолвер env в точке использования
+
+Волна P6 boot-shutdown-io (env-override `FREETOKEN_FLUSH_WRITERS` /
+`FREETOKEN_FLUSH_GROUP_BYTES` для железной A/B флаша L2,
+[../cases/boot-shutdown-io/P6-NOTES.md](../cases/boot-shutdown-io/P6-NOTES.md))
+дополняет оба правила:
+
+1. чтение env - НЕ при инициализации модуля, а в точке использования через
+   резолвер с сигнатурой `res(requested)`: unset -> вернуть `requested`
+   (патченную в тесте модульную константу) - monkeypatch-тесты продолжают
+   работать без правок; set -> валидация и применённое значение;
+2. валидация с полом (writers >= 1, group_bytes >= 1 МиБ): мусор или ниже
+   пола -> дефолт + WARNING, никакого silent clamp (правило 2 выше);
+   whitespace-only значение = unset (молча, задокументировать в docstring);
+3. резолв ОДИН раз на операцию и передача вниз параметром. Ревью волны
+   поймало TP: два независимых резолва на флаш давали до G+1 одинаковых
+   warning при мусорном env и риск разъезда залогированной конфиг-строки
+   с фактически применённой;
+4. строка эффективного конфига - одна на операцию с непустым результатом
+   ("session tier: flush pipeline: writers=N group_bytes=N"), а не на
+   каждую подоперацию (группу) - иначе спам при G групп на флаш.
+
+Детерминированные env-тесты без таймеров: применение writers перехватом
+ThreadPoolExecutor (assert на `max_workers`), применение group_bytes - по
+фактической группировке сегментов (env=1 МиБ, два payload по 1 МиБ ->
+ровно 2 группы).
 
 ## Как проверить соблюдение
 

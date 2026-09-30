@@ -50,10 +50,15 @@ Specification / Acceptance / Checklist.
   [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4 CPU-волна завершена
   (zero-copy pwritev из L1-пула + конвейер групп; STOP GATE READY,
   незакоммичено @ 5f9abcc, железная рука отложена - VRAM и пре-реквизит
-  env-override P6) - [P4-NOTES.md](boot-shutdown-io/P4-NOTES.md); P4-P6
-  брифы зафиксированы (OPEN): продюсер флаша, семантика shutdown-кэпа,
-  env-override констант флаша; P7 бриф зафиксирован (OPEN, отдельная
-  сессия): io_uring/libaio ctypes глубокая очередь чтения FTW-банков.
+  env-override P6) - [P4-NOTES.md](boot-shutdown-io/P4-NOTES.md); P6
+  CPU-волна завершена (env-override `FREETOKEN_FLUSH_WRITERS` /
+  `FREETOKEN_FLUSH_GROUP_BYTES` для железной A/B флаша: резолверы в точке
+  использования, WARNING без silent clamp, одна строка конфига на флаш;
+  незакоммичено @ fc3396f, железная рука - вместе с P4) -
+  [P6-NOTES.md](boot-shutdown-io/P6-NOTES.md); бриф P5 зафиксирован
+  (OPEN): семантика shutdown-кэпа (решение пользователя до старта); P7
+  бриф зафиксирован (OPEN, отдельная сессия): io_uring/libaio ctypes
+  глубокая очередь чтения FTW-банков.
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
