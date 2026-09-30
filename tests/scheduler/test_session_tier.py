@@ -1328,9 +1328,9 @@ def test_flush_live_parallel_write_bytes_identical(tmp_path):
 
 
 def test_flush_live_writes_segments_in_parallel(tmp_path, monkeypatch):
-    """P3 fails-before: the flush path must overlap segment writes - concurrent os.pwrite
+    """P3 fails-before: the flush path must overlap segment writes - concurrent os.pwritev
     entries prove >1 writer; the old sequential os.write append never overlaps (and never
-    calls pwrite at all)."""
+    calls pwritev at all)."""
     import freetoken.scheduler.session_tier as st_mod
 
     d = str(tmp_path / "tier")
@@ -1340,11 +1340,11 @@ def test_flush_live_writes_segments_in_parallel(tmp_path, monkeypatch):
         assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
     assert len([s for s in store._segments.values() if s.in_l1]) == 4
 
-    real_pwrite = os.pwrite
+    real_pwritev = os.pwritev
     state = {"entered": 0, "max": 0}
     lock = threading.Lock()
 
-    def overlap_probe(fd, buf, offset):
+    def overlap_probe(fd, buffers, offset):
         with lock:
             state["entered"] += 1
             state["max"] = max(state["max"], state["entered"])
@@ -1352,12 +1352,12 @@ def test_flush_live_writes_segments_in_parallel(tmp_path, monkeypatch):
         while state["entered"] < 2 and time.time() < deadline:
             time.sleep(0.001)                   # bounded wait: never hangs the test
         try:
-            return real_pwrite(fd, buf, offset)
+            return real_pwritev(fd, buffers, offset)
         finally:
             with lock:
                 state["entered"] -= 1
 
-    monkeypatch.setattr(st_mod.os, "pwrite", overlap_probe)
+    monkeypatch.setattr(st_mod.os, "pwritev", overlap_probe)
     assert store.flush_live() == 4
     assert state["max"] >= 2                    # fails-before: sequential path gives 0/1
 
@@ -1647,7 +1647,7 @@ def test_crc32c_records_take_p2_fast_path(tmp_path):
 
 def test_flush_live_survives_cap_eviction_mid_iteration(tmp_path, monkeypatch):
     """A1 fails-before: flush_live iterated self._segments.values() directly while a
-    mid-loop cap eviction (_flush_group -> _reserve_blob_span -> _evict_oldest_l2 ->
+    mid-loop cap eviction (_flush_groups -> _reserve_blob_span -> _evict_oldest_l2 ->
     _discard) deleted from the same dict -> RuntimeError. Port of boot-shutdown-io/
     p3-plan/repro_flushlive_dict.py: with the shrunk cap, reserving the first flush
     segment evicts BOTH runtime-demoted L2 victims mid-iteration."""
@@ -1691,16 +1691,16 @@ def test_partial_pwrite_failure_keeps_segment_in_l1(tmp_path, monkeypatch):
         assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
         chains.append((f"p{i}".encode(), keys, pages))
 
-    real_pwrite = os.pwrite
+    real_pwritev = os.pwritev
     calls = {"n": 0}
 
-    def flaky(fd, buf, offset):
+    def flaky(fd, buffers, offset):
         calls["n"] += 1
         if calls["n"] == 1:                   # exactly one group segment fails
             raise OSError(5, "simulated pwrite failure")
-        return real_pwrite(fd, buf, offset)
+        return real_pwritev(fd, buffers, offset)
 
-    monkeypatch.setattr(st_mod.os, "pwrite", flaky)
+    monkeypatch.setattr(st_mod.os, "pwritev", flaky)
     assert store.flush_live() == 3            # the failed one is not counted
     monkeypatch.undo()
     assert store._ssd_used == 3 * 4096        # no accounting for the aborted span
@@ -1732,16 +1732,16 @@ def test_failed_write_hole_skipped_by_next_group_no_dropped(tmp_path, monkeypatc
         assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
         chains.append((f"p{i}".encode(), keys, pages))
 
-    real_pwrite = os.pwrite
+    real_pwritev = os.pwritev
     calls = {"n": 0}
 
-    def flaky(fd, buf, offset):
+    def flaky(fd, buffers, offset):
         calls["n"] += 1
         if calls["n"] == 1:                   # group 1's single segment fails
             raise OSError(5, "simulated pwrite failure")
-        return real_pwrite(fd, buf, offset)
+        return real_pwritev(fd, buffers, offset)
 
-    monkeypatch.setattr(st_mod.os, "pwrite", flaky)
+    monkeypatch.setattr(st_mod.os, "pwritev", flaky)
     assert store.flush_live() == 2
     monkeypatch.undo()
 
@@ -1776,14 +1776,14 @@ def test_marker_valid_after_failed_flush_boot_fast_path(tmp_path, monkeypatch):
         keys_by_name[f"p{i}".encode()] = keys
 
     victim_page0 = _page_data((1, 0))         # p1's first page: fail its writes forever
-    real_pwrite = os.pwrite
+    real_pwritev = os.pwritev
 
-    def flaky(fd, buf, offset):
-        if bytes(buf[:PAGE]) == victim_page0:
+    def flaky(fd, buffers, offset):
+        if bytes(buffers[0][:PAGE]) == victim_page0:
             raise OSError(5, "simulated pwrite failure")
-        return real_pwrite(fd, buf, offset)
+        return real_pwritev(fd, buffers, offset)
 
-    monkeypatch.setattr(st_mod.os, "pwrite", flaky)
+    monkeypatch.setattr(st_mod.os, "pwritev", flaky)
     assert store.flush_live() == 2            # p1 fails, p2/p3 journal
     _graceful_stop(store)                     # p1's retry fails too; marker written
     monkeypatch.undo()
@@ -1864,3 +1864,385 @@ def test_group_reserve_respects_ssd_cap(tmp_path):
         hit = boot.probe(keys)
         assert hit is not None and hit[0] == 3
         assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+# ------------------------------------------------------------ flush producer pipeline (P4)
+
+
+def test_flush_pipeline_builds_next_group_during_previous_write(tmp_path, monkeypatch):
+    """P4 fails-before: the flush is a pipeline - the build of group N+1 (span reserves,
+    zero-copy iovecs, payload crc off the L1 pool) completes while group N is still
+    being written. Group 0's write blocks until group 1's build event fires; a
+    sequential flush can never satisfy that wait (the bounded wait raises). The event
+    order is deterministic - the timeout is only a deadlock guard, not a timing
+    assertion."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+
+    real_build = SessionTierStore._build_group_stage
+    real_write = SessionTierStore._write_group
+    lock = threading.Lock()
+    events: list[tuple[str, int]] = []
+    idx = {"build": 0, "write": 0}
+    built_next = threading.Event()
+
+    def build(self, group, pending, index=0):
+        r = real_build(self, group, pending, index)
+        with lock:
+            i = idx["build"]
+            idx["build"] += 1
+            events.append(("build", i))
+        if i == 1:
+            built_next.set()
+        return r
+
+    def write(self, stage, pending):
+        with lock:
+            i = idx["write"]
+            idx["write"] += 1
+            events.append(("write_start", i))
+        if i == 0 and not built_next.wait(timeout=10.0):
+            raise AssertionError("pipeline: group 1 was not built during group 0's write")
+        r = real_write(self, stage, pending)
+        with lock:
+            events.append(("write_end", i))
+        return r
+
+    monkeypatch.setattr(SessionTierStore, "_build_group_stage", build)
+    monkeypatch.setattr(SessionTierStore, "_write_group", write)
+    assert store.flush_live() == 3
+    monkeypatch.undo()
+    b1 = events.index(("build", 1))
+    assert b1 < events.index(("write_end", 0))   # overlap happened
+    assert events.index(("write_start", 1)) > b1  # ...and group 1 writes after its build
+
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 3
+
+
+def test_flush_group_build_failure_aborts_group_cleanly(tmp_path, monkeypatch):
+    """P4: a failure during group BUILD (lifting iovecs / crc off the L1 pool) aborts
+    the whole group with no journal side effect: the segments keep their L1 residency
+    with clean blob fields, the builder's refs pins are released, the pending volume
+    returns to the cap budget, and a retry after the transient failure converges to a
+    byte-exact restore."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+
+    real_iovecs = SessionTierStore._seg_iovecs
+    victim = store._by_path(b"p1").seg_id
+
+    def flaky(self, seg, padded):
+        if seg.seg_id == victim:
+            raise OSError(5, "simulated pool page read failure")
+        return real_iovecs(self, seg, padded)
+
+    monkeypatch.setattr(SessionTierStore, "_seg_iovecs", flaky)
+    with _tier_log_capture() as cap:
+        assert store.flush_live() == 2
+    monkeypatch.undo()
+    assert any("flush group #0 build failed at seg" in m and "group aborted" in m
+               for m in cap.messages)   # B3: operator sees which group/segment failed
+
+    failed = [s for s in store._segments.values() if s.in_l1]
+    assert len(failed) == 1 and failed[0].seg_id == victim
+    assert failed[0].blob == "" and failed[0].l2_off == -1
+    assert failed[0].refs == 0                 # the builder's refs pin was released
+    assert store._ssd_used == 2 * 4096         # no accounting for the aborted group
+    recs, whole = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert whole and len(recs) == 2            # only the built+written groups journaled
+
+    assert store.flush_live() == 1             # retry after the transient failure
+    assert store._ssd_used == 3 * 4096
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 3
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_pwritev_short_writes_complete_record(tmp_path, monkeypatch):
+    """P4: the pwritev loop must drive short writes to completion - the blob record is
+    byte-exact even when every call reports only half the bytes written (the rewritten
+    overlap converges to the same bytes)."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    keys, pages = _chain([(1, 0), (1, 1), (1, 2)])
+    assert store.offer(b"p1", 3, pages, _snap("1"))
+    gold = _gold_payload(store, store._by_path(b"p1"))
+
+    real_pwritev = os.pwritev
+
+    def short(fd, buffers, offset):
+        n = real_pwritev(fd, buffers, offset)
+        return max(1, n // 2) if n > 1 else n
+
+    monkeypatch.setattr(st_mod.os, "pwritev", short)
+    assert store.flush_live() == 1
+    monkeypatch.undo()
+
+    with open(os.path.join(d, "blob.bin"), "rb") as f:
+        blob = f.read()
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 1
+    seg = boot._by_path(b"p1")
+    assert blob[seg.l2_off:seg.l2_off + len(gold)] == gold
+    hit = boot.probe(keys)
+    assert hit is not None and hit[0] == 3
+    got_p, got_s = boot.restore(hit[1])
+    assert got_p == [data for _, data in pages] and got_s == [_snap("1")]
+
+
+# ----------------------------------------------------- P4 TP fixes: pipeline hardening
+
+
+def test_flush_drain_retry_admits_next_group_after_previous_settles(tmp_path, monkeypatch):
+    """P4 drain-retry: a cap refusal caused SOLELY by the previous group's still-
+    unjournaled pending volume is retried after the drain, reproducing the P3 sacrifice
+    semantics (a later group sacrifices an earlier journaled segment). Deterministic:
+    group 0's write is blocked until group 1's first reserve attempt is observed
+    refusing on pending>0, so the refusal cannot race away; a sequential/no-drain flush
+    leaves group 1 refused -> count 1 -> fail."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    assert len([s for s in store._segments.values() if s.in_l2]) == 2   # s1, s2 runtime
+    store.ssd_bytes = 4096          # s4's reserve must wait for s3's pending volume
+
+    real_reserve = SessionTierStore._reserve_blob_span
+    real_write = SessionTierStore._write_group
+    lock = threading.Lock()
+    reserve_log: list[tuple[int, int, object]] = []
+    refused = threading.Event()
+
+    def reserve(self, need, pending=0):
+        r = real_reserve(self, need, pending)
+        with lock:
+            reserve_log.append((need, pending, r))
+        if r is None and pending > 0:
+            refused.set()
+        return r
+
+    def write(self, stage, pending):
+        if not refused.wait(timeout=10.0):
+            raise AssertionError("group 1's reserve never refused on pending")
+        return real_write(self, stage, pending)
+
+    monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
+    monkeypatch.setattr(SessionTierStore, "_write_group", write)
+    assert store.flush_live() == 2
+    monkeypatch.undo()
+
+    with lock:
+        log = list(reserve_log)
+    assert any(need == 896 and pend > 0 and r is None for need, pend, r in log)
+    assert any(need == 896 and pend == 0 and r is not None for need, pend, r in log)
+    assert not [s for s in store._segments.values() if s.seg_id == 3]  # s3 sacrificed
+    assert [s for s in store._segments.values() if s.seg_id == 4][0].in_l2
+    boot = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 4   # s1/s2/s3 journal records resurrect (holes)
+    keys4, pages4 = _chain([(4, 0), (4, 1), (4, 2)])
+    hit = boot.probe(keys4)
+    assert hit is not None and hit[0] == 3
+    assert boot.restore(hit[1])[0] == [data for _, data in pages4]
+
+
+def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monkeypatch):
+    """Timeout fallback honesty: a wait_drained timeout logs a warning (what was waited
+    for, how much pending is left) and retries the cap check with pending=0 - which may
+    transiently over-commit the ssd cap by up to one group volume (documented in
+    _PendingVolume; shutdown-flush only)."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    store.ssd_bytes = 4096
+
+    real_write = SessionTierStore._write_group
+    refused = threading.Event()
+
+    def write(self, stage, pending):
+        if not refused.wait(timeout=10.0):
+            raise AssertionError("group 1's reserve never refused on pending")
+        return real_write(self, stage, pending)
+
+    def fake_wait(self, timeout):
+        return False                       # simulate the 60 s timeout elapsing
+
+    monkeypatch.setattr(st_mod._PendingVolume, "wait_drained", fake_wait)
+
+    real_reserve = SessionTierStore._reserve_blob_span
+
+    def reserve(self, need, pending=0):
+        r = real_reserve(self, need, pending)
+        if r is None and pending > 0:
+            refused.set()
+        return r
+
+    monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
+    monkeypatch.setattr(SessionTierStore, "_write_group", write)
+    with _tier_log_capture() as cap:
+        assert store.flush_live() == 2
+    monkeypatch.undo()
+    assert any("waited 60 s" in m and "still unjournaled" in m for m in cap.messages)
+    assert store._ssd_used == 2 * 4096    # s3 + s4 both live: the documented over-commit
+
+
+def test_flush_pipeline_baseexception_releases_built_stages(tmp_path, monkeypatch):
+    """A SystemExit/KI mid-pipeline must not leak the built-but-unwritten stages: refs
+    pins and pending volume are released for the stage the write never ran on AND for
+    every built-but-unconsumed future, and the exception propagates unchanged - so a
+    retry flush_live loses no segments."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+
+    def boom(self, stage, pending):
+        raise SystemExit("simulated exit mid-pipeline")
+
+    monkeypatch.setattr(SessionTierStore, "_write_group", boom)
+    with pytest.raises(SystemExit):
+        store.flush_live()
+    monkeypatch.undo()
+
+    assert (tmp_path / "tier" / "journal.log").read_bytes() == b""   # nothing journaled
+    assert store._ssd_used == 0
+    assert all(s.refs == 0 for s in store._segments.values())        # no leaked pins
+    assert all(s.blob == "" and s.l2_off == -1 for s in store._segments.values())
+    assert store.flush_live() == 3        # retry loses no segments
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 3
+
+
+def test_account_lock_stress_no_lost_updates(tmp_path):
+    """The _account_lock guards the two concurrent _ssd_used/_dead_bytes mutation sites
+    (the writer thread's journal accounting vs the builder thread's cap-eviction
+    discard): M interleaved real _journal_and_account and real _discard calls must
+    converge exactly - zero lost updates."""
+    from freetoken.scheduler.session_tier import _Segment
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=4 << 20, d=d))    # L2-only runtime offers
+    m = 300
+    for i in range(m):
+        keys, pages = _chain([(i, 0)])
+        assert store.offer(f"p{i}".encode(), 1, pages)
+    l2 = [s for s in list(store._segments.values()) if s.in_l2]
+    assert len(l2) == m
+    base_ssd, base_dead = store._ssd_used, store._dead_bytes
+
+    def journal_side():
+        for i in range(m):
+            seg = _Segment(seg_id=-(i + 1), path_key=bytes([i % 256]) * 8,
+                           boundary_len=1, page_keys=[], page_lens=[], snap_lens=[])
+            assert store._journal_and_account(seg, 0, 0, 4096, 0)
+
+    def discard_side():
+        for seg in l2:
+            store._discard(seg)
+
+    t1 = threading.Thread(target=journal_side)
+    t2 = threading.Thread(target=discard_side)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert store._ssd_used == base_ssd + m * 4096 - m * 4096   # exact: nothing lost
+    assert store._dead_bytes == base_dead + m * 4096
+    # Deterministic binding: BOTH real mutation sites must be under the lock (the
+    # stress above detects lost updates only probabilistically).
+    import inspect
+    src = (inspect.getsource(SessionTierStore._journal_and_account)
+           + inspect.getsource(SessionTierStore._discard))
+    assert src.count("_account_lock") >= 2
+
+
+def test_pwritev_iov_chunking_byte_exact(tmp_path, monkeypatch):
+    """The _pwritev_span cursor must split a record across _PWRITEV_MAX_IOV-sized
+    pwritev calls without losing or duplicating a byte: a many-page segment written
+    with an iovec cap of 2 lands byte-exact in the blob and restores byte-exactly."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_PWRITEV_MAX_IOV", 2)
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    keys, pages = _chain([(1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5)])
+    assert store.offer(b"p1", 6, pages, _snap("1"))
+    gold = _gold_payload(store, store._by_path(b"p1"))
+
+    assert store.flush_live() == 1
+    with open(os.path.join(d, "blob.bin"), "rb") as f:
+        blob = f.read()
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 1
+    seg = boot._by_path(b"p1")
+    assert blob[seg.l2_off:seg.l2_off + len(gold)] == gold
+    hit = boot.probe(keys)
+    assert hit is not None and hit[0] == 6
+    got_p, got_s = boot.restore(hit[1])
+    assert got_p == [data for _, data in pages] and got_s == [_snap("1")]
+
+
+def test_flush_shared_dedup_page_across_groups_byte_exact(tmp_path, monkeypatch):
+    """Two segments sharing deduped L1 pages (equal prefix) flushed in DIFFERENT groups:
+    the zero-copy iovecs of both records read the same pool regions, the shared page is
+    released only after the second segment's group settles, and both records land
+    byte-exact with boot-time probe/restore intact for both segments."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    keys_a, pages_a = _chain([(1, 0), (1, 1), (1, 2)])
+    keys_b, pages_b = _chain([(1, 0), (1, 1), (7, 2)])     # shares the first two pages
+    assert store.offer(b"pa", 3, pages_a, _snap("a"))
+    assert store.offer(b"pb", 3, pages_b, _snap("b"))
+    shared = keys_a[:2]
+    assert store._pages[shared[0]].refs == 2 and store._pages[shared[1]].refs == 2
+    gold_a = _gold_payload(store, store._by_path(b"pa"))
+    gold_b = _gold_payload(store, store._by_path(b"pb"))
+
+    assert store.flush_live() == 2
+    assert not store._pages                    # shared pages freed after both groups
+    assert store._l1_used == 0
+    with open(os.path.join(d, "blob.bin"), "rb") as f:
+        blob = f.read()
+    boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
+    assert boot.replay_journal() == 2
+    for name, keys, pages, gold in ((b"pa", keys_a, pages_a, gold_a),
+                                    (b"pb", keys_b, pages_b, gold_b)):
+        seg = boot._by_path(name)
+        assert blob[seg.l2_off:seg.l2_off + len(gold)] == gold
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 3
+        got_p, got_s = boot.restore(hit[1])
+        assert got_p == [data for _, data in pages]
+        assert got_s == [_snap(name.decode()[1])]

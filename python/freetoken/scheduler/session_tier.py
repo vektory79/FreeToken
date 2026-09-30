@@ -8,7 +8,9 @@ record), so a SIGKILL mid-append can only truncate the tail, never corrupt accep
 records. The shutdown flush writes whole groups in parallel pwrite bursts with ONE
 group fdatasync before the group's journal records: the crash loss window widens
 from one segment to one group (replay drops the unjournaled blob tail), corruption
-is still impossible. Journal payload checksums are versioned per record (crc_alg):
+is still impossible. The flush is a producer/disk pipeline: records go out as
+zero-copy pwritev bursts from the L1 pool mmap and group N+1 is built while group N
+is written. Journal payload checksums are versioned per record (crc_alg):
 new records carry hardware CRC32C, old catalogs' zlib-crc32 records replay unchanged.
 """
 from __future__ import annotations
@@ -24,7 +26,7 @@ import threading
 import time
 import zlib
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from queue import SimpleQueue
 from typing import Protocol, Sequence
@@ -50,12 +52,19 @@ _COMPACT_FLOOR_BYTES = 256 << 20
 # staging tickets, each holding one mlocked host buffer with the segment bytes until
 # adopt/abandon. The scheduler's idle hook (via the cache manager) is the only caller.
 _MAX_RESTORE_TICKETS = 2
-# P3 flush write path (flush_live only): segments are batched into volume groups -
-# within a group the payloads go out as parallel pwrite bursts (the blob fd has no
-# O_APPEND) and ONE fdatasync makes the whole group durable before its journal records.
-# Runtime demotions (offer/evict pressure) stay single-segment in _write_blob.
+# P3/P4 flush write path (flush_live only): segments are batched into volume groups -
+# within a group the records go out as parallel pwritev bursts straight from the L1
+# pool mmap (zero-copy, no payload assembly; the blob fd has no O_APPEND) and ONE
+# fdatasync makes the whole group durable before its journal records. Groups are
+# pipelined: group N+1 is built (span reserves + iovecs + payload crc) while group N
+# is being written. Runtime demotions (offer/evict pressure) stay single-segment in
+# _write_blob.
 _FLUSH_GROUP_BYTES = 1 << 30
 _FLUSH_WRITERS = 8
+# pwritev iovec cap per call (Linux IOV_MAX is 1024) and the shared zero padding tail
+# source for the reserved-but-unwritten span remainder.
+_PWRITEV_MAX_IOV = 512
+_ZERO_BLK = bytes(_BLK)
 # Guards the cumulative mlock accounting (_Pool._locked_total): it is mutated from the
 # scheduler thread (pool construction, staging alloc, free_block) AND the reader thread
 # (staging close at ticket finalize).
@@ -87,6 +96,67 @@ def _match_payload_crc(data, alg: str | None, crc: int) -> bool:
     if alg is None or alg == "zlib":
         return zlib.crc32(data) == crc
     return False
+
+
+def _calc_payload_crc_iovecs(bufs, need: int, alg: str) -> int:
+    """Chained checksum over a record's iovec list, covering exactly `need` payload
+    bytes - the zero padding tail is excluded, matching the assembled-path crc."""
+    if alg != _CRC32C_ALG:
+        data = bytearray()            # legacy algorithms are never produced today
+        left = need
+        for b in bufs:
+            if left <= 0:
+                break
+            take = min(left, len(b))
+            data += b[:take]
+            left -= take
+        return zlib.crc32(bytes(data))
+    crc = 0
+    left = need
+    for b in bufs:
+        if left <= 0:
+            break
+        take = min(left, len(b))
+        crc = crc32c.crc32c(b[:take], crc)   # chained; GIL released above 32 KiB
+        left -= take
+    return crc
+
+
+class _PendingVolume:
+    """Reserved-but-unjournaled blob volume shared by the flush pipeline threads: the
+    builder adds each reserved span before the cap check of the next one, the writer
+    releases it once the group settles (journaled into _ssd_used, or aborted). A stale
+    high read is conservative for the cap check, so plain condition-protected
+    arithmetic suffices - the release order does not need to match the add order."""
+
+    __slots__ = ("_cond", "_value")
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._value = 0
+
+    def add(self, n: int) -> None:
+        with self._cond:
+            self._value += n
+
+    def value(self) -> int:
+        with self._cond:
+            return self._value
+
+    def release(self, n: int) -> None:
+        with self._cond:
+            self._value -= n
+            self._cond.notify_all()
+
+    def wait_drained(self, timeout: float) -> bool:
+        """Block until every in-flight group has settled. Only safe on the builder
+        thread BEFORE it has made any reservation of its own (otherwise its own pending
+        volume could never drain - deadlock). On a timeout the caller falls back to a
+        cap check with pending=0: that may transiently over-commit the ssd cap by up to
+        one group volume. Acceptable because the flush pipeline runs only on the
+        shutdown path (a bounded, one-shot drain), and the caller logs the timeout."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self._value == 0, timeout)
 
 
 class SnapshotSource(Protocol):
@@ -138,6 +208,20 @@ class _Segment:
     @property
     def in_l2(self) -> bool:
         return self.l2_off >= 0
+
+
+@dataclass
+class _GroupEntry:
+    """One built flush-group record: reserved span plus its zero-copy iovec list and
+    payload crc (both lifted off the L1 pool by the builder thread)."""
+
+    seg: _Segment
+    off: int
+    need: int
+    padded: int
+    bufs: list = field(default_factory=list)
+    crc: int = 0
+    released: bool = False          # pipeline-claims guard, see _release_stage
 
 
 class _Pool:
@@ -277,6 +361,11 @@ class SessionTierStore:
         # Lock exists even when inert: the offer() wrapper takes it around the rejection
         # counter before any early return.
         self._lock = threading.RLock()
+        # Guards the _ssd_used / _dead_bytes arithmetic against the flush pipeline: the
+        # builder thread evicts L2 under cap pressure while the writer thread journals
+        # the previous group (both mutate _ssd_used; int += is not atomic). A leaf lock:
+        # never acquired around another lock.
+        self._account_lock = threading.Lock()
         # Prefetch staging (phase 2): present even when inert (every hook early-returns).
         self._tickets: dict[int, RestoreTicket] = {}
         self._work: SimpleQueue = SimpleQueue()
@@ -604,6 +693,11 @@ class SessionTierStore:
         counting it keeps the HEAD strict cap at reserve granularity, so a group can
         never reserve past the ssd cap by up to a group volume."""
         padded = (need + _BLK - 1) // _BLK * _BLK
+        # No _account_lock on this snapshot: it can only be stale HIGH. A concurrent
+        # journal moves a span from pending into _ssd_used while pending still counts
+        # it (the sum over-counts until the group settles), and a concurrent eviction
+        # only lowers _ssd_used - so the check stays conservative unsynchronized. The
+        # lock also must NOT span the evictor below: _discard takes it (non-reentrant).
         if self.ssd_bytes and self._ssd_used + pending + padded > self.ssd_bytes:
             self._evict_oldest_l2(need, pending)
             if self.ssd_bytes and self._ssd_used + pending + padded > self.ssd_bytes:
@@ -632,7 +726,8 @@ class SessionTierStore:
         seg.blob, seg.l2_off, seg.l2_n = _BLOB_NAME, off, need
         if not self._journal_append(seg, off, need, crc, crc_alg):
             return False
-        self._ssd_used += padded
+        with self._account_lock:      # racing the builder thread's cap evictions
+            self._ssd_used += padded
         return True
 
     def _write_blob(self, seg: _Segment, payload: bytes | None) -> bool:
@@ -640,7 +735,7 @@ class SessionTierStore:
         reserved offset, ONE fdatasync, then the journal record - the durable order is
         what makes replay crash-safe. Every failure path returns False: no journal entry,
         no capacity accounting. Single-segment path (runtime offer/evict pressure); the
-        shutdown flush batches segments through _flush_group instead."""
+        shutdown flush batches segments through _write_group instead."""
         need = sum(seg.page_lens) + sum(seg.snap_lens)
         r = self._reserve_blob_span(need)
         if r is None:
@@ -657,49 +752,137 @@ class SessionTierStore:
         return self._journal_and_account(seg, off, need, padded,
                                          _calc_payload_crc(view[:need], _CRC32C_ALG))
 
-    def _flush_group(self, segs: list[_Segment]) -> int:
-        """P3 shutdown-flush path: reserve every segment's span up-front, build the
-        payloads, write them as parallel pwrite bursts at the reserved offsets, ONE
-        fdatasync for the whole group, then the group's journal records. Durable-order
-        invariant unchanged - a journal record still appears only after the blob bytes
-        of its group are durable - but the crash loss window widens from one segment to
-        the whole group: a SIGKILL between the fdatasync and the journal appends leaves
-        the group's bytes durable and unjournaled, and replay drops that blob tail
-        (segments stay in L1 in a process that survives). Returns the demoted count."""
-        if self._blob_fd < 0:
-            return 0
-        stage: list[tuple[_Segment, int, int, int]] = []
-        pending = 0                              # reserved-but-unjournaled group volume
-        for seg in segs:
-            need = sum(seg.page_lens) + sum(seg.snap_lens)
-            r = self._reserve_blob_span(need, pending)
-            if r is None:
-                logger.warning("session tier: L2 cap reached, cannot demote seg %d",
-                               seg.seg_id)
+    def _seg_iovecs(self, seg: _Segment, padded: int) -> list:
+        """Zero-copy record layout: payload iovecs straight from the L1 pool mmap (pages,
+        then snapshots) plus the zero padding tail. The pool regions stay stable until
+        the write completes because flush_live holds the store lock - no offer/evict
+        mutation can touch them mid-flight."""
+        base = memoryview(self._pool.mm)
+        bufs = [base[off:off + ln]
+                for off, ln in zip(seg.l1_page_offs, seg.page_lens)]
+        bufs.extend(base[off:off + ln]
+                    for off, ln in zip(seg.l1_snap_offs, seg.snap_lens) if ln)
+        pad = padded - sum(seg.page_lens) - sum(seg.snap_lens)
+        if pad > 0:
+            bufs.append(memoryview(_ZERO_BLK)[:pad])
+        return bufs
+
+    def _pwritev_span(self, off: int, bufs: list, total: int) -> None:
+        """pwritev a buffer list at an explicit offset - the pwritev analogue of
+        _pwrite_span: loops over short writes and chunks the iovec list to
+        _PWRITEV_MAX_IOV. A failed or short write leaves the reserved span as a hole:
+        the reservation watermark is already past it and no journal record will ever
+        point into it."""
+        pos = 0
+        i, skip = 0, 0                     # cursor: bufs[i], `skip` bytes consumed in it
+        while pos < total:
+            iov, room = [], _PWRITEV_MAX_IOV
+            j, jskip = i, skip
+            while j < len(bufs) and room:
+                n = len(bufs[j]) - jskip
+                if n > 0:
+                    iov.append(bufs[j][jskip:] if jskip else bufs[j])
+                    room -= 1
+                j += 1
+                jskip = 0
+            if not iov:
+                raise OSError("short blob write")
+            n = os.pwritev(self._blob_fd, iov, off + pos)
+            if n <= 0:
+                raise OSError("short blob write")
+            pos += n
+            while n and i < len(bufs):
+                avail = len(bufs[i]) - skip
+                if avail <= n:
+                    n -= avail
+                    i += 1
+                    skip = 0
+                else:
+                    skip += n
+                    n = 0
+
+    def _release_stage(self, stage: list[_GroupEntry],
+                       pending: _PendingVolume) -> None:
+        """Release a built stage's pipeline claims exactly once per entry: the pending
+        volume returns to the cap budget, the refs pin comes off (a segment between
+        reserve and journal looks in_l2 to the evictor). Idempotent via the entry's
+        released flag: the writer's finally and a BaseException sweep in _flush_groups
+        can both reach the same stage."""
+        for en in stage:
+            if en.released:
                 continue
-            stage.append((seg, r[0], need, r[1]))
-            pending += r[1]
-        if not stage:
-            return 0
-        payloads = []
-        for seg, off, need, padded in stage:
-            payload = bytearray()
-            for i, ln in enumerate(seg.page_lens):
-                payload += self._pool.read(seg.l1_page_offs[i], ln)
-            for i, ln in enumerate(seg.snap_lens):
-                if ln:
-                    payload += self._pool.read(seg.l1_snap_offs[i], ln)
-            payload += b"\0" * (padded - len(payload))
-            payloads.append(payload)
+            en.released = True
+            pending.release(en.padded)
+            en.seg.refs -= 1
+
+    def _build_group_stage(self, group: list[_Segment], pending: _PendingVolume,
+                           index: int = 0) -> list[_GroupEntry] | None:
+        """Runs on the flush builder thread while the PREVIOUS group is being written:
+        reserve every segment's span (cap check against the pipeline-wide pending
+        volume, evicting oldest L2 under pressure), pin each admitted segment with a
+        refs claim (a reserved-but-unjournaled span makes the segment look in_l2 to
+        the evictor), then lift each record's zero-copy iovecs and payload crc off the
+        L1 pool. No payload byte is ever copied. Returns the stage list, or None when
+        nothing was admitted or the build failed - the segments keep their L1
+        residency and the group is aborted with no journal side effect."""
+        stage: list[_GroupEntry] = []
+        cur_seg, cur_need = group[0], 0
+        try:
+            for seg in group:
+                cur_seg, cur_need = seg, sum(seg.page_lens) + sum(seg.snap_lens)
+                r = self._reserve_blob_span(cur_need, pending.value())
+                if r is None and not stage and pending.value():
+                    # P3 sacrifice semantics across the pipeline: the refusal may be
+                    # caused by the previous group's still-unjournaled volume alone.
+                    # Once it settles, the just-journaled segments become evictable and
+                    # the reserve can succeed by sacrificing them - exactly what the
+                    # serialized pre-P4 flush did (a later segment sacrificed an earlier
+                    # journaled one). Only retried before this group's first admission,
+                    # so the pending being waited on never includes this build's own
+                    # reservations (they could never drain -> deadlock).
+                    if not pending.wait_drained(60.0):
+                        logger.warning(
+                            "session tier: flush group #%d waited 60 s for the previous "
+                            "group to settle, %d bytes still unjournaled; retrying the "
+                            "cap check with pending=0", index, pending.value())
+                    r = self._reserve_blob_span(cur_need, 0)
+                if r is None:
+                    logger.warning("session tier: L2 cap reached, cannot demote seg %d",
+                                   seg.seg_id)
+                    continue
+                pending.add(r[1])
+                seg.refs += 1                     # evictor guard, released in _write_group
+                stage.append(_GroupEntry(seg, r[0], cur_need, r[1]))
+            if not stage:
+                return None
+            for en in stage:
+                cur_seg, cur_need = en.seg, en.need
+                en.bufs = self._seg_iovecs(en.seg, en.padded)
+                en.crc = _calc_payload_crc_iovecs(en.bufs, en.need, _CRC32C_ALG)
+        except Exception as e:                    # build failure: abort the whole group
+            logger.warning(
+                "session tier: flush group #%d build failed at seg %d (%d bytes, %d of "
+                "%d admitted): %s; group aborted",
+                index, cur_seg.seg_id, cur_need, len(stage), len(group), e)
+            self._release_stage(stage, pending)
+            return None
+        except BaseException:                     # KI/SystemExit: unpin, then propagate
+            self._release_stage(stage, pending)
+            raise
+        return stage
+
+    def _pwrite_group(self, stage: list[_GroupEntry]) -> set[int]:
+        """Parallel pwritev bursts at the reserved offsets. Returns the indices whose
+        write failed (their spans stay holes behind the watermark)."""
         failed: set[int] = set()
 
         def _write_one(i: int) -> None:
-            seg, off, need, padded = stage[i]
+            en = stage[i]
             try:
-                self._pwrite_span(off, memoryview(payloads[i]))
+                self._pwritev_span(en.off, en.bufs, en.padded)
             except OSError as e:
                 logger.warning("session tier: blob write failed for seg %d (%s); "
-                               "record aborted", seg.seg_id, e)
+                               "record aborted", en.seg.seg_id, e)
                 failed.add(i)
 
         if len(stage) == 1:
@@ -707,23 +890,91 @@ class SessionTierStore:
         else:
             with ThreadPoolExecutor(max_workers=min(_FLUSH_WRITERS, len(stage))) as ex:
                 list(ex.map(_write_one, range(len(stage))))
-        # Group fdatasync: every byte written above is durable BEFORE any journal record
-        # of the group appears.
-        try:
-            os.fdatasync(self._blob_fd)
-        except OSError as e:
-            logger.warning("session tier: blob fdatasync failed (%s); group aborted", e)
+        return failed
+
+    def _write_group(self, stage: list[_GroupEntry], pending: _PendingVolume) -> int:
+        """Write one built group: parallel pwritev bursts at the reserved offsets, ONE
+        fdatasync for the whole group, then the group's journal records. Durable-order
+        invariant unchanged - a journal record still appears only after the blob bytes
+        of its group are durable - but the crash loss window widens from one segment to
+        the whole group: a SIGKILL between the fdatasync and the journal appends leaves
+        the group's bytes durable and unjournaled, and replay drops that blob tail
+        (segments stay in L1 in a process that survives). The pipeline-wide pending
+        volume stays counted until this group settles, so a concurrent builder always
+        sees a conservative cap budget. Returns the demoted count."""
+        if not stage:
             return 0
         count = 0
-        for i, (seg, off, need, padded) in enumerate(stage):
-            if i in failed:
-                continue
-            crc = _calc_payload_crc(memoryview(payloads[i])[:need], _CRC32C_ALG)
-            if not self._journal_and_account(seg, off, need, padded, crc):
-                continue
-            self._release_l1(seg)
-            self._counters["demotions"] += 1
-            count += 1
+        try:
+            failed = self._pwrite_group(stage)
+            # Group fdatasync: every byte written above is durable BEFORE any journal
+            # record of the group appears.
+            try:
+                os.fdatasync(self._blob_fd)
+            except OSError as e:
+                logger.warning("session tier: blob fdatasync failed (%s); group aborted", e)
+                return 0
+            for i, en in enumerate(stage):
+                if i in failed:
+                    continue
+                if self._journal_and_account(en.seg, en.off, en.need, en.padded, en.crc):
+                    self._release_l1(en.seg)
+                    self._counters["demotions"] += 1
+                    count += 1
+        finally:
+            # Release the pipeline's claims whatever happened above (journaled, aborted
+            # or raised): the pending volume returns to the cap budget, the refs pin
+            # protects nothing once the journal attempt is over.
+            self._release_stage(stage, pending)
+        return count
+
+    def _flush_groups(self, groups: list[list[_Segment]]) -> int:
+        """Group pipeline (double buffering): group N+1 is built - spans reserved,
+        iovecs and payload crcs lifted off the L1 pool - while group N is being
+        pwritten, fdatasync'ed and journaled. Cross-group reserve serialization goes
+        through the shared pending volume, so the cap accounting stays exact no matter
+        how many groups are in flight. A BaseException (KI/SystemExit) mid-pipeline
+        releases every built-but-unsettled stage's claims and propagates unchanged."""
+        if self._blob_fd < 0:
+            return 0
+        pending = _PendingVolume()
+        if len(groups) == 1:
+            stage = self._build_group_stage(groups[0], pending, 0)
+            return self._write_group(stage, pending) if stage else 0
+        count = 0
+        built: list[_GroupEntry] | None = None
+        futs: list[Future] = []
+        try:
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="flush-build") as ex:
+                fut = ex.submit(self._build_group_stage, groups[0], pending, 0)
+                futs.append(fut)
+                for gi, group in enumerate(groups[1:], start=1):
+                    nxt = ex.submit(self._build_group_stage, group, pending, gi)
+                    futs.append(nxt)
+                    built = fut.result()
+                    if built:
+                        count += self._write_group(built, pending)
+                    fut = nxt
+                built = fut.result()
+                if built:
+                    count += self._write_group(built, pending)
+        except BaseException:
+            # KI/SystemExit mid-pipeline: the stage the writer was working on is released
+            # by _write_group's own finally - or HERE if the write never got to run (a
+            # stubbed/failed write releases nothing). Every built-but-unconsumed future's
+            # stage must be swept too, or its refs pins and pending volume wedge the next
+            # flush_live (segments silently lost on retry). _release_stage is idempotent
+            # per entry, so sweeping everything reachable is safe. KI propagates as KI.
+            if built:
+                self._release_stage(built, pending)
+            for f in futs:
+                try:
+                    r = f.result()
+                except BaseException:
+                    r = None          # the builder released its own partial stage
+                if r:
+                    self._release_stage(r, pending)
+            raise
         return count
 
     def _release_l1(self, seg: _Segment) -> None:
@@ -772,8 +1023,9 @@ class SessionTierStore:
         # Append-only blob: the discarded padded span becomes a zero hole, reclaimable
         # only by compaction once the dead-byte watermark trips (maybe_compact).
         padded = (seg.l2_n + _BLK - 1) // _BLK * _BLK
-        self._ssd_used -= padded
-        self._dead_bytes += padded
+        with self._account_lock:      # racing the writer thread's journal accounting
+            self._ssd_used -= padded
+            self._dead_bytes += padded
         self._counters["discards"] += 1
         for i, key in enumerate(seg.page_keys):
             entries = self._index.get(key, [])
@@ -1067,29 +1319,35 @@ class SessionTierStore:
 
     def flush_live(self) -> int:
         """Graceful shutdown: demote every live L1 segment into L2. Returns the count.
-        Segments are batched into ~_FLUSH_GROUP_BYTES volume groups; each group is
-        written in parallel pwrite bursts and made durable with ONE fdatasync before
-        its journal records (see _flush_group for the widened crash loss window)."""
+        Segments are batched into ~_FLUSH_GROUP_BYTES volume groups; the groups are
+        pipelined (build of group N+1 overlaps the write/fdatasync/journal of group N,
+        see _flush_groups) and each group is made durable with ONE fdatasync before
+        its journal records (see _write_group for the widened crash loss window)."""
         if not self.enabled:
             return 0
         count = 0
         with self._lock:
+            groups: list[list[_Segment]] = []
             group: list[_Segment] = []
             vol = 0
-            # Snapshot: a mid-loop cap eviction (_flush_group -> _reserve_blob_span ->
-            # _evict_oldest_l2 -> _discard) deletes from _segments while we iterate.
+            # list() snapshot: the builder thread is submitted only AFTER this loop, so
+            # nothing mutates _segments while we iterate today; the copy is protection
+            # against FUTURE mutations here (the pipeline builder's cap evictions run
+            # right below), not a fix for an existing race.
             for seg in list(self._segments.values()):
                 if not seg.in_l1 or seg.refs != 0:
                     continue
                 padded = (sum(seg.page_lens) + sum(seg.snap_lens)
                           + _BLK - 1) // _BLK * _BLK
                 if group and vol + padded > _FLUSH_GROUP_BYTES:
-                    count += self._flush_group(group)
+                    groups.append(group)
                     group, vol = [], 0
                 group.append(seg)
                 vol += padded
             if group:
-                count += self._flush_group(group)
+                groups.append(group)
+            if groups:
+                count = self._flush_groups(groups)
         if count:
             logger.info("session tier: flushed %d live segments to L2", count)
         return count
