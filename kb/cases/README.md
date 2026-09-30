@@ -47,15 +47,17 @@ Specification / Acceptance / Checklist.
   (94d5e4a) и принят железом частично (фаза 28 -> 25 с = 1.12x,
   throughput-гейт >= 5.5 ГБ/с не взят; CPU-гейт пройден: sys 2.3x меньше;
   свип пула плоский - следующий рычаг io_uring/пин-конвейер) -
-  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4 CPU-волна завершена
-  (zero-copy pwritev из L1-пула + конвейер групп; STOP GATE READY,
-  незакоммичено @ 5f9abcc, железная рука отложена - VRAM и пре-реквизит
-  env-override P6) - [P4-NOTES.md](boot-shutdown-io/P4-NOTES.md); P6
-  CPU-волна завершена (env-override `FREETOKEN_FLUSH_WRITERS` /
-  `FREETOKEN_FLUSH_GROUP_BYTES` для железной A/B флаша: резолверы в точке
-  использования, WARNING без silent clamp, одна строка конфига на флаш;
-  незакоммичено @ fc3396f, железная рука - вместе с P4) -
-  [P6-NOTES.md](boot-shutdown-io/P6-NOTES.md); бриф P5 зафиксирован
+  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4 закоммичен (b99a103:
+  zero-copy pwritev из L1-пула + конвейер групп) и принят железом
+  (идентичный флаш 9.829 ГиБ / 52 сегмента: 2.18-2.46 ГБ/с против 0.95
+  базы = x2.3-2.6, throughput-гейт принят; util-гейт >= 60% не взят
+  в среднем - простой в стыках групп, рычаг группы 4 ГиБ / 16 райтеров;
+  SIGKILL/конвергенция/resume HIT PASS; producer-паузы исчезли) -
+  [P4-NOTES.md](boot-shutdown-io/P4-NOTES.md); P6 закоммичен (dd349a6:
+  env-override `FREETOKEN_FLUSH_WRITERS` / `FREETOKEN_FLUSH_GROUP_BYTES`
+  для железной A/B флаша: резолверы в точке использования, WARNING без
+  silent clamp) - [P6-NOTES.md](boot-shutdown-io/P6-NOTES.md); бриф P5
+  зафиксирован
   (OPEN): семантика shutdown-кэпа (решение пользователя до старта); P7
   бриф зафиксирован (OPEN, отдельная сессия): io_uring/libaio ctypes
   глубокая очередь чтения FTW-банков.
