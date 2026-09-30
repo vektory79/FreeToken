@@ -3,7 +3,7 @@ title: "Детерминированные тесты конкурентност
 date: 2026-09-30
 hardware: "CPU-прогоны pytest (без VRAM), метод не зависит от железа"
 commits: "методика выработана в волне P4 boot-shutdown-io (vektory79 @ 5f9abcc, правки анкоммичены); прецеденты: конвейер групп флаша L2 в python/freetoken/scheduler/session_tier.py; приём single-writer-аккумуляции - волна P5 (overflow-талли _FlushOverflow, закоммичено 94e4783)"
-status: "validated (волна P4: конвейер-тест стабилен x3, drain-тест детерминирован Event/Lock, account-lock стресс с source-привязкой; волна P5: overflow-талли на single-writer-аккумуляции)"
+status: "validated (волна P4: конвейер-тест стабилен x3, drain-тест детерминирован Event/Lock, account-lock стресс с source-привязкой; волна P5: overflow-талли на single-writer-аккумуляции; волна P7 boot-shutdown-io: settle-порядок при failable init - zero-job сеттл после успешной инициализации, контракт - явным событийным тестом)"
 tags: [pytest, concurrency, pipeline, determinism, leaf-lock, inspect, test-methodology]
 ---
 
@@ -93,6 +93,28 @@ tags: [pytest, concurrency, pipeline, determinism, leaf-lock, inspect, test-meth
 горячем пути и отсутствие гонок по построению
 ([P5-NOTES.md](../cases/boot-shutdown-io/P5-NOTES.md)).
 
+## Сопутствующий урок волны P7: settle-порядок относительно failable init
+
+План задач может содержать no-op задачи (zero-job: банк без sub-read) в смеси
+с рабочими, а бэкенд исполнения может быть failable и иметь fallback-путь,
+повторяющий тот же протокол завершения. Ревью волны P7 (io_uring-чтение
+FTW-банков) поймало MAJOR: zero-job задачи сеттлились ДО успешного создания
+кольца; при отказе инициализации код уходил в пул-fallback и сеттлил те же
+задачи второй раз -> двойной on_done = двойной pins.submit (сломан
+пин-контракт).
+
+Правило: при failable init с fallback-путём, повторяющим протокол завершения,
+сеттл/колбэки ставятся только ПОСЛЕ точки выбора исполнителя; no-op задачи
+не должны проходить через failable init - их сеттл либо инлайн (если fallback
+там недостижим), либо после успешной инициализации.
+
+Тест-аспект: пропуск сеттла невидим тестам байт-точности - чтение корректно,
+а пропущенный pins.submit стреляет IMA только на первом decode на железе
+(note-count ловушка). Контракт "on_done ровно один на задачу" проверять
+явным тестом mixed-плана (zero-job + читающая) по списку событий, а не через
+корректность чтения. Fails-before фикса был дословным: settled терял 'empty'
+([../cases/boot-shutdown-io/P7-NOTES.md](../cases/boot-shutdown-io/P7-NOTES.md)).
+
 ## Когда применять
 
 - Любой тест многопоточного конвейера/пайплайна: события, не таймеры.
@@ -100,3 +122,5 @@ tags: [pytest, concurrency, pipeline, determinism, leaf-lock, inspect, test-meth
   писателем на поле и чтением после join, не общий `self._counters`.
 - Любой инвариант "общее состояние меняется только под локом":
   source-привязка плюс поведенческий тест, не вместо него.
+- План с no-op задачами и failable-бэкендом с fallback: сеттл после выбора
+  исполнителя, контракт завершения - явным событийным тестом.

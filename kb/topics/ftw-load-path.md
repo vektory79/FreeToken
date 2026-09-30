@@ -134,5 +134,35 @@ gguf-сигнатуры. Заметьте: цифра ~293 tok/s в ранних
 база 4.46 ГБ/с (28 с) -> 5.00 ГБ/с (25 с, pool=4, повтор бит-в-бит);
 pool=6/8 - 4.81 (26 с). Throughput-гейт >= 5.5 ГБ/с не взят (1.12x, свип
 пула плоский - размер пула исчерпан); CPU-гейт пройден: sys-время фазы
-2.3x меньше. Следующий рычаг - io_uring/libaio за швом `_run_shared_reads`
-либо оверлап пин-конвейера (открыто).
+2.3x меньше. Гипотеза "лимитит глубина очереди" проверена волной P7
+(раздел ниже) и ОПРОВЕРГНУТА; следующий рычаг - стыки конвейера загрузки:
+оверклап пин-конвейера либо крупные READV-цепочки.
+
+## io_uring бэкенд чтения (волна P7 boot-shutdown-io)
+
+Волна P7 добавила за швом `_run_shared_reads` второй бэкенд чтения банков:
+кольцо io_uring на raw ctypes-сисколлах (io_uring_setup/enter, mmap SQ/CQ/SQE
+по офсетам из ответа ядра - без liburing и без новых pip-зависимостей),
+READV-SQE, единый цикл submitter/reaper на вызывающем потоке (thread
+confinement - никаких io_uring-вызовов из CUDA/пин-потоков; GIL на enter
+отпускается). Включение opt-in: `FREETOKEN_FTW_IO_BACKEND=io_uring|auto|direct`
+(unset -> direct = прежний пул; мусор -> warning + direct), глубина
+`FREETOKEN_FTW_IO_QD` (default 32, clamp 1..128 с warning); конфиг-строка
+"FTW bank reads: ... backend=io_uring, qd=N, granted=M" (granted - фактически
+выданный ядром размер SQ). При недоступности io_uring или в mmap-режиме
+ридера - graceful fallback на пул с одной warning; буферы заякорены до CQE,
+пин-контракт (settle ровно один на банк) сохранён. Механика и главный урок
+(settle-порядок при failable init) -
+[../cases/boot-shutdown-io/P7-NOTES.md](../cases/boot-shutdown-io/P7-NOTES.md).
+
+Железная A/B (2026-09-30, 5 бутов на флагах оператора, фаза = бар загрузки,
+125 ГиБ, readiness = chat-POST): direct-пул 25 с / 5.37 ГБ/с (sys 38.8 с);
+io_uring QD32 = 26 с / 5.16 (sys 26.6), QD64 = 26 с / 5.16 (sys 26.9). Гейт
+фазы (<= 23 с / >= 5.5 ГБ/с) НЕ ВЗЯТ: QD32 = QD64 = пул - гипотеза глубины
+очереди ОПРОВЕРГНУТА; плато ~5.2-5.4 ГБ/с задают стыки конвейера
+(материализация HostBank, born-pinned cudaHostAlloc секции, бар), не очередь
+и не syscall-оверхед. CPU-гейт ВЗЯТ: sys x1.45 (один submitter дешевле восьми
+блокирующих preadv-потоков). Код opt-in и незакоммичен - решение о коммите и
+default-бэкенде за пользователем. Следующий рычаг: оверлап пин-конвейера с
+чтением, крупные READV-цепочки (несколько iovec на SQE), метки
+t_submit/t_reap внутри `_run_shared_reads`.

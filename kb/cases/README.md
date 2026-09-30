@@ -46,7 +46,7 @@ Specification / Acceptance / Checklist.
   ab3a117) - [P3-NOTES.md](boot-shutdown-io/P3-NOTES.md); P1 закоммичен
   (94d5e4a) и принят железом частично (фаза 28 -> 25 с = 1.12x,
   throughput-гейт >= 5.5 ГБ/с не взят; CPU-гейт пройден: sys 2.3x меньше;
-  свип пула плоский - следующий рычаг io_uring/пин-конвейер) -
+  свип пула плоский; рычаг очереди проверен P7 - опровергнут) -
   [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md); P4 закоммичен (b99a103:
   zero-copy pwritev из L1-пула + конвейер групп) и принят железом
   (идентичный флаш 9.829 ГиБ / 52 сегмента: 2.18-2.46 ГБ/с против 0.95
@@ -66,9 +66,13 @@ Specification / Acceptance / Checklist.
   LRU-симметрия HIT/MISS; wipe/truncate не случился; открытые
   кандидаты - компакт: watermark no-op на офферах, сжатие файла,
   темп 0.60 ГБ/с) -
-  [P5-NOTES.md](boot-shutdown-io/P5-NOTES.md); P7 бриф зафиксирован (OPEN,
-  отдельная сессия): io_uring/libaio ctypes глубокая очередь чтения
-  FTW-банков; из железной руки P5 зафиксированы брифы P8 (watermark no-op
+  [P5-NOTES.md](boot-shutdown-io/P5-NOTES.md); P7 реализован 2026-09-30
+  (io_uring ctypes бэкенд чтения FTW-банков, opt-in
+  `FREETOKEN_FTW_IO_BACKEND`, незакоммичено; гейт фазы не взят: очередь
+  опровергнута как рычаг - плато задают стыки конвейера загрузки;
+  CPU-гейт взят: sys x1.45) -
+  [P7-NOTES.md](boot-shutdown-io/P7-NOTES.md); из железной руки P5
+  зафиксированы брифы P8 (watermark no-op
   + честный dead-учёт) и P9 (реальное сжатие файла компактом + темп)
   (OPEN, компакт-рычаги).
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:

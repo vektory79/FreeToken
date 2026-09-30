@@ -3,7 +3,7 @@ title: "Волна P1: форма чтения загрузчика FTW-банк
 date: 2026-09-29
 hardware: "RTX 5090 + NVMe Samsung 990 EVO Plus; CPU-волна при занятой VRAM + железная приёмка 2026-09-29/30 (5 бутов на свободной VRAM)"
 commits: "vektory79: 94d5e4a (python/freetoken/checkpoint/ftw.py, tests/checkpoint/test_ftw_bank_pool.py); kb - b4fa210"
-status: "железная приёмка проведена (2026-09-29/30, 5 бутов): гейт фазы НЕ ПРОЙДЕН (1.12x, свип пула плоский - размер пула исчерпан); CPU-гейт ПРОЙДЕН (sys-время фазы 2.3x меньше); следующий рычаг io_uring/libaio или оверлап пин-конвейера - открыт"
+status: "железная приёмка проведена (2026-09-29/30, 5 бутов): гейт фазы НЕ ПРОЙДЕН (1.12x, свип пула плоский - размер пула исчерпан); CPU-гейт ПРОЙДЕН (sys-время фазы 2.3x меньше); фоллоу-ап io_uring закрыт волной P7 2026-09-30 (очередь опровергнута, [P7-NOTES.md](P7-NOTES.md)); открыт только оверлап пин-конвейера"
 tags: [ftw, banks, boot, io, pool, threadpool, o-direct, libaio, io-uring, fails-before, env-hygiene]
 ---
 
@@ -61,6 +61,11 @@ Born-pinned (`FREETOKEN_BANK_CUDA_ALLOC=1`) опровергнут раньше 
 Решение о ctypes-пути - отдельное (прецедент одобрения зависимости -
 crc32c в [P3-NOTES.md](P3-NOTES.md)); пока backend=direct на системном пуле.
 См. также [../../topics/ftw-load-path.md](../../topics/ftw-load-path.md).
+
+Статус 2026-09-30: реализовано волной P7 - io_uring raw-ctypes без liburing,
+opt-in `FREETOKEN_FTW_IO_BACKEND`; гипотеза глубины очереди опровергнута
+(гейт фазы не взят), CPU-гейт взят sys x1.45 -
+[P7-NOTES.md](P7-NOTES.md).
 
 ## Наблюдаемость конфигурации (учат уроку - [../../methods/env-config-hygiene.md](../../methods/env-config-hygiene.md))
 
@@ -120,10 +125,13 @@ shutdown.marker на каждом стопе).
 - Всплески 8-12.7 ГБ/с в хвостах бара: устройство способно на скорость выше
   гейта, лимитит пайплайн чтения (глубина очереди), не NVMe.
 
-Следующий рычаг (открыто): ctypes io_uring/libaio за швом `_run_shared_reads`
-(системные libaio.so.1t64 / liburing.so.2 есть, python-обёрток нет; фаза идёт
-параллельно строительству CUDA-контекста - нужен разбор thread-safety) либо
-оверлап пин-конвейера.
+Следующий рычаг (на тот момент открыт): ctypes io_uring/libaio за швом
+`_run_shared_reads` (системные libaio.so.1t64 / liburing.so.2 есть,
+python-обёрток нет; фаза идёт параллельно строительству CUDA-контекста -
+нужен разбор thread-safety) либо оверлап пин-конвейера. Проверено волной
+P7 (2026-09-30): очередь опровергнута как рычаг (QD32 = QD64 = пул),
+CPU-гейт взят; открыт только оверлап -
+[P7-NOTES.md](P7-NOTES.md).
 
 Паритет и находки:
 

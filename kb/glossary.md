@@ -62,6 +62,13 @@
   банков, перекрывающееся с CPU GEMV) и offload (полный offload в CPU);
   hybrid признан рекомендуемой — [TASK.md](cases/gguf-glm5next-hybrid/TASK.md).
 
+## I
+
+- **io_uring** - асинхронный I/O-интерфейс Linux (кольца SQ/CQ, сисколлы
+  io_uring_setup/io_uring_enter); в FreeToken - ctypes-бэкенд глубокой очереди
+  чтения FTW-банков, opt-in `FREETOKEN_FTW_IO_BACKEND` -
+  [P7-NOTES.md](cases/boot-shutdown-io/P7-NOTES.md).
+
 ## K
 
 - **KDA** — блок kda_in_proj (проекция gated-внимания), объект N-split
@@ -100,6 +107,13 @@
 - **offer** — понижение сегмента сессии (KV-путь + снапшоты на границах) в
   SessionTierStore при вытеснении из VRAM —
   [session-cache-tiering.md](topics/session-cache-tiering.md).
+
+## Q
+
+- **QD (queue depth)** - глубина очереди запросов к устройству: блокирующий
+  preadv даёт QD=1 на поток, io_uring держит QD десятки на одном потоке;
+  форма fio 1xQD32x1M = 6.45 ГБ/с - прецедент для загрузчика FTW-банков -
+  [P7-NOTES.md](cases/boot-shutdown-io/P7-NOTES.md).
 
 ## R
 
