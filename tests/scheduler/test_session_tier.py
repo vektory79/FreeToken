@@ -44,6 +44,15 @@ def det_clock():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _flush_env_clean(monkeypatch):
+    """P1 lesson (env-config-hygiene): a shell-exported FREETOKEN_* env var silently
+    overrides what a test thinks it is testing - drop both flush knobs unless the test
+    sets them explicitly."""
+    monkeypatch.delenv("FREETOKEN_FLUSH_WRITERS", raising=False)
+    monkeypatch.delenv("FREETOKEN_FLUSH_GROUP_BYTES", raising=False)
+
+
 def _cfg(ram=RAM_BYTES, ssd=SSD_BYTES, d=None):
     return SimpleNamespace(ram_bytes=ram, dir=d, ssd_bytes=ssd)
 
@@ -1902,14 +1911,14 @@ def test_flush_pipeline_builds_next_group_during_previous_write(tmp_path, monkey
             built_next.set()
         return r
 
-    def write(self, stage, pending):
+    def write(self, stage, pending, writers):
         with lock:
             i = idx["write"]
             idx["write"] += 1
             events.append(("write_start", i))
         if i == 0 and not built_next.wait(timeout=10.0):
             raise AssertionError("pipeline: group 1 was not built during group 0's write")
-        r = real_write(self, stage, pending)
+        r = real_write(self, stage, pending, writers)
         with lock:
             events.append(("write_end", i))
         return r
@@ -2044,10 +2053,10 @@ def test_flush_drain_retry_admits_next_group_after_previous_settles(tmp_path, mo
             refused.set()
         return r
 
-    def write(self, stage, pending):
+    def write(self, stage, pending, writers):
         if not refused.wait(timeout=10.0):
             raise AssertionError("group 1's reserve never refused on pending")
-        return real_write(self, stage, pending)
+        return real_write(self, stage, pending, writers)
 
     monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
     monkeypatch.setattr(SessionTierStore, "_write_group", write)
@@ -2086,10 +2095,10 @@ def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monke
     real_write = SessionTierStore._write_group
     refused = threading.Event()
 
-    def write(self, stage, pending):
+    def write(self, stage, pending, writers):
         if not refused.wait(timeout=10.0):
             raise AssertionError("group 1's reserve never refused on pending")
-        return real_write(self, stage, pending)
+        return real_write(self, stage, pending, writers)
 
     def fake_wait(self, timeout):
         return False                       # simulate the 60 s timeout elapsing
@@ -2127,7 +2136,7 @@ def test_flush_pipeline_baseexception_releases_built_stages(tmp_path, monkeypatc
         keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
         assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
 
-    def boom(self, stage, pending):
+    def boom(self, stage, pending, writers):
         raise SystemExit("simulated exit mid-pipeline")
 
     monkeypatch.setattr(SessionTierStore, "_write_group", boom)
@@ -2246,3 +2255,198 @@ def test_flush_shared_dedup_page_across_groups_byte_exact(tmp_path, monkeypatch)
         got_p, got_s = boot.restore(hit[1])
         assert got_p == [data for _, data in pages]
         assert got_s == [_snap(name.decode()[1])]
+
+
+# ---------------------------------------------------- P6: flush env knobs
+
+
+def _big_pages(tag):
+    """One 1 MiB page: a segment's padded volume (~1.004 MiB) exceeds the 1 MiB env
+    floor, so FREETOKEN_FLUSH_GROUP_BYTES=1 MiB deterministically makes every such
+    segment its own group while the 1 GiB default keeps one group."""
+    data = bytes([0x41 + (tag % 26)]) * (1 << 20)
+    key = chain_page_key(None, (tag, 0))
+    return [key], [(key, data)]
+
+
+def _big_store(d):
+    return SessionTierStore(_cfg(ram=8 * 1024 * 1024, ssd=8 * 1024 * 1024, d=d))
+
+
+def _wrap_executor(monkeypatch, st_mod):
+    """Record every ThreadPoolExecutor the module builds: (max_workers,
+    thread_name_prefix, map item count). The pwrite executor has no thread_name_prefix;
+    the P4 flush-builder is 'flush-build'."""
+    real = st_mod.ThreadPoolExecutor
+    calls = []
+
+    def factory(*a, **kw):
+        ex = real(*a, **kw)
+        entry = [kw.get("max_workers", a[0] if a else None),
+                 kw.get("thread_name_prefix"), None]
+        calls.append(entry)
+        real_map = ex.map
+
+        def counting_map(fn, iterable, *margs):
+            items = list(iterable)
+            entry[2] = len(items)
+            return real_map(fn, items, *margs)
+
+        ex.map = counting_map
+        return ex
+
+    monkeypatch.setattr(st_mod, "ThreadPoolExecutor", factory)
+    return calls
+
+
+def test_flush_env_unset_uses_module_constants(tmp_path, monkeypatch):
+    """P6 (a/d): with both env knobs unset the resolvers return the module constants,
+    INCLUDING patched ones - the existing monkeypatch.setattr(_FLUSH_GROUP_BYTES, ...)
+    tests keep working."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    assert st_mod._flush_writers(st_mod._FLUSH_WRITERS) == st_mod._FLUSH_WRITERS
+    assert (st_mod._flush_group_bytes(st_mod._FLUSH_GROUP_BYTES)
+            == st_mod._FLUSH_GROUP_BYTES)
+    monkeypatch.setattr(st_mod, "_FLUSH_WRITERS", 5)
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 12345)
+    assert st_mod._flush_writers(5) == 5
+    assert st_mod._flush_group_bytes(12345) == 12345
+
+
+def test_flush_env_valid_writers_pools_pwrite_executor(tmp_path, monkeypatch):
+    """P6 (a): FREETOKEN_FLUSH_WRITERS=1 reaches the flush path - the pwrite executor
+    of a 2-segment group is built with max_workers=1 (vs >= 2 unset), the flush is
+    byte-exact on boot."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setenv("FREETOKEN_FLUSH_WRITERS", "1")
+    d = str(tmp_path / "tier")
+    store = _big_store(d)
+    chains = []
+    for i in (1, 2):
+        keys, pages = _big_pages(i)
+        assert store.offer(f"p{i}".encode(), 1, pages, _snap(f"{i}"))
+        chains.append((keys, pages))
+
+    calls = _wrap_executor(monkeypatch, st_mod)
+    assert store.flush_live() == 2
+    pwrite = [c for c in calls if c[1] is None]        # no thread_name_prefix
+    assert len(pwrite) == 1
+    assert pwrite[0][0] == 1 and pwrite[0][2] >= 2     # env applied, both stage entries
+
+    boot, n = _boot(d)
+    assert n == 2
+    for keys, pages in chains:
+        hit = boot.probe(keys)
+        assert hit is not None and hit[0] == 1
+        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_flush_env_valid_group_bytes_splits_groups(tmp_path, monkeypatch):
+    """P6 (a): FREETOKEN_FLUSH_GROUP_BYTES=1 MiB reaches the grouping loop - two ~1 MiB
+    segments land in TWO groups (the P4 builder executor appears) vs ONE group unset;
+    both runs flush byte-exact."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    chains = [(_big_pages(i)) for i in (1, 2)]
+    for env_group_bytes, expect_builder in (("1048576", True), (None, False)):
+        if env_group_bytes is not None:
+            monkeypatch.setenv("FREETOKEN_FLUSH_GROUP_BYTES", env_group_bytes)
+        else:
+            monkeypatch.delenv("FREETOKEN_FLUSH_GROUP_BYTES", raising=False)
+        d = str(tmp_path / f"tier-{int(expect_builder)}")
+        store = _big_store(d)
+        for i, (keys, pages) in enumerate(chains, start=1):
+            assert store.offer(f"p{i}".encode(), 1, pages, _snap(f"{i}"))
+        calls = _wrap_executor(monkeypatch, st_mod)
+        assert store.flush_live() == 2
+        builders = [c for c in calls if c[1] == "flush-build"]
+        assert bool(builders) is expect_builder
+        boot, n = _boot(d)
+        assert n == 2
+        for i, (keys, pages) in enumerate(chains, start=1):
+            hit = boot.probe(keys)
+            assert hit is not None and hit[0] == 1
+            assert boot.restore(hit[1])[0] == [data for _, data in pages]
+
+
+def test_flush_env_below_minimum_falls_back_with_warning(monkeypatch):
+    """P6 (b): a set-but-below-minimum env knob falls back to the default with a
+    warning, never a silent clamp or a zero/negative value reaching the pipeline."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setenv("FREETOKEN_FLUSH_WRITERS", "0")
+    monkeypatch.setenv("FREETOKEN_FLUSH_GROUP_BYTES", "1")   # below the 1 MiB floor
+    with _tier_log_capture() as cap:
+        assert st_mod._flush_writers(st_mod._FLUSH_WRITERS) == st_mod._FLUSH_WRITERS
+        assert (st_mod._flush_group_bytes(st_mod._FLUSH_GROUP_BYTES)
+                == st_mod._FLUSH_GROUP_BYTES)
+    warnings = [m for m in cap.messages if "FREETOKEN_FLUSH_" in m]
+    assert len(warnings) == 2
+    assert any("below minimum 1" in m and "FREETOKEN_FLUSH_WRITERS" in m
+               for m in warnings)
+    assert any("below minimum 1048576" in m and "FREETOKEN_FLUSH_GROUP_BYTES" in m
+               for m in warnings)
+
+
+def test_flush_env_garbage_falls_back_with_warning(monkeypatch):
+    """P6 (c): non-integer env values fall back to the default with a warning."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    for name in ("FREETOKEN_FLUSH_WRITERS", "FREETOKEN_FLUSH_GROUP_BYTES"):
+        for garbage in ("abc", "12abc", ""):
+            if garbage:
+                monkeypatch.setenv(name, garbage)
+            else:
+                monkeypatch.delenv(name, raising=False)
+            with _tier_log_capture() as cap:
+                w = st_mod._flush_writers(st_mod._FLUSH_WRITERS)
+                g = st_mod._flush_group_bytes(st_mod._FLUSH_GROUP_BYTES)
+            assert w == st_mod._FLUSH_WRITERS and g == st_mod._FLUSH_GROUP_BYTES
+            garbage_warnings = [m for m in cap.messages if name in m
+                                and "non-integer" in m]
+            assert bool(garbage_warnings) is bool(garbage)   # unset is silent
+            if garbage:
+                assert garbage in garbage_warnings[0]
+
+
+def test_flush_config_log_line_one_per_flush(tmp_path, monkeypatch):
+    """P6 (e): the flush logs ONE config line with the effective writers/group_bytes,
+    once per flush phase (not per group) - the iron A/B attributes a run to the right
+    knob even when the log tail is skimmed."""
+
+    monkeypatch.setenv("FREETOKEN_FLUSH_WRITERS", "3")
+    monkeypatch.setenv("FREETOKEN_FLUSH_GROUP_BYTES", "1048576")   # 2 groups
+    d = str(tmp_path / "tier")
+    store = _big_store(d)
+    for i in (1, 2):
+        keys, pages = _big_pages(i)
+        assert store.offer(f"p{i}".encode(), 1, pages, _snap(f"{i}"))
+    with _tier_log_capture() as cap:
+        assert store.flush_live() == 2
+    config = [m for m in cap.messages if "flush pipeline" in m]
+    assert len(config) == 1
+    assert "writers=3" in config[0] and "group_bytes=1048576" in config[0]
+
+
+def test_flush_env_garbage_writers_warns_once_per_flush(tmp_path, monkeypatch):
+    """TP fix fails-before: writers resolved once per flush and passed down. Four
+    384 KiB segments with group_bytes=1 MiB make TWO multi-segment groups; before the
+    fix a garbage writers env warned at flush start AND once per group's pwrite
+    executor (G+1 = 3 lines) - now exactly ONE warning per flush, and the logged
+    config matches the applied pool size."""
+
+    monkeypatch.setenv("FREETOKEN_FLUSH_WRITERS", "abc")
+    monkeypatch.setenv("FREETOKEN_FLUSH_GROUP_BYTES", "1048576")   # groups of 2
+    d = str(tmp_path / "tier")
+    store = _big_store(d)
+    for i in range(1, 5):
+        data = bytes([0x41 + i]) * (384 * 1024)
+        keys = [chain_page_key(None, (i, 0))]
+        assert store.offer(f"p{i}".encode(), 1, [(keys[0], data)], _snap(f"{i}"))
+    with _tier_log_capture() as cap:
+        assert store.flush_live() == 4
+    writer_warnings = [m for m in cap.messages
+                       if "FREETOKEN_FLUSH_WRITERS" in m and "non-integer" in m]
+    assert len(writer_warnings) == 1

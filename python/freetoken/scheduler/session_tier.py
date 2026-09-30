@@ -61,10 +61,57 @@ _MAX_RESTORE_TICKETS = 2
 # _write_blob.
 _FLUSH_GROUP_BYTES = 1 << 30
 _FLUSH_WRITERS = 8
+# Iron A/B overrides for the two flush knobs; read at the point of use, applied only
+# when set, so tests patching the constants above keep working (P1 pool-pool precedent).
+_FLUSH_WRITERS_ENV = "FREETOKEN_FLUSH_WRITERS"
+_FLUSH_GROUP_BYTES_ENV = "FREETOKEN_FLUSH_GROUP_BYTES"
+_FLUSH_GROUP_BYTES_MIN = 1 << 20
 # pwritev iovec cap per call (Linux IOV_MAX is 1024) and the shared zero padding tail
 # source for the reserved-but-unwritten span remainder.
 _PWRITEV_MAX_IOV = 512
 _ZERO_BLK = bytes(_BLK)
+
+
+def _flush_writers(requested: int) -> int:
+    """Concurrent pwritev bursts per flush group; FREETOKEN_FLUSH_WRITERS overrides for
+    the iron A/B sweep. Unset -> the requested default (a patched constant); garbage or
+    < 1 -> the default with a warning, never a silent clamp. A whitespace-only value
+    counts as unset (silently). Resolve ONCE per flush and pass down."""
+    raw = os.environ.get(_FLUSH_WRITERS_ENV, "").strip()
+    if not raw:
+        return requested
+    try:
+        wanted = int(raw)
+    except ValueError:
+        logger.warning("ignoring non-integer %s=%r; using flush writers=%d",
+                       _FLUSH_WRITERS_ENV, raw, requested)
+        return requested
+    if wanted < 1:
+        logger.warning("%s=%r below minimum 1; using flush writers=%d",
+                       _FLUSH_WRITERS_ENV, raw, requested)
+        return requested
+    return wanted
+
+
+def _flush_group_bytes(requested: int) -> int:
+    """Target volume of one flush group; FREETOKEN_FLUSH_GROUP_BYTES overrides for the
+    iron A/B sweep. Unset -> the requested default (a patched constant); garbage or
+    < 1 MiB -> the default with a warning, never a silent clamp. A whitespace-only
+    value counts as unset (silently)."""
+    raw = os.environ.get(_FLUSH_GROUP_BYTES_ENV, "").strip()
+    if not raw:
+        return requested
+    try:
+        wanted = int(raw)
+    except ValueError:
+        logger.warning("ignoring non-integer %s=%r; using flush group_bytes=%d",
+                       _FLUSH_GROUP_BYTES_ENV, raw, requested)
+        return requested
+    if wanted < _FLUSH_GROUP_BYTES_MIN:
+        logger.warning("%s=%r below minimum %d; using flush group_bytes=%d",
+                       _FLUSH_GROUP_BYTES_ENV, raw, _FLUSH_GROUP_BYTES_MIN, requested)
+        return requested
+    return wanted
 # Guards the cumulative mlock accounting (_Pool._locked_total): it is mutated from the
 # scheduler thread (pool construction, staging alloc, free_block) AND the reader thread
 # (staging close at ticket finalize).
@@ -871,9 +918,10 @@ class SessionTierStore:
             raise
         return stage
 
-    def _pwrite_group(self, stage: list[_GroupEntry]) -> set[int]:
-        """Parallel pwritev bursts at the reserved offsets. Returns the indices whose
-        write failed (their spans stay holes behind the watermark)."""
+    def _pwrite_group(self, stage: list[_GroupEntry], writers: int) -> set[int]:
+        """Parallel pwritev bursts at the reserved offsets; writers comes resolved once
+        per flush from the caller (see flush_live). Returns the indices whose write
+        failed (their spans stay holes behind the watermark)."""
         failed: set[int] = set()
 
         def _write_one(i: int) -> None:
@@ -888,12 +936,14 @@ class SessionTierStore:
         if len(stage) == 1:
             _write_one(0)
         else:
-            with ThreadPoolExecutor(max_workers=min(_FLUSH_WRITERS, len(stage))) as ex:
+            with ThreadPoolExecutor(max_workers=min(writers, len(stage))) as ex:
                 list(ex.map(_write_one, range(len(stage))))
         return failed
 
-    def _write_group(self, stage: list[_GroupEntry], pending: _PendingVolume) -> int:
-        """Write one built group: parallel pwritev bursts at the reserved offsets, ONE
+    def _write_group(self, stage: list[_GroupEntry], pending: _PendingVolume,
+                     writers: int) -> int:
+        """Write one built group: parallel pwritev bursts (writers resolved once per
+        flush) at the reserved offsets, ONE
         fdatasync for the whole group, then the group's journal records. Durable-order
         invariant unchanged - a journal record still appears only after the blob bytes
         of its group are durable - but the crash loss window widens from one segment to
@@ -906,7 +956,7 @@ class SessionTierStore:
             return 0
         count = 0
         try:
-            failed = self._pwrite_group(stage)
+            failed = self._pwrite_group(stage, writers)
             # Group fdatasync: every byte written above is durable BEFORE any journal
             # record of the group appears.
             try:
@@ -928,10 +978,12 @@ class SessionTierStore:
             self._release_stage(stage, pending)
         return count
 
-    def _flush_groups(self, groups: list[list[_Segment]]) -> int:
+    def _flush_groups(self, groups: list[list[_Segment]], writers: int) -> int:
         """Group pipeline (double buffering): group N+1 is built - spans reserved,
         iovecs and payload crcs lifted off the L1 pool - while group N is being
-        pwritten, fdatasync'ed and journaled. Cross-group reserve serialization goes
+        pwritten, fdatasync'ed and journaled. writers is resolved once per flush by
+        the caller and passed down: one env warning per flush, and the logged config
+        matches the applied one. Cross-group reserve serialization goes
         through the shared pending volume, so the cap accounting stays exact no matter
         how many groups are in flight. A BaseException (KI/SystemExit) mid-pipeline
         releases every built-but-unsettled stage's claims and propagates unchanged."""
@@ -940,7 +992,7 @@ class SessionTierStore:
         pending = _PendingVolume()
         if len(groups) == 1:
             stage = self._build_group_stage(groups[0], pending, 0)
-            return self._write_group(stage, pending) if stage else 0
+            return self._write_group(stage, pending, writers) if stage else 0
         count = 0
         built: list[_GroupEntry] | None = None
         futs: list[Future] = []
@@ -953,11 +1005,11 @@ class SessionTierStore:
                     futs.append(nxt)
                     built = fut.result()
                     if built:
-                        count += self._write_group(built, pending)
+                        count += self._write_group(built, pending, writers)
                     fut = nxt
                 built = fut.result()
                 if built:
-                    count += self._write_group(built, pending)
+                    count += self._write_group(built, pending, writers)
         except BaseException:
             # KI/SystemExit mid-pipeline: the stage the writer was working on is released
             # by _write_group's own finally - or HERE if the write never got to run (a
@@ -1326,6 +1378,10 @@ class SessionTierStore:
         if not self.enabled:
             return 0
         count = 0
+        # Both knobs resolve ONCE per flush: the config line and every group's pwrite
+        # executor must agree, and a bad env warns at most once per flush.
+        group_bytes = _flush_group_bytes(_FLUSH_GROUP_BYTES)
+        writers = _flush_writers(_FLUSH_WRITERS)
         with self._lock:
             groups: list[list[_Segment]] = []
             group: list[_Segment] = []
@@ -1339,7 +1395,7 @@ class SessionTierStore:
                     continue
                 padded = (sum(seg.page_lens) + sum(seg.snap_lens)
                           + _BLK - 1) // _BLK * _BLK
-                if group and vol + padded > _FLUSH_GROUP_BYTES:
+                if group and vol + padded > group_bytes:
                     groups.append(group)
                     group, vol = [], 0
                 group.append(seg)
@@ -1347,7 +1403,11 @@ class SessionTierStore:
             if group:
                 groups.append(group)
             if groups:
-                count = self._flush_groups(groups)
+                # One line per flush phase, not per group: the iron A/B needs the
+                # effective config in the log to attribute a run to the right knob.
+                logger.info("session tier: flush pipeline: writers=%d group_bytes=%d",
+                            writers, group_bytes)
+                count = self._flush_groups(groups, writers)
         if count:
             logger.info("session tier: flushed %d live segments to L2", count)
         return count
