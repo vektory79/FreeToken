@@ -206,6 +206,19 @@ class _PendingVolume:
             return self._cond.wait_for(lambda: self._value == 0, timeout)
 
 
+class _FlushOverflow:
+    """Flush-local tally of cap-driven L2 evictions for one flush_live phase. Lives on
+    the flush pipeline, deliberately NOT in self._counters: the builder thread counts
+    evictions outside the store lock, and a fresh per-flush object with a single writer
+    per field (builder thread: records/bytes, flush thread: admitted) cannot lose an
+    increment; flush_live reads it only after _flush_groups joined the builder."""
+
+    def __init__(self) -> None:
+        self.records = 0       # L2 records discarded to make room for this flush
+        self.bytes = 0         # padded blob span those discards freed
+        self.admitted = 0      # payload bytes this flush journaled (the log's Y)
+
+
 class SnapshotSource(Protocol):
     """Snapshot handle abstraction: W2 wires LinearStatePool slot -> bytes behind this."""
 
@@ -413,6 +426,9 @@ class SessionTierStore:
         # the previous group (both mutate _ssd_used; int += is not atomic). A leaf lock:
         # never acquired around another lock.
         self._account_lock = threading.Lock()
+        # P5 overflow observability: set around _flush_groups only (see _FlushOverflow).
+        # None on every non-flush path, so runtime demotes/evictions never log overflow.
+        self._flush_overflow: _FlushOverflow | None = None
         # Prefetch staging (phase 2): present even when inert (every hook early-returns).
         self._tickets: dict[int, RestoreTicket] = {}
         self._work: SimpleQueue = SimpleQueue()
@@ -971,6 +987,9 @@ class SessionTierStore:
                     self._release_l1(en.seg)
                     self._counters["demotions"] += 1
                     count += 1
+                    ov = self._flush_overflow
+                    if ov is not None:            # the Y of the overflow log line
+                        ov.admitted += en.need
         finally:
             # Release the pipeline's claims whatever happened above (journaled, aborted
             # or raised): the pending volume returns to the cap budget, the refs pin
@@ -1068,12 +1087,17 @@ class SessionTierStore:
         l2 = [s for s in self._segments.values() if s.in_l2 and s.refs == 0]
         while self.ssd_bytes and self._ssd_used + pending + keep > self.ssd_bytes and l2:
             victim = min(l2, key=lambda s: (s.last_validation, s.seg_id))
-            self._discard(victim)
+            freed = self._discard(victim)
+            ov = self._flush_overflow          # flush-phase tally; None on runtime paths
+            if ov is not None:
+                ov.records += 1
+                ov.bytes += freed
             l2.remove(victim)
 
-    def _discard(self, seg: _Segment) -> None:
-        # Append-only blob: the discarded padded span becomes a zero hole, reclaimable
-        # only by compaction once the dead-byte watermark trips (maybe_compact).
+    def _discard(self, seg: _Segment) -> int:
+        """Append-only blob: the discarded padded span becomes a zero hole, reclaimable
+        only by compaction once the dead-byte watermark trips (maybe_compact). Returns
+        the padded span freed from the capacity accounting."""
         padded = (seg.l2_n + _BLK - 1) // _BLK * _BLK
         with self._account_lock:      # racing the writer thread's journal accounting
             self._ssd_used -= padded
@@ -1097,6 +1121,7 @@ class SessionTierStore:
         # marker's size checks cannot see it: without this explicit drop the next boot
         # could fast-path-resurrect the evicted segment.
         self.invalidate_shutdown_marker()
+        return padded
 
     def _supersede(self, seg: _Segment) -> None:
         # L1 resources first: _discard only accounts the L2 padded span (a no-op when the
@@ -1378,6 +1403,7 @@ class SessionTierStore:
         if not self.enabled:
             return 0
         count = 0
+        ov: _FlushOverflow | None = None
         # Both knobs resolve ONCE per flush: the config line and every group's pwrite
         # executor must agree, and a bad env warns at most once per flush.
         group_bytes = _flush_group_bytes(_FLUSH_GROUP_BYTES)
@@ -1407,7 +1433,18 @@ class SessionTierStore:
                 # effective config in the log to attribute a run to the right knob.
                 logger.info("session tier: flush pipeline: writers=%d group_bytes=%d",
                             writers, group_bytes)
-                count = self._flush_groups(groups, writers)
+                ov = _FlushOverflow()
+                self._flush_overflow = ov
+                try:
+                    count = self._flush_groups(groups, writers)
+                finally:
+                    self._flush_overflow = None
+        if ov is not None and ov.records:
+            # P5: one overflow line per flush phase, only when the cap forced L2
+            # evictions; the flushed-N line below stays as is.
+            logger.info("session tier: flush overflow: evicted %d records / %.1f MiB "
+                        "of oldest L2 to admit %d bytes",
+                        ov.records, ov.bytes / 2**20, ov.admitted)
         if count:
             logger.info("session tier: flushed %d live segments to L2", count)
         return count

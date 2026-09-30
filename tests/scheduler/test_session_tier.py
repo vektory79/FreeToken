@@ -2122,6 +2122,99 @@ def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monke
     assert store._ssd_used == 2 * 4096    # s3 + s4 both live: the documented over-commit
 
 
+# ---------------------------------------------------- P5 flush overflow observability
+
+
+def test_flush_overflow_log_counts_cap_evictions(tmp_path, monkeypatch):
+    """P5 fails-before: a flush-phase cap eviction was invisible (no counter, no log).
+    With the shrunk cap, s3's reserve evicts both runtime L2 victims and s4's
+    drain-retry reserve sacrifices s3; the flush must log exactly one overflow line
+    whose figures match the actual discards: 3 records / 3 padded 4 KiB spans evicted,
+    2 x 896 payload bytes admitted."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    assert len([s for s in store._segments.values() if s.in_l2]) == 2   # runtime demotes
+    store.ssd_bytes = 4096                    # every flush reserve must evict
+
+    with _tier_log_capture() as cap:
+        assert store.flush_live() == 2        # s3 and s4 journaled (s3 sacrificed for s4)
+    assert len(store._segments) == 1          # s1, s2, s3 discarded, only s4 survives
+    overflow = [m for m in cap.messages if "flush overflow" in m]
+    assert overflow == ["session tier: flush overflow: evicted 3 records / 0.0 MiB "
+                        "of oldest L2 to admit 1792 bytes"]
+
+
+def test_flush_without_evictions_logs_no_overflow_line(tmp_path):
+    """P5: silence when the cap never bites. Runtime L1->L2 demotes (offer pressure,
+    _write_blob path) are not flush evictions and must not produce the line; the
+    existing flushed-N line is untouched; an idle repeat flush logs nothing at all."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+
+    with _tier_log_capture() as cap:
+        assert store.flush_live() == 2        # only s3, s4 are still in L1
+    assert not [m for m in cap.messages if "flush overflow" in m]
+    assert any("flushed 2 live segments" in m for m in cap.messages)
+    assert store._ssd_used == 4 * 4096        # s1..s4 journaled, nothing evicted
+
+    with _tier_log_capture() as cap:          # repeat flush: nothing live, full silence
+        assert store.flush_live() == 0
+    assert cap.messages == []
+
+
+def test_flush_overflow_counts_drain_retry_eviction(tmp_path, monkeypatch):
+    """P5: the eviction made by the drain-retry reserve (the pending=0 fallback after
+    a refusal caused by the previous group's still-unjournaled volume) lands in the
+    same overflow tally. Refusal-first ordering is forced deterministically: group 0's
+    write blocks until group 1's reserve has refused on pending>0, so the sacrifice of
+    s3 can only come from the retry."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
+    for i in range(1, 5):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+    store.ssd_bytes = 4096
+
+    real_reserve = SessionTierStore._reserve_blob_span
+    real_write = SessionTierStore._write_group
+    refused = threading.Event()
+
+    def reserve(self, need, pending=0):
+        r = real_reserve(self, need, pending)
+        if r is None and pending > 0:
+            refused.set()
+        return r
+
+    def write(self, stage, pending, writers):
+        if not refused.wait(timeout=10.0):
+            raise AssertionError("group 1's reserve never refused on pending")
+        return real_write(self, stage, pending, writers)
+
+    monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
+    monkeypatch.setattr(SessionTierStore, "_write_group", write)
+    with _tier_log_capture() as cap:
+        assert store.flush_live() == 2
+    monkeypatch.undo()
+
+    assert refused.is_set()                   # the drain-retry path was taken
+    assert not [s for s in store._segments.values() if s.seg_id == 3]   # s3 sacrificed
+    overflow = [m for m in cap.messages if "flush overflow" in m]
+    assert overflow == ["session tier: flush overflow: evicted 3 records / 0.0 MiB "
+                        "of oldest L2 to admit 1792 bytes"]
+
+
 def test_flush_pipeline_baseexception_releases_built_stages(tmp_path, monkeypatch):
     """A SystemExit/KI mid-pipeline must not leak the built-but-unwritten stages: refs
     pins and pending volume are released for the stage the write never ran on AND for
