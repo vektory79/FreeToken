@@ -950,7 +950,7 @@ class CacheManager:
         return flushed
 
     def maybe_compact_tier(self) -> int:
-        """Idle-safe-point hook: watermark-gated blob compaction (no-op when off/below)."""
+        """Idle-safe-point hook: dead-record-gated blob compaction (no-op when off/below)."""
         return self.tier_store.maybe_compact() if self.tier_store is not None else 0
 
     def tier_stats_line(self) -> str:

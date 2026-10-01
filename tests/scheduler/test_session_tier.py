@@ -723,6 +723,157 @@ def test_compaction_cannot_interleave_a_locked_store(tmp_path, monkeypatch):
     assert done.is_set() and store._dead_bytes == 0
 
 
+# ------------------------------------------------- P8: record-based compact gate
+
+
+def _boot_with_watermark_holes(tmp_path, subdir="p8", garbage=32 * 2**20):
+    """P5-iron finding-1 state: watermark holes (blob-tail garbage that survived a
+    graceful stop) but ZERO dead journal records - the state that used to gate
+    maybe_compact on every ok-offer while compact() no-op'ed."""
+    d = str(tmp_path / subdir)
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    for i in (1, 2, 3):
+        k = chain_page_key(None, (i,))
+        assert store.offer(bytes([i]) * 16, 1, [(k, bytes([i]) * PAGE)])
+    with open(os.path.join(d, "blob.bin"), "ab") as f:
+        f.write(b"\x00" * garbage)
+    _graceful_stop(store)                 # compact no-op (0 dead records); marker matches
+    return d, garbage
+
+
+def _counting_compact(store, monkeypatch):
+    """Pass-through counters around the instance's _parse_journal/compact."""
+    calls = {"parse": 0, "compact": 0}
+    real_parse, real_compact = store._parse_journal, store.compact
+
+    def parse():
+        calls["parse"] += 1
+        return real_parse()
+
+    def compact():
+        calls["compact"] += 1
+        return real_compact()
+
+    monkeypatch.setattr(store, "_parse_journal", parse)
+    monkeypatch.setattr(store, "compact", compact)
+    return calls
+
+
+def test_watermark_holes_zero_dead_records_offer_skips_compact(tmp_path, monkeypatch):
+    """P8 (a): watermark holes (72-88 GiB in the iron run) with zero dead journal
+    records must never gate compaction - an ok-offer must not parse the journal nor
+    call compact: every ok-offer used to pay a full _parse_journal for a guaranteed
+    no-op (P5-iron: 52 offers x 1.5 MiB reads + 270 JSON records each)."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d, garbage = _boot_with_watermark_holes(tmp_path)
+    monkeypatch.setattr(st_mod, "_COMPACT_FLOOR_BYTES", 4096)
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    assert store.replay_journal() == 3    # fast path: no discard ever dropped the marker
+    assert store._dead_bytes == garbage   # the watermark dead stays, exactly as before
+    calls = _counting_compact(store, monkeypatch)
+
+    assert store.maybe_compact() == 0     # record gate: nothing reclaimable
+    assert calls == {"parse": 0, "compact": 0}
+    k = chain_page_key(None, (9,))
+    assert store.offer(bytes([9]) * 16, 1, [(k, bytes([9]) * PAGE)])
+    assert calls == {"parse": 0, "compact": 0}   # the ok-offer stayed cheap
+    hit = store.probe([k])
+    assert hit is not None and hit[0] == 1
+    # ledger exactness (fix side): the watermark holes never count as dead records
+    assert store._dead_records == 0 and store._dead_record_bytes == 0
+
+
+def test_dead_records_still_gate_compact_and_drop_exactly_them(tmp_path, monkeypatch):
+    """P8 (b): real dead records must compact exactly as before (P3-semantics guard):
+    the ledger counts runtime discards, the rewrite drops exactly those records,
+    survivors keep their original offsets and restore byte-exact."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d, _ = _boot_with_watermark_holes(tmp_path, subdir="p8b", garbage=8192)
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    assert store.replay_journal() == 3
+    assert store.evict_store(2) == 2      # default floor (256 MiB) blocks the runtime compact
+    assert store._dead_records == 2 and store._dead_record_bytes == 2 * 4096
+    monkeypatch.setattr(st_mod, "_COMPACT_FLOOR_BYTES", 4096)
+    assert store.maybe_compact() == 2     # fires on the record ledger, as before
+    assert store._dead_records == 0 and store._dead_record_bytes == 0
+    assert store._dead_bytes == 0 and store._ssd_used == 4096
+    assert store.compact() == 0           # idempotent no-op, as before
+    k = chain_page_key(None, (3,))
+    hit = store.probe([k])
+    assert hit is not None
+    got, _ = store.restore(hit[1])
+    assert got[0] == bytes([3]) * PAGE    # the survivor is byte-exact
+
+
+def test_stats_line_dead_is_record_honest_and_holes_separate(tmp_path):
+    """P8 (c): stats_line must not show watermark holes as dead: dead= counts the
+    records a compact would drop (+ their bytes), the unreclaimable holes get their
+    own gauge; the 'session tier final:' stop line prints exactly this line."""
+    d, garbage = _boot_with_watermark_holes(tmp_path, subdir="p8c")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    store.replay_journal()                # fast path, zero dead records
+    line = store.stats_line()
+    assert "dead=0rec/0.0MiB" in line
+    assert f"holes={garbage / 2**20:.1f}MiB" in line
+    assert f"dead={garbage / 2**20:.1f}MiB" not in line   # the misleading figure is gone
+    assert store.evict_store(1) == 1
+    line = store.stats_line()
+    assert "dead=1rec/" in line           # the discarded record is the real dead
+    assert f"holes={garbage / 2**20:.1f}MiB" in line      # holes unchanged by the discard
+
+
+def test_full_path_boot_counts_payload_dropped_records(tmp_path, monkeypatch):
+    """P8 (d, boot side): a payload-crc-dead record stays in the journal file after a
+    crash boot (replay never rewrites it) and a later compact parser still sees it -
+    the ledger must count it at boot, or the compact gate under-reports."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d, _ = _boot_with_watermark_holes(tmp_path, subdir="p8d", garbage=8192)
+    with open(os.path.join(d, "blob.bin"), "r+b") as f:   # corrupt segs 1+2 payloads
+        f.write(b"\xde" * 256)
+        f.seek(4096)
+        f.write(b"\xde" * 256)
+    os.unlink(_marker_path(d))            # force the full verification path
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    assert boot.replay_journal() == 1     # the dead records are dropped, not resurrected
+    assert boot._dead_records == 2 and boot._dead_record_bytes == 2 * 4096
+    monkeypatch.setattr(st_mod, "_COMPACT_FLOOR_BYTES", 4096)
+    assert boot.maybe_compact() == 2      # the ledger gates exactly what compact drops
+    assert boot._dead_records == 0
+    reborn = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    assert reborn.replay_journal() == 1   # the journal no longer lists the dead records
+
+
+def test_stats_line_holes_never_negative(tmp_path):
+    """P8 review: in the crashed-compact window (SIGKILL after the blob rename, before
+    the journal rewrite) the old journal carries dead records whose spans lie ABOVE
+    the truncated blob_eof; replay drops them (payload crc reads past eof), so
+    _dead_record_bytes can exceed the watermark-seeded _dead_bytes - holes must clamp
+    to 0 for display, never render negative."""
+    d = tmp_path / "holes"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    keys = []
+    for i in (1, 2, 3, 4):
+        k = chain_page_key(None, (i,))
+        keys.append(k)
+        assert store.offer(bytes([i]) * 16, 1, [(k, bytes([i]) * PAGE)])
+    for k in keys[:2]:                    # validate the LOWER segs: evictions hit the TOP
+        hit = store.probe([k])
+        store.restore(hit[1])
+    assert store.evict_store(2) == 2      # dead records sit ABOVE the survivors
+    stale_journal = (d / "journal.log").read_bytes()
+    assert store.compact() == 2           # blob truncated: eof == live == 2 * 4096
+    (d / "journal.log").write_bytes(stale_journal)   # SIGKILL before the journal rewrite
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 2     # dead records above eof: payload-crc drops
+    assert boot._dead_bytes == 0 and boot._dead_record_bytes == 2 * 4096
+    line = boot.stats_line()
+    assert "holes=0.0MiB" in line
+    assert "=-" not in line               # no negative gauge anywhere in the line
+
+
 # ----------------------------------------------------------------- prefetch tickets
 
 
@@ -1208,7 +1359,7 @@ def test_fast_path_boot_seeds_ssd_used_from_live_records(tmp_path):
     # fails-before: the watermark (blob size) seeded the cap accounting
     assert boot._ssd_used == live
     assert boot._blob_eof == blob_size        # P3 invariant: watermark untouched
-    assert boot._dead_bytes == garbage        # holes stay real for maybe_compact
+    assert boot._dead_bytes == garbage        # holes stay real for reservations/cap accounting
     on = [m for m in cap.messages if "session tier on" in m]
     assert len(on) == 1 and "used=0.00 GiB" in on[0]
 

@@ -410,6 +410,11 @@ class SessionTierStore:
         # rejection counters on the disabled store before any early return. Pre-seeded so
         # snapshot()/stats_line() always see every key.
         self._dead_bytes = 0
+        # P8: record-reclaimable dead ledger - journal records a compact() would
+        # actually drop, plus their padded bytes. Kept separate from _dead_bytes, whose
+        # watermark seed carries physical holes no record-based compact can reclaim.
+        self._dead_records = 0
+        self._dead_record_bytes = 0
         self._counters: Counter = Counter(offers_ok=0, offers_rej=0, offers_dedup=0,
                                           probe_hit=0,
                                           probe_miss=0, note_match=0, restore_l1=0,
@@ -543,7 +548,7 @@ class SessionTierStore:
             ok = self._offer(path_key, boundary_len, kv_pages, snapshot_slot)
             self._counters["offers_ok" if ok else "offers_rej"] += 1
         if ok:
-            self.maybe_compact()   # watermark gate: two int compares when below
+            self.maybe_compact()   # dead-record gate: two int compares when below
         return ok
 
     def _offer(self, path_key: bytes, boundary_len: int,
@@ -1080,7 +1085,7 @@ class SessionTierStore:
                 self._discard(min(l2, key=lambda s: (s.last_validation, s.seg_id)))
                 count += 1
             self._counters["evictions"] += count   # under the lock: Counter += is not atomic
-        self.maybe_compact()   # discard pressure is the other watermark check point
+        self.maybe_compact()   # discard pressure is the other dead-record check point
         return count
 
     def _evict_oldest_l2(self, keep: int, pending: int = 0) -> None:
@@ -1096,12 +1101,15 @@ class SessionTierStore:
 
     def _discard(self, seg: _Segment) -> int:
         """Append-only blob: the discarded padded span becomes a zero hole, reclaimable
-        only by compaction once the dead-byte watermark trips (maybe_compact). Returns
+        only by compaction once the dead-record ledger trips (maybe_compact). Returns
         the padded span freed from the capacity accounting."""
         padded = (seg.l2_n + _BLK - 1) // _BLK * _BLK
         with self._account_lock:      # racing the writer thread's journal accounting
             self._ssd_used -= padded
             self._dead_bytes += padded
+            if seg.in_l2:             # its journal record just became compact-droppable
+                self._dead_records += 1
+                self._dead_record_bytes += padded
         self._counters["discards"] += 1
         for i, key in enumerate(seg.page_keys):
             entries = self._index.get(key, [])
@@ -1615,6 +1623,11 @@ class SessionTierStore:
             logger.info("session tier: clean-shutdown marker present but rejected "
                         "(%s; actual journal_bytes=%d blob_eof=%d); "
                         "full payload verification", recorded, len(journal), blob)
+        # P8 dead-record ledger seed: how many journal records the next compact() will
+        # actually drop. Fast path: shutdown compacts, journal == live. Full path:
+        # payload-dropped records stay in the journal file (replay never rewrites it)
+        # and the compact parser still sees them; kept records all become segments.
+        dropped, dropped_bytes = 0, 0
         if not fast:
             # Payload-crc validation: a record whose blob region no longer matches (holes
             # left by compaction, a torn append that advanced EOF) is dead - drop, never
@@ -1626,7 +1639,7 @@ class SessionTierStore:
                 except OSError:
                     blob_fd = -1
             if blob_fd >= 0:
-                kept, dropped = [], 0
+                kept, dropped, dropped_bytes = [], 0, 0
                 for rec in records:
                     ok = True
                     if "crc" in rec:
@@ -1638,6 +1651,7 @@ class SessionTierStore:
                             ok = False
                     (kept.append(rec) if ok else None)
                     dropped += 0 if ok else 1
+                    dropped_bytes += 0 if ok else (rec["n"] + _BLK - 1) // _BLK * _BLK
                 os.close(blob_fd)
                 records = kept
                 if dropped:
@@ -1673,6 +1687,8 @@ class SessionTierStore:
             # _blob_eof is the never-decreased watermark: exact dead even on a re-replay.
             self._dead_bytes = max(0, self._blob_eof - live)
             self._ssd_used = live
+            self._dead_records = dropped
+            self._dead_record_bytes = dropped_bytes
         # Moved here from __init__: before replay only the blob-size watermark exists,
         # after the reseed above _ssd_used is the live figure both paths must report.
         logger.info("session tier on: L1=%.2f GiB, L2 dir=%s cap=%.2f GiB used=%.2f GiB",
@@ -1689,14 +1705,19 @@ class SessionTierStore:
     # ------------------------------------------------------------- log compaction
 
     def maybe_compact(self) -> int:
-        """Watermark-gated runtime compaction: fires only when dead blob bytes exceed
-        the constant share of the blob AND the blob is above the floor; two int compares
-        (and no locking) on every below-watermark check point. Returns dead records
-        dropped (0 = no-op)."""
+        """Dead-record-gated runtime compaction: fires only when the padded bytes of
+        journal records a compact would actually drop exceed the constant share of the
+        blob AND the blob is above the floor; two int compares (and no locking) on every
+        check point. Returns dead records dropped (0 = no-op). The _dead_bytes watermark
+        (physical holes: discards, previous generations) must NOT gate this - with zero
+        dead records compact() is a no-op and every ok-offer would pay a full journal
+        parse for nothing (P5-iron finding 1). The holes= stat (watermark-minus-live)
+        resets to 0 after a compact while physical interior holes remain: reclaiming
+        them needs the P9 file rewrite, not this gate."""
         if not self.enabled or self._blob_fd < 0:
             return 0
         if self._blob_eof < _COMPACT_FLOOR_BYTES or \
-                self._dead_bytes <= self._blob_eof * _COMPACT_DEAD_FRACTION:
+                self._dead_record_bytes <= self._blob_eof * _COMPACT_DEAD_FRACTION:
             return 0
         dropped = self.compact()
         if dropped:
@@ -1765,6 +1786,8 @@ class SessionTierStore:
             # its data. Dead accounting is fully reclaimed by the rewrite.
             self._blob_eof = os.lseek(self._blob_fd, 0, os.SEEK_END)
             self._dead_bytes = 0
+            self._dead_records = 0
+            self._dead_record_bytes = 0
             return len(records) - len(keep)
 
     def _parse_journal(self) -> list[dict]:
@@ -1805,6 +1828,8 @@ class SessionTierStore:
             snap = dict(self._counters)
             snap.update(l1_used=self._l1_used, ssd_used=self._ssd_used,
                         blob_eof=self._blob_eof, dead_bytes=self._dead_bytes,
+                        dead_records=self._dead_records,
+                        dead_record_bytes=self._dead_record_bytes,
                         segments=len(self._segments), tickets=len(self._tickets))
             return snap
 
@@ -1820,6 +1845,10 @@ class SessionTierStore:
                 f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
                 f"restore={snap['restore_l1']}(l1)/{snap['restore_l2']}(l2), "
                         f"evict={snap['evictions']}, demote={snap['demotions']}, "
-                        f"discard={snap['discards']}, dead={snap['dead_bytes'] / 2**20:.1f}MiB, "
+                        f"discard={snap['discards']}, "
+                        f"dead={snap['dead_records']}rec/"
+                        f"{snap['dead_record_bytes'] / 2**20:.1f}MiB, "
+                        # display clamp: crash-window compact leaves dead spans above the truncated blob_eof
+                        f"holes={max(0, snap['dead_bytes'] - snap['dead_record_bytes']) / 2**20:.1f}MiB, "
                         f"pf={snap['prefetch_adopt']}/{snap['prefetch_begin']}/"
                         f"{snap['prefetch_abandon']}")
