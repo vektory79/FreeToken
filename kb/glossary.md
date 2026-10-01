@@ -12,6 +12,10 @@
 - **adopt (усыновление)** — встраивание выровненной части восстановленного из
   стора отрезка страниц в radix-дерево ядра (без слота снапшота) —
   [session-cache-tiering.md](topics/session-cache-tiering.md).
+- **arming (армирование)** — момент транзакционного протокола, после которого
+  крэш восстанавливается бут-рекавери, а не откатом; в P9 это durable
+  swap.token (fsync+rename+dir-fsync); cleanup после армирования запрещён —
+  [P9-NOTES.md](cases/boot-shutdown-io/P9-NOTES.md).
 
 ## B
 

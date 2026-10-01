@@ -23,7 +23,7 @@
 | [wave2-candidate-a.md](wave2-candidate-a.md) | Волна 2: Candidate A, компилят-тайм варианты тайла + knob | Как подготовить вариант к измерению |
 | [test-fails-before.md](test-fails-before.md) | Fails-before эмпирически: stash+md5, single-revert probe, точечный реверт правки при далеко ушедшем HEAD, ловушка caplog | Перед любым багфиксом и новыми тестами волны |
 | [env-config-hygiene.md](env-config-hygiene.md) | Env-knob гигиена: delenv в autouse (тест не зависит от шелла), clamp-warning + разовая строка конфига против ложной атрибуции A/B, резолвер env в точке использования (unset -> запрошенный дефолт, один резолв на операцию) | Когда prod-код читает переменные окружения или готовится железная A/B env-knob'а |
-| [deterministic-concurrency-tests.md](deterministic-concurrency-tests.md) | Детерминированные тесты конкурентности: событийный перехват вместо таймеров, source-привязка инварианта лока, leaf-lock против self-deadlock | Перед тестами многопоточного конвейера или инвариантов лока |
+| [deterministic-concurrency-tests.md](deterministic-concurrency-tests.md) | Детерминированные тесты конкурентности: событийный перехват вместо таймеров, source-привязка инварианта лока, leaf-lock против self-deadlock, evidence-preserving error paths транзакции (cleanup после армирования запрещён) | Перед тестами многопоточного конвейера, инвариантов лока или крэш-безопасных транзакций |
 
 Типовые вопросы и входные точки:
 

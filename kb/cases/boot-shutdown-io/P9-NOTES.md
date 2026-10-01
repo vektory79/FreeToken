@@ -1,0 +1,221 @@
+---
+title: "Волна P9: two-phase сжатие тир-блоба компактом, бут-рекавери и темп переписки"
+date: 2026-10-01
+hardware: "HW-приёмка: RTX 5090 32GB; NVMe Samsung 990 EVO Plus 2TB (nvme0n1); i7-14700KF; GLM-5.3 GGUF FTW; tier-кап 32 GiB (--session-tier-ssd-gib 32), fill 26 диалогов ~9.8 GiB, live на компакте 31.95 GiB / 169 records; тестовый порт 18821, прод :18081 не тронут; CPU-батарея - pytest без VRAM"
+commits: "закоммичено (ab52a33, база волны vektory79 @ 1de8069 = доки P8; DIRECT_EXECUTION): python/freetoken/scheduler/session_tier.py (compact() переписан: плотная переписка blob.bin.new воркерами, _write_journal_new вместо _rewrite_journal, swap.token, hard-link коммит, _recover_swap в replay_journal, refs-гейт откладывания, FREETOKEN_COMPACT_WRITERS), tests/scheduler/test_session_tier.py (+24 кейса: 19 основная волна + 5 фикс)"
+status: "реализован и закоммичен (ab52a33); гейты: файл==live PASS (153.19 -> 31.95 GiB == live, дважды; dead 0.0%), темп PARTIAL (1.40 ГБ/с device = x2.3 базы 0.60; >= 1.5 по букве НЕ взят - стена = конкурентный teardown движка при шатдауне), SIGKILL/byte-exact/resume/P2 fast-path PASS; батарея 183 passed (113 test_session_tier + 70 hybrid), 17.52 s, CPU-only; ревью 2 MAJOR + MINOR закрыты фикс-волной того же рабочего дерева"
+tags: [session-tier, compact, two-phase-commit, crash-safety, boot-recovery, swap-token, shutdown, nvme, io]
+---
+
+# Волна P9: two-phase сжатие тир-блоба компактом
+
+Реализация брифа задачи P9 из [TASK.md](TASK.md): компакт обязан УМЕНЬШАТЬ
+файл и переписывать его быстрее. База наблюдений - железная рука P5
+([P5-NOTES.md](P5-NOTES.md)): компакт копировал live-спаны на их же офсеты
+(после компакта 133.15 GiB при live 44.98 GiB, физический dead 66%) темпом
+0.60 ГБ/с QD1 (81.3 с на 44.98 ГиБ - доминанта over-cap стопа). Дизайн
+(state machine + crash-таблица), отчёт волны и отчёт фикс-волны лежали в
+git-игнорируемом каталоге `.tasks/boot-shutdown-io/p9-plan/` и после клона
+считаются утраченными (суть - ниже); железные логи руки - аналогично
+(`.tasks/boot-shutdown-io/p9-iron/`, там же бэкап прода journal-backup).
+
+## Проблема: два rename не атомарны
+
+При сжатии офсеты live-спанов МЕНЯЮТСЯ, поэтому блоб и журнал должны
+подмениться СОГЛАСОВАННО. Окно между двумя rename (старый журнал + новый
+блоб) дало бы crc-мимо на ВСЕХ живых записях - потерю всего live; crc-реплей
+остаётся только последним рубильником, а не плановым механизмом.
+
+## Дизайн: two-phase commit с hard-link якорем
+
+Фаза сборки (крэш -> старое состояние цело целиком):
+
+1. `blob.bin.new` - параллельная переписка live-спанов ПЛОТНО (новые офсеты
+   0, B1, B1+B2, ...): pread со старых офсетов -> pwrite, 8 воркеров
+   (прецедент P4), чанк 32 МиБ; при копировании считается payload-crc
+   копируемых байт и сверяется с журнальной записью - мисматч = аборт всего
+   компакта (файл не тронут). fsync(.new) + fsync dir.
+2. `journal.log.new` - те же keep-записи с НОВЫМИ off (payload-crc считается
+   по содержимому, не по офсету - остальные поля неизменны). fsync + fsync dir.
+3. `swap.token` - {blob_size, journal_bytes, journal_sha256, old_blob_size,
+   old_journal_bytes, generation}: tmp + fsync + rename + fsync dir.
+   МОМЕНТ АРМИРОВАНИЯ: далее любые крэши восстанавливает бут-рекавери,
+   а не откат копейки.
+
+Фаза коммита (каждый шаг атомарен, рекавери управляется наличием файлов):
+
+4. hard-link якоря: `blob.bin.old` = link(blob.bin), `journal.log.old` =
+   link(journal.log), fsync dir (старые иноды переживают rename).
+5. rename(blob.bin.new -> blob.bin); rename(journal.log.new -> journal.log).
+6. fsync dir (ренеймы durable) - и ТОЛЬКО после него unlink(blob.bin.old,
+   journal.log.old, swap.token); fsync dir. Срыв unlink/fsync оставляет
+   якоря/токен на диске - бут-рекавери идемпотентно дошивает (урок W10).
+
+Инвариант: SIGKILL в любой точке -> старое состояние цело целиком (до
+армирования) ИЛИ пара (blob, journal) дошита бут-рекавери (после).
+
+## Бут-рекавери `_recover_swap`
+
+Вызывается в `replay_journal` ДО чтения журнала/маркера; каждая ветка обёрнута
+в try/except с ОДНИМ retry (B2) - рекавери никогда не валит бут, при отказе
+дальше работает crc-реплей.
+
+| находка на диске | действие | результат |
+|---|---|---|
+| token НЕТ | unlink мусора: *.new, *.old, swap.token.new, легаси *.compact | старое состояние, как до P9 |
+| token ЕСТЬ, размеры+sha сходятся | дозавершить: недостающие rename, unlink .old + token, fsync dir | сжатое состояние |
+| token ЕСТЬ, НЕ сходится, якоря живы ИЛИ пара = старые размеры | откат: rename(.old -> основной), unlink .new + token | старое состояние бит-в-бит |
+| token ЕСТЬ, НЕ сходится, якорей нет | дозавершить (prefer complete) | сжатое состояние; mismatch = пост-коммитная порча, вне модели |
+
+- Предикат rollback-vs-completed ДЕТЕРМИНИРОВАН (урок W11): rollback только
+  пока старая пара восстановима. Якоря - индикатор ФАЗЫ, сильнее размеров:
+  при совпадении старого и нового объёмов размеры неоднозначны, якоря - нет;
+  старые размеры в токене покрывают фазу до якорей.
+- Токен-проверка O(журнала) (sha256 файла журнала, KBs..MB), НЕ O(блоба):
+  полный контроль контента уже сделан воркерами при копировании (каждая
+  запись) до армирования; sparse-дыра в .new невозможна (все воркеры
+  завершились + fsync до токена).
+
+## Crash-таблица W1-W14 (сводно)
+
+| W | окно | бут-рекавери | потеря live |
+|---|---|---|---|
+| W1 | старт компакта .. конец копии .new | token нет -> unlink .new | нет |
+| W2 | .. конец journal.log.new | token нет -> unlink .new | нет |
+| W3 | .. rename token на место | token нет -> unlink (+swap.token.new) | нет |
+| W4 | token армирован .. link .old | sha ок -> дозавершить | нет |
+| W5 | после link .. rename blob | sha ок -> дозавершить | нет |
+| W6 | rename blob .. rename journal (новый blob + СТАРЫЙ журнал) | sha ок -> rename journal, unlink .old+token; без рекавери был бы полный лосс - в этом смысл токена | нет |
+| W7 | rename journal .. unlink .old | sha ок -> unlink .old+token | нет |
+| W8 | unlink .. fsync dir (token/.old могут воскреснуть) | обе ветви сходятся к завершённой | нет |
+| W9 | порча .new после армирования, размер менялся | откат через .old | нет |
+| W10 | RUNTIME OSError в commit ПОСЛЕ армирования | фикс: НЕ чистить; синхронный откат через .old, иначе оставить ВСЁ бут-рекавери (pre-fix cleanup сносил якоря -> crc-дроп всех живых) | нет |
+| W11 | неоднозначность rollback-vs-completed при совпадении размеров | фикс: детерминированный предикат (якоря = фаза; старые размеры = commit не начинался) | нет |
+| W12 | контент-порча .new при живом размере до ренеймов | rollback по якорям/старым размерам; после ренеймов - crc-реплей | вне модели отказов (признано) |
+| W13 | OSError после армирования, откат невозможен (якоря снесены) | evidence оставлено; стор до рестарта живёт на расходящихся in-memory офсетах | нет (после рестарта) |
+| W14 | ВТОРОЙ compact при висящем токене | guard на входе: warning + rc=0, evidence НЕ тронут (pre-fix второй swap затирал .new/токен) | нет |
+
+POWER LOSS покрыт теми же ветками при соблюдении барьеров (fsync .new /
+journal.new / dir-fsync до токена; dir-fsync токена до коммитных rename).
+
+## Error-path уроки (главное из ревью и верификации)
+
+- W10, cleanup-vs-evidence: после армирования except-блок НЕ имеет права
+  чистить - unlink якорей лишает и синхронного отката, и бут-рекавери его
+  индикатора фазы. Правило: откат только через .old; невозможен - оставить
+  ВСЁ бут-рекавери; unlink строго после финального fsync_dir.
+- W11, settle/anchors-as-phase-indicator: неоднозначные состояния разрешаются
+  индикатором фазы (якоря), а не сравнением размеров; размеры - только
+  вспомогательный признак фазы до якорей.
+- W14, evidence-preserving повторный вход: операция с висящим армированным
+  состоянием обязана гвардить вход (warning + no-op), иначе второй запуск
+  затирает evidence. Принятое следствие: стор до рестарта живёт на
+  mismatched in-memory офсетах (restores читают новые байты по старым
+  офсетам), бут сходится байт-в-байт. W13 - armed-fail без отката: это
+  НЕ ошибка, а штатная передача evidence буту.
+
+Методика error-path тестов - продолжение
+[deterministic-concurrency-tests.md](../../methods/deterministic-concurrency-tests.md)
+(раздел "Сопутствующий урок волны P9").
+
+## MINOR закрытия фикс-волны
+
+- B3: `write_shutdown_marker` НЕ пишет маркер при `_dead_records > 0`
+  (отложенный/неслучившийся компакт) - иначе маркер благословлял бы состояние
+  "журнал != live"; бут идёт полным путём, зомби-записи воскресают по
+  discard-durability одинаково на обоих путях и вымываются LRU.
+- A4: fd reopen (compact + `_recover_swap`) - открыть в локальную, потом
+  close+assign (EIO на open не оставляет процесс без фд); хвост - warning +
+  старые fd.
+- B5: `FREETOKEN_COMPACT_WRITERS` clamp <= 64 с warning (P6/P1-прецедент),
+  autouse-фикстура чистит env.
+- refs-гейт: компакт ОТКЛАДЫВАЕТСЯ (no-op, rc=0) при restore-чтениях блоба
+  в полёте (офсеты-то меняются); на шатдауне тикетки дропнуты до компакта,
+  гонок нет; runtime - компакт повторится позже.
+- B2: один retry упавшей ветки `_recover_swap` до передачи в replay.
+
+## Железо
+
+Методика P5-iron: /proc/diskstats-дельты 10 Гц, blob-кривые 20 Гц
+(blob.bin / blob.bin.new), собственные фазовые метки
+LAUNCH/READY/COMPACT_START/COMPACT_END (не таймстампы лога); iostat на этой
+машине сломан; VRAM-гейт перед волной 1171 MiB - открыт; census по своей
+форме, журнал прода забэкаплен до первого бута.
+
+Старт тира: 240 records / 45.36 GiB live / blob 133.53 GiB (dead 66% -
+watermark-дыры). A/B на идентичной нагрузке (кап 32 GiB, fill 26, graceful
+стоп), live на компакте 31.95 GiB / 169 records во всех руках:
+
+| метрика | BASE 1de8069 | P9 (8 воркеров, 8 МиБ) | P9B (16 воркеров, 32 МиБ, ftruncate+fadvise+fdatasync) |
+|---|---|---|---|
+| blob до компакта | 143.36 GiB | 153.19 GiB* | 51.60 GiB* |
+| blob ПОСЛЕ | 143.36 GiB (НЕ сжался) | 31.95 GiB == live | 31.95 GiB == live |
+| окно копии | ~61 с | 50.4 с | ~55 с |
+| темп device (diskstats) | 1.17 ГБ/с | 1.40 ГБ/с | 1.27 ГБ/с |
+| dead после (дыры) | 111.41 GiB (77.7%) | 0.0% | 0.0% |
+
+\* разница "до" - наследие предыдущей руки; объём копии одинаков (live
+31.95 GiB). P9B = финальное состояние рабочего дерева (гигиена page-cache),
+паритет темпа с P9.
+
+| гейт | факт | вердикт |
+|---|---|---|
+| файл == live | 153.19 -> 31.95 == live (дважды: 51.60 -> 31.95), постфлайт dead 0.0%, мусора нет | PASS |
+| темп >= 1.5 ГБ/с device | 1.40 ГБ/с = x2.3 от базы 0.60; по букве НЕ взят | PARTIAL |
+| SIGKILL mid-copy | kill -9 при .new = 7.93 GB (~19% live) -> бут: 221 rec / 41.77 GiB живы, .new вычищен, полный путь 25 с | PASS |
+| byte-exact / resume HIT | cached=9280/9323 (99.5%) после сжатия, fast-бута и рекавери | PASS |
+| P2 fast-path после сжатия | 169 records, 0 с, маркер VALID с новым getsize | PASS |
+
+### Стена темпа: окружение шатдауна, не код
+
+Зонд ВНЕ сервера тем же паттерном (8 воркеров x 8 МиБ pread->pwrite): copy
+3.21 ГБ/с. Внутри на шатдауне та же копия - 0.68 ГБ/с blob / 1.40 ГБ/с
+device. P9 vs P9B (воркеры/чанки/fadvise) - паритет => узкое место внешнее:
+конкурентный teardown движка в том же процессе (munmap/munlock ~125 ГиБ
+банков, cudaHostFree; P5-iron замерял 578 CPU-с на окне) + writeback хвоста
+флаша. crc32c исключён (33 ГБ/с однопоточно). Следствие: runtime-компакт на
+idle-точках обязан идти ~3 ГБ/с; шатдауновский - плато ~1.4. Следующий рычаг
+- разнос компакта и teardown, не тюнинг воркеров/чанков.
+
+## Тесты (fails-before дословный)
+
++24 кейса в `tests/scheduler/test_session_tier.py` (19 основная волна +
+5 фикс): shrink до суммы padded live; SIGKILL-матрица 9 окон (monkeypatch
+os.link/os.rename/os.unlink/записи токена, unwrapped исключение на каждой
+границе фаз); recovery complete/rollback-blob/rollback-journal; параллельная
+копия байт-точна серийной; P8-леджер/holes после сжатия; P2-маркер fast-path;
+stale-fd append; refs-defer; legacy-cleanup; фикс-волна: oserror_mid_commit
+(W10), oserror_before_arm, boot_recovery_rollback_with_anchors, marker_skipped
+(B3), compact_writers_env_clamped (B5). Батарея: 183 passed (113 +
+70 hybrid), 17.52 s, CPU-only. Fails-before: 22/24 красны на HEAD (точечный
+stash session_tier.py+tests с md5-гейтом, методика -
+[test-fails-before.md](../../methods/test-fails-before.md)); 4/5 в
+фикс-волне (rollback_with_anchors зелёный и на pre-fix - оставлен контрактом
+новой классификации).
+
+## НЕ тронато и отложенное
+
+НЕ тронато: P2-маркер (инвалидация/запись), P3 journal-fd reopen дисциплина
+(расширена на блоб-фд), P4-конвейер, P6 env-паттерн, P8 record-гейт и ledger,
+формат журнала, ключ выживания (path_key, off, n), пин-контракт.
+
+Отложенное (решение пользователя / отдельный бриф):
+
+- коммит волны - закоммичен (ab52a33, 1 PR: session_tier.py + тесты);
+- кандидат-рычаг: разнос компакта и teardown - забрифицирован как P11
+  ([TASK.md](TASK.md), задача P11);
+- libaio-бэкенд не делался (прецедент P7: default direct, io_uring opt-in).
+- token-recovery окно (~мс между arm и commit) на железе не демонстрировалось
+  (поллинг не попадает) - покрыто CPU-матрицей 9 окон; на железе показан
+  mid-copy крэш.
+
+## Связанное
+
+- Бриф и ход волны: [TASK.md](TASK.md), "# Задача P9".
+- Предыдущая волна компакта: [P8-NOTES.md](P8-NOTES.md) (record-гейт:
+  watermark-дыры сами компакт больше не поднимают - их сжатие за P9).
+- Наблюдение-источник: [P5-NOTES.md](P5-NOTES.md), "Железная рука".
+- Тема (место P9 в дизайн-хронологии тиринга):
+  [../../topics/session-cache-tiering.md](../../topics/session-cache-tiering.md);
+  error-path методика:
+  [../../methods/deterministic-concurrency-tests.md](../../methods/deterministic-concurrency-tests.md).

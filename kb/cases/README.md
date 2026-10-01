@@ -75,8 +75,11 @@ Specification / Acceptance / Checklist.
   (CPU-волна, анкоммичено: record-based гейт компакта по ledger мёртвых
   записей вместо watermark-дыр, stats_line dead=Nrec/X MiB + holes=Y MiB,
   батарея 157 passed, STOP GATE READY) -
-  [P8-NOTES.md](boot-shutdown-io/P8-NOTES.md); P9 (реальное сжатие файла
-  компактом + темп) остаётся OPEN.
+[P8-NOTES.md](boot-shutdown-io/P8-NOTES.md); P9 реализован 2026-10-01
+  (закоммичен ab52a33: two-phase сжатие тир-блоба компактом с бут-рекавери; гейты:
+  файл==live PASS - 153.19 -> 31.95 GiB, темп PARTIAL 1.40 ГБ/с device =
+  x2.3 базы, стена - teardown шатдауна; батарея 183 passed) -
+  [P9-NOTES.md](boot-shutdown-io/P9-NOTES.md).
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
