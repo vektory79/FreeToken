@@ -47,10 +47,11 @@ def det_clock():
 @pytest.fixture(autouse=True)
 def _flush_env_clean(monkeypatch):
     """P1 lesson (env-config-hygiene): a shell-exported FREETOKEN_* env var silently
-    overrides what a test thinks it is testing - drop both flush knobs unless the test
+    overrides what a test thinks it is testing - drop all three knobs unless the test
     sets them explicitly."""
     monkeypatch.delenv("FREETOKEN_FLUSH_WRITERS", raising=False)
     monkeypatch.delenv("FREETOKEN_FLUSH_GROUP_BYTES", raising=False)
+    monkeypatch.delenv("FREETOKEN_COMPACT_WRITERS", raising=False)
 
 
 def _cfg(ram=RAM_BYTES, ssd=SSD_BYTES, d=None):
@@ -587,11 +588,13 @@ def test_offer_never_raises_on_pwrite_or_fdatasync_oserror(tmp_path, monkeypatch
             monkeypatch.undo()
 
 
-def test_compact_drops_dead_records_and_converges_after_sigkill(tmp_path):
-    """N5: compaction keeps exactly the live segments; a SIGKILL after the blob rename but
-    before the journal rewrite (simulated by restoring the old journal bytes) still replays
-    to exactly the live set via the payload-crc check; twice-compaction and zero-dead
-    compaction are no-ops."""
+def test_compact_drops_dead_records_and_crc_last_resort(tmp_path):
+    """N5 (P9-reworked): compaction keeps exactly the live segments and SHRINKS the file
+    to the live volume; twice-compaction and zero-dead compaction are no-ops. The
+    pre-P9 'stale journal against the new blob' crash window is unreachable now (the
+    swap token completes the pair at boot - see the SIGKILL matrix), so the payload-crc
+    last resort is asserted against a hand-tampered pair: stale offsets mismatch and
+    drop, garbage never resurrects."""
     from freetoken.kvcache.utils import chain_page_key
 
     d = tmp_path / "c"
@@ -605,21 +608,19 @@ def test_compact_drops_dead_records_and_converges_after_sigkill(tmp_path):
 
     stale_journal = (d / "journal.log").read_bytes()
     assert store.compact() == 1                            # one dead record dropped
+    assert (d / "blob.bin").stat().st_size == 2 * 4096     # P9: file == live volume
     assert store.compact() == 0                            # idempotent no-op
 
-    # SIGKILL after the blob rename, before the journal rewrite:
+    # hand-tampered pair (stale journal + shrunk blob): every stale offset mismatches
+    # (moved or past-eof) and replay drops all of them
     (d / "journal.log").write_bytes(stale_journal)
     reborn = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    assert reborn.replay_journal() == 2                    # exactly the live segments
-    assert reborn.probe([chain_page_key(None, (1,))]) is None    # the dead one stays dead
-    for i in (2, 3):
-        k = chain_page_key(None, (i,))
-        hit = reborn.probe([k])
-        assert hit is not None and hit[0] == 1
-        got, _ = reborn.restore(hit[1])
-        assert got[0] == data[k]                           # byte-identical restores
-    assert reborn.compact() == 1                           # the stale journal still lists it
-    assert reborn.compact() == 0                           # idempotent
+    assert reborn.replay_journal() == 0                    # crc last resort, no garbage
+    assert reborn.probe([chain_page_key(None, (1,))]) is None
+    # all 3 journal records are now dead (their holders were dropped): the next
+    # compact reclaims the WHOLE file down to the (empty) live volume
+    assert reborn.compact() == 3
+    assert (d / "blob.bin").stat().st_size == 0
 
 
 # --------------------------------------------------------------------- metrics
@@ -679,21 +680,21 @@ def test_maybe_compact_watermark_and_floor(tmp_path, monkeypatch):
     monkeypatch.setattr(st_mod, "_COMPACT_FLOOR_BYTES", 4096)
     assert store.maybe_compact() == 2      # watermark + lowered floor: rewrite fires
     assert store._dead_bytes == 0 and store._ssd_used == 2 * 4096
-    # live records keep their ORIGINAL offsets (holes at the head), so the truncated
-    # file ends at the last live record, not at _ssd_used
-    assert (d / "blob.bin").stat().st_size == 4 * 4096
-    assert store._blob_eof == 4 * 4096     # resynced to the truncated file's real EOF
+    # P9: the two survivors are DENSELY repacked - the file IS the live volume now
+    assert (d / "blob.bin").stat().st_size == 2 * 4096
+    assert store._blob_eof == 2 * 4096     # resynced to the shrunk file's real EOF
 
     monkeypatch.setattr(st_mod, "_COMPACT_DEAD_FRACTION", 0.5)
     for i in (5, 6):
         k = chain_page_key(None, (i,))
         assert store.offer(bytes([i]) * 16, 1, [(k, bytes([i]) * PAGE)])
     assert store.evict_store(1) == 1
-    assert store._dead_bytes == 4096 and store._blob_eof == 6 * 4096       # 17% < 50%
+    assert store._dead_bytes == 4096 and store._blob_eof == 4 * 4096       # 25% < 50%
     assert store.maybe_compact() == 0      # below the watermark: no trigger
     monkeypatch.setattr(st_mod, "_COMPACT_DEAD_FRACTION", 0.1)
     assert store.maybe_compact() == 1
     assert store._dead_bytes == 0
+    assert store._blob_eof == 3 * 4096     # shrunk again to the live volume
 
 
 def test_compaction_cannot_interleave_a_locked_store(tmp_path, monkeypatch):
@@ -872,6 +873,475 @@ def test_stats_line_holes_never_negative(tmp_path):
     line = boot.stats_line()
     assert "holes=0.0MiB" in line
     assert "=-" not in line               # no negative gauge anywhere in the line
+
+
+# ------------------------------------------------- P9: shrinking compact swap
+
+
+class _Crash(Exception):
+    """Simulated SIGKILL inside the swap: compact's handled-abort path catches OSError,
+    so the crash must be a different kind to leave the half-done on-disk state behind."""
+
+
+def _crash_on_fs(monkeypatch, predicate):
+    """Wrap the module-visible os link/rename/unlink/pwrite so any call whose args
+    satisfy predicate(name, args) raises _Crash (a simulated SIGKILL mid-swap)."""
+    import freetoken.scheduler.session_tier as st
+    real = {n: getattr(os, n) for n in ("link", "rename", "unlink", "pwrite")}
+
+    def make(n, orig):
+        def hooked(*a, **k):
+            if predicate(n, a):
+                raise _Crash(f"simulated SIGKILL in {n}")
+            return orig(*a, **k)
+        return hooked
+
+    for n, orig in real.items():
+        monkeypatch.setattr(st.os, n, make(n, orig))
+
+
+def _tier_files(d):
+    return sorted(p.name for p in os.scandir(str(d)))
+
+
+def _shrink_fixture(root, n=3, dead=(1,)):
+    """n offers in L2-only mode; the `dead` indexes evicted (true discards -> dead
+    records). Survivors are validated first so LRU evicts exactly the dead ones."""
+    d = root / "tier"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    data = {}
+    for i in range(1, n + 1):
+        k = chain_page_key(None, (i,))
+        data[k] = bytes([i]) * PAGE
+        assert store.offer(bytes([i]) * 16, 1, [(k, data[k])])
+    if dead:
+        for i in range(1, n + 1):
+            if i in dead:
+                continue
+            hit = store.probe([chain_page_key(None, (i,))])
+            store.restore(hit[1])
+        assert store.evict_store(len(dead)) == len(dead)
+    return d, store, data
+
+
+def _restore_all(store, data, live):
+    for i in live:
+        hit = store.probe([chain_page_key(None, (i,))])
+        assert hit is not None, f"record {i} missing"
+        assert store.restore(hit[1])[0] == [data[chain_page_key(None, (i,))]]
+
+
+def test_compact_shrinks_file_to_live_volume(tmp_path):
+    """P9 (a): after compact the blob file is EXACTLY the live volume (dense repack),
+    not the old watermark; the offsets moved and everything still restores."""
+    d, store, data = _shrink_fixture(tmp_path, n=4, dead=(1, 4))
+    assert (d / "blob.bin").stat().st_size == 4 * 4096
+    assert store.compact() == 2
+    assert (d / "blob.bin").stat().st_size == 2 * 4096      # file == live volume
+    assert store._blob_eof == 2 * 4096 and store._ssd_used == 2 * 4096
+    assert _tier_files(d) == ["blob.bin", "journal.log"]    # no swap debris
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 2
+    _restore_all(boot, data, [2, 3])
+
+
+def test_compact_copy_is_byte_exact_vs_serial_reference(tmp_path):
+    """P9 (c): the parallel copy lands the same bytes a serial reference copy would:
+    each live span is byte-identical at its NEW dense offset, crc fields unchanged."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(2,))
+    old_blob = (d / "blob.bin").read_bytes()
+    before = {rec["path_key"]: rec for rec in store._parse_journal()}
+    assert store.compact() == 1
+    new_blob = (d / "blob.bin").read_bytes()
+    after = store._parse_journal()
+    assert len(after) == 2
+    dense = 0
+    for rec in after:
+        old_rec = before[rec["path_key"]]
+        span = (rec["n"] + 4095) // 4096 * 4096
+        assert rec["off"] == dense                          # dense packing, no gaps
+        assert old_rec["crc"] == rec["crc"]                 # content crc unchanged
+        assert (new_blob[rec["off"]:rec["off"] + span]
+                == old_blob[old_rec["off"]:old_rec["off"] + span])
+        dense += span
+    assert len(new_blob) == dense
+
+
+_CRASH_WINDOWS = {
+    # commit not armed: boot cleanup -> old state (the dead record still replays)
+    "copy": lambda n, a: n == "pwrite",
+    "jnew": None,                       # store-method patch: after journal.new durable
+    "token": lambda n, a: n == "rename" and str(a[0]).endswith("swap.token.new"),
+    # token armed: boot recovery completes the swap
+    "link-blob": lambda n, a: n == "link" and str(a[0]).endswith("blob.bin"),
+    "link-journal": lambda n, a: n == "link" and str(a[0]).endswith("journal.log"),
+    "rename-blob": lambda n, a: n == "rename" and str(a[0]).endswith("blob.bin.new"),
+    "rename-journal": lambda n, a: n == "rename" and str(a[0]).endswith("journal.log.new"),
+    "unlink-old": lambda n, a: n == "unlink" and str(a[0]).endswith(".old"),
+    "unlink-token": lambda n, a: n == "unlink" and str(a[0]).endswith("swap.token"),
+}
+
+
+@pytest.mark.parametrize("window", sorted(_CRASH_WINDOWS))
+def test_compact_sigkill_matrix_converges(tmp_path, monkeypatch, window):
+    """P9 (b): a crash at EVERY step of the swap converges at boot to either the old or
+    the shrunk state - live records byte-exact, journal consistent, no swap debris.
+    Windows before the token arms leave the old state; after, recovery completes."""
+    d, store, data = _shrink_fixture(tmp_path, n=4, dead=(1,))
+    if window == "copy":
+        calls = {"n": 0}
+        real_pwrite = os.pwrite
+
+        def flaky(fd, buf, off):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise _Crash("mid-copy")
+            return real_pwrite(fd, buf, off)
+
+        monkeypatch.setattr("freetoken.scheduler.session_tier.os.pwrite", flaky)
+    elif window == "jnew":
+        real_jnew = store._write_journal_new
+
+        def boom(keep, layout):
+            real_jnew(keep, layout)
+            raise _Crash("after journal.new")
+
+        monkeypatch.setattr(store, "_write_journal_new", boom)
+    else:
+        _crash_on_fs(monkeypatch, _CRASH_WINDOWS[window])
+    with pytest.raises(_Crash):
+        store.compact()
+    monkeypatch.undo()
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    n = boot.replay_journal()
+    shrunk = (d / "blob.bin").stat().st_size == 3 * 4096
+    if window in ("copy", "jnew", "token"):
+        assert not shrunk and n == 4        # old state: the dead record still replays
+    else:
+        assert shrunk and n == 3            # recovery completed the swap
+    assert _tier_files(d) == ["blob.bin", "journal.log"]
+    _restore_all(boot, data, [2, 3, 4])
+
+
+def test_boot_recovery_completes_armed_swap(tmp_path, monkeypatch):
+    """P9 (g1): crash after the token armed, staged pair intact -> boot recovery
+    completes the swap and logs it; the result is the clean shrunk state."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    _crash_on_fs(monkeypatch, lambda n, a: n == "link")
+    with pytest.raises(_Crash):
+        store.compact()
+    monkeypatch.undo()
+    assert os.path.exists(str(d / "swap.token"))
+    assert os.path.exists(str(d / "blob.bin.new"))
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    with _tier_log_capture() as cap:
+        assert boot.replay_journal() == 2
+    assert any("completed interrupted compact swap" in m for m in cap.messages)
+    assert (d / "blob.bin").stat().st_size == 2 * 4096
+    assert _tier_files(d) == ["blob.bin", "journal.log"]
+    _restore_all(boot, data, [2, 3])
+
+
+def test_boot_recovery_rolls_back_broken_staged_pair(tmp_path, monkeypatch):
+    """P9 (g2): armed token + corrupted staged blob (truncated) -> boot rolls back to
+    the .old inodes; the OLD layout is intact bit-for-bit (the dead record resurrects -
+    it was never physically dropped), swap debris is gone."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    _crash_on_fs(monkeypatch, lambda n, a: n == "link")
+    with pytest.raises(_Crash):
+        store.compact()
+    monkeypatch.undo()
+    with open(str(d / "blob.bin.new"), "r+b") as f:
+        f.truncate(4096)
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    with _tier_log_capture() as cap:
+        assert boot.replay_journal() == 3
+    assert any("rolled back" in m for m in cap.messages)
+    assert (d / "blob.bin").stat().st_size == 3 * 4096
+    assert _tier_files(d) == ["blob.bin", "journal.log"]
+    _restore_all(boot, data, [2, 3])
+
+
+def test_boot_recovery_rolls_back_stale_staged_journal(tmp_path, monkeypatch):
+    """P9 (g3): armed token + corrupted staged JOURNAL (sha mismatch) -> same rollback."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    _crash_on_fs(monkeypatch, lambda n, a: n == "link")
+    with pytest.raises(_Crash):
+        store.compact()
+    monkeypatch.undo()
+    with open(str(d / "journal.log.new"), "r+b") as f:
+        f.seek(20)
+        b = f.read(1)
+        f.seek(20)
+        f.write(bytes([b[0] ^ 0xFF]))
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    with _tier_log_capture() as cap:
+        assert boot.replay_journal() == 3
+    assert any("rolled back" in m for m in cap.messages)
+    assert (d / "blob.bin").stat().st_size == 3 * 4096
+    _restore_all(boot, data, [2, 3])
+
+
+def test_boot_cleans_legacy_and_swap_temps(tmp_path):
+    """Boot with no token removes pre-P9 compact debris and interrupted P9 temps."""
+    d = tmp_path / "tier"
+    d.mkdir()
+    (d / "blob.bin").write_bytes(b"")
+    (d / "journal.log").write_bytes(b"")
+    (d / "blob.bin.compact").write_bytes(b"junk")   # pre-P9 crash debris
+    (d / "blob.bin.new").write_bytes(b"junk")       # interrupted P9 copy
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert store.replay_journal() == 0
+    assert _tier_files(d) == ["blob.bin", "journal.log"]
+
+
+def test_compact_resets_p8_ledger_and_stats(tmp_path):
+    """P9 (d): after the shrink the P8 record ledger and the watermark holes are all
+    zero and the stats line reports the honest zero state."""
+    d, store, data = _shrink_fixture(tmp_path, n=4, dead=(1, 2))
+    assert store._dead_records == 2 and store._dead_record_bytes == 2 * 4096
+    assert store._dead_bytes == 2 * 4096
+    assert store.compact() == 2
+    snap = store.snapshot()
+    assert snap["dead_records"] == 0 and snap["dead_record_bytes"] == 0
+    assert snap["dead_bytes"] == 0 and snap["blob_eof"] == 2 * 4096
+    line = store.stats_line()
+    assert "dead=0rec/0.0MiB" in line and "holes=0.0MiB" in line
+
+
+def test_graceful_stop_after_shrink_marker_fast_path(tmp_path, monkeypatch):
+    """P9 (e): the shutdown discipline (invalidate -> flush -> compact -> marker) leaves
+    a VALID marker with the SHRUNK getsize; the next boot fast-paths with zero preads."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    _graceful_stop(store)
+    assert os.path.exists(_marker_path(d))
+    assert (d / "blob.bin").stat().st_size == 2 * 4096
+
+    def boom(*args, **kwargs):
+        raise AssertionError("payload pread must not happen on the fast path")
+
+    monkeypatch.setattr("freetoken.scheduler.session_tier.os.pread", boom)
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d))
+    assert n == 2
+    assert any("replay fast-path (clean shutdown marker)" in m for m in cap.messages)
+    _restore_all(boot, data, [2, 3])
+
+
+def test_append_after_shrink_survives_boot_double_reopen(tmp_path):
+    """P9 (f): after BOTH files were renamed, the store's blob and journal fds must be
+    re-opened on the new inodes: a post-compact append (new blob span + journal record)
+    must survive a crash boot byte-exactly (stale-fd regression, P3-era discipline)."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    assert store.compact() == 1
+    k4 = chain_page_key(None, (4,))
+    data4 = bytes([4]) * PAGE
+    assert store.offer(bytes([4]) * 16, 1, [(k4, data4)])   # L2-only: direct append
+    recs, whole = _journal_records_raw(str(d / "journal.log"))
+    assert whole and len(recs) == 3
+    assert recs[-1]["off"] == 2 * 4096                      # appended at the dense EOF
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 3
+    hit = boot.probe([k4])
+    assert boot.restore(hit[1])[0] == [data4]
+    assert (d / "blob.bin").stat().st_size == 3 * 4096
+
+
+def test_compact_deferred_while_blob_read_in_flight(tmp_path):
+    """P9 (h): a shrinking swap must not move offsets under a by-path reader (restore /
+    prefetch staging read outside the store lock): with a refs pin held, compact is a
+    deferred no-op; released, it runs."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    hit = store.probe([chain_page_key(None, (2,))])
+    seg = store._segments[hit[1]._seg_id]
+    seg.refs += 1
+    with _tier_log_capture() as cap:
+        assert store.compact() == 0
+    assert any("compaction deferred" in m for m in cap.messages)
+    assert (d / "blob.bin").stat().st_size == 3 * 4096      # unchanged
+    seg.refs -= 1
+    assert store.compact() == 1
+    assert (d / "blob.bin").stat().st_size == 2 * 4096
+
+
+def test_compact_oserror_mid_commit_converges_to_old_pair(tmp_path, monkeypatch):
+    """Fix W10: a runtime OSError INSIDE _commit_swap after the arm (rename#2 here)
+    must roll back synchronously through the anchors - the pre-fix cleanup erased the
+    anchors and the token and left the NEW blob against the OLD journal: the next boot
+    dropped every live record."""
+    import freetoken.scheduler.session_tier as st
+
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    real_rename = os.rename
+
+    def flaky(src, dst):
+        if str(src).endswith("journal.log.new"):
+            raise OSError(5, "simulated EIO on the journal rename")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(st.os, "rename", flaky)
+    with _tier_log_capture() as cap:
+        assert store.compact() == 0
+    monkeypatch.undo()
+    assert any("rolled back" in m for m in cap.messages)
+    assert not any("left for boot recovery" in m for m in cap.messages)
+    assert _tier_files(d) == ["blob.bin", "journal.log"]   # no anchors/token debris
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 3                       # the OLD pair is intact
+    _restore_all(boot, data, [2, 3])
+
+
+def test_compact_oserror_before_arm_aborts_clean(tmp_path, monkeypatch):
+    """Fix (pre-arm path): an OSError while the commit has not started (the copy here)
+    aborts cleanly - the old pair is untouched, the staged garbage is cleaned up, and
+    the deferred dead records simply remain for the next compact."""
+    import freetoken.scheduler.session_tier as st
+
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+
+    def flaky(fd, buf, off):
+        raise OSError(5, "simulated EIO in the copy")
+
+    monkeypatch.setattr(st.os, "pwrite", flaky)
+    with _tier_log_capture() as cap:
+        assert store.compact() == 0
+    monkeypatch.undo()
+    assert any("aborted before arm" in m for m in cap.messages)
+    assert _tier_files(d) == ["blob.bin", "journal.log"]
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 3
+    _restore_all(boot, data, [2, 3])
+
+
+def test_boot_recovery_rollback_with_anchors(tmp_path, monkeypatch):
+    """Fix (recovery classification): crash between the renames (anchors up) + a
+    corrupted staged journal (sha mismatch) -> the boot rolls back to the OLD pair
+    byte-exactly instead of renaming the corrupted journal into place."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    _crash_on_fs(monkeypatch,
+                 lambda n, a: n == "rename" and str(a[0]).endswith("journal.log.new"))
+    with pytest.raises(_Crash):
+        store.compact()
+    monkeypatch.undo()
+    assert os.path.exists(str(d / "blob.bin.old"))          # anchors are up
+    with open(str(d / "journal.log.new"), "r+b") as f:
+        f.seek(20)
+        b = f.read(1)
+        f.seek(20)
+        f.write(bytes([b[0] ^ 0xFF]))                        # corrupt the staged journal
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    with _tier_log_capture() as cap:
+        assert boot.replay_journal() == 3
+    assert any("rolled back" in m for m in cap.messages)
+    assert _tier_files(d) == ["blob.bin", "journal.log"]
+    _restore_all(boot, data, [2, 3])
+
+
+def test_marker_skipped_when_dead_records_left(tmp_path, monkeypatch):
+    """Fix B3: a deferred compact leaves dead records journaled - writing a VALID marker
+    would bless the state as a clean-shutdown checkpoint even though journal != live set
+    (a later invariant break). No marker: the next boot takes the full path (the zombies
+    resurrect per discard durability - same on both paths) and the next compact run
+    classifies them as dead again."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    hit = store.probe([chain_page_key(None, (2,))])
+    seg = store._segments[hit[1]._seg_id]
+    seg.refs += 1                       # a blob read in flight: compact defers
+    with _tier_log_capture() as cap:
+        _graceful_stop(store)
+    seg.refs -= 1
+    assert any("marker skipped" in m for m in cap.messages)
+    assert not os.path.exists(_marker_path(d))
+    calls = _counting_pread(monkeypatch)                    # full path: payload crc ran
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 3
+    assert calls["n"] == 3
+    _restore_all(boot, data, [2, 3])
+
+
+def test_compact_writers_env_clamped(monkeypatch):
+    """Fix B5 (P1 precedent): a nonsense override must not fork a thread army - clamped
+    to 64 with a warning; in-range values pass through."""
+    import freetoken.scheduler.session_tier as st
+
+    monkeypatch.setenv("FREETOKEN_COMPACT_WRITERS", "1000")
+    with _tier_log_capture() as cap:
+        assert st._compact_writers(8) == 64
+    assert any("clamping" in m for m in cap.messages)
+    monkeypatch.setenv("FREETOKEN_COMPACT_WRITERS", "63")
+    assert st._compact_writers(8) == 63
+    monkeypatch.delenv("FREETOKEN_COMPACT_WRITERS")
+    assert st._compact_writers(8) == 8
+
+
+def test_second_compact_skipped_while_token_pending(tmp_path, monkeypatch):
+    """Fix: an armed failure that cannot roll back ('left for boot recovery') leaves the
+    token + anchors + staged pair up; a SECOND compact must NOT start on top of the
+    diverged disk - warning + rc=0, the recovery evidence survives, and the boot
+    converges through the token byte-exactly."""
+    import freetoken.scheduler.session_tier as st
+
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    real_rename = os.rename
+
+    def flaky(src, dst):        # everything fails EXCEPT the token's own rename: the
+        if str(src).endswith("swap.token.new"):   # arm lands, the commit cannot, and
+            return real_rename(src, dst)           # the rollback cannot either
+        raise OSError(5, "simulated EIO on every other rename")
+
+    monkeypatch.setattr(st.os, "rename", flaky)
+    with _tier_log_capture() as cap:
+        assert store.compact() == 0
+    monkeypatch.undo()
+    assert any("left for boot recovery" in m for m in cap.messages)
+    for name in ("swap.token", "blob.bin.old", "blob.bin.new", "journal.log.new"):
+        assert os.path.exists(str(d / name)), name
+
+    # the second compact on the SAME store: refused, evidence untouched
+    with _tier_log_capture() as cap2:
+        assert store.compact() == 0
+    assert any("compaction skipped, an armed swap token is still pending" in m
+               for m in cap2.messages)
+    assert any("generation=" in m for m in cap2.messages)
+    for name in ("swap.token", "blob.bin.old", "blob.bin.new", "journal.log.new"):
+        assert os.path.exists(str(d / name)), name
+
+    # boot: recovery completes the armed swap; live records byte-exact
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 2
+    assert _tier_files(d) == ["blob.bin", "journal.log"]
+    assert (d / "blob.bin").stat().st_size == 2 * 4096
+    _restore_all(boot, data, [2, 3])
+
+
+def test_recovery_reopen_failure_keeps_old_fds(tmp_path, monkeypatch):
+    """Atomic tail reopen in recovery: if the second open fails, the old fds stay open
+    and in charge (warned) - no fd is left closed or stale."""
+    import freetoken.scheduler.session_tier as st
+
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    _crash_on_fs(monkeypatch,
+                 lambda n, a: n == "rename" and str(a[0]).endswith("blob.bin.new"))
+    with pytest.raises(_Crash):
+        store.compact()             # crash between the renames: boot completes the swap
+    monkeypatch.undo()
+
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    real_open = os.open
+
+    def flaky(path, flags, *args):
+        if str(path).endswith("journal.log") and flags & os.O_WRONLY:
+            raise OSError(5, "simulated EIO on the journal reopen")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(st.os, "open", flaky)
+    with _tier_log_capture() as cap:
+        assert boot.replay_journal() == 2
+    monkeypatch.undo()
+    assert any("post-recovery fd reopen failed" in m for m in cap.messages)
+    assert boot._blob_fd >= 0 and boot._journal_fd >= 0
+    os.close(boot._blob_fd)                     # both fds valid: no double-close damage
+    os.close(boot._journal_fd)
 
 
 # ----------------------------------------------------------------- prefetch tickets
@@ -1971,10 +2441,10 @@ def test_flush_compact_offer_boot_two_generations(tmp_path):
         keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
         assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
     assert store.evict_store(1) == 1          # p1 is now dead
-    assert store.compact() == 1               # blob truncated, _blob_eof resynced
+    assert store.compact() == 1               # blob shrunk, _blob_eof resynced
     eof = store._blob_eof
-    assert eof == 3 * 4096                    # p1's head hole + two live records at
-    # ... their ORIGINAL offsets: the file ends at the last live record
+    assert eof == 2 * 4096                    # P9: the two live records are dense -
+    # ... the file IS the live volume, the next append lands at its EOF
     keys4, pages4 = _chain([(4, 0), (4, 1), (4, 2)])
     assert store.offer("p4".encode(), 3, pages4, _snap("4"))
     recs, whole = _journal_records_raw(str(d / "journal.log"))

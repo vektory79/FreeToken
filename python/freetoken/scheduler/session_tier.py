@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import crc32c
 import ctypes
+import hashlib
 import json
 import mmap
 import os
@@ -44,6 +45,9 @@ _BLOB_NAME = "blob.bin"
 # Clean-shutdown sidecar (P2): written only after a completed shutdown_tier; lets boot
 # replay skip the per-record payload crc re-read. Absent/stale/torn -> full verification.
 _MARKER_NAME = "shutdown.marker"
+# Shrinking compact (P9) two-phase-commit sidecars: the staged pair (.new), the old
+# inode anchors (.old) and the token that arms boot-time recovery of an interrupted swap.
+_SWAP_TOKEN_NAME = "swap.token"
 # Scheduled compaction (runtime, no CLI flag): rewrite the blob once dead bytes exceed
 # this share of the blob AND the blob is above the floor (no churn on small installs).
 _COMPACT_DEAD_FRACTION = 0.25
@@ -70,6 +74,11 @@ _FLUSH_GROUP_BYTES_MIN = 1 << 20
 # source for the reserved-but-unwritten span remainder.
 _PWRITEV_MAX_IOV = 512
 _ZERO_BLK = bytes(_BLK)
+# P9 compact copy: parallel pread->pwrite workers (P4 pipeline precedent) and the
+# per-worker chunk size; FREETOKEN_COMPACT_WRITERS overrides the workers (P6 pattern).
+_COMPACT_WRITERS = 8
+_COMPACT_CHUNK = 32 << 20
+_COMPACT_WRITERS_ENV = "FREETOKEN_COMPACT_WRITERS"
 
 
 def _flush_writers(requested: int) -> int:
@@ -112,6 +121,32 @@ def _flush_group_bytes(requested: int) -> int:
                        _FLUSH_GROUP_BYTES_ENV, raw, _FLUSH_GROUP_BYTES_MIN, requested)
         return requested
     return wanted
+
+
+def _compact_writers(requested: int) -> int:
+    """Concurrent pread->pwrite workers of the P9 compact copy; FREETOKEN_COMPACT_WRITERS
+    overrides for the iron A/B sweep. Unset -> the requested default; garbage or < 1 ->
+    the default with a warning; > 64 -> clamped to 64 with a warning (P1 precedent: a
+    nonsense override must not fork a thread army). Resolve ONCE per compact."""
+    raw = os.environ.get(_COMPACT_WRITERS_ENV, "").strip()
+    if not raw:
+        return requested
+    try:
+        wanted = int(raw)
+    except ValueError:
+        logger.warning("ignoring non-integer %s=%r; using compact writers=%d",
+                       _COMPACT_WRITERS_ENV, raw, requested)
+        return requested
+    if wanted < 1:
+        logger.warning("%s=%r below minimum 1; using compact writers=%d",
+                       _COMPACT_WRITERS_ENV, raw, requested)
+        return requested
+    if wanted > 64:
+        logger.warning("%s=%r above maximum 64; clamping compact writers=64",
+                       _COMPACT_WRITERS_ENV, raw)
+        wanted = 64
+    return wanted
+
 # Guards the cumulative mlock accounting (_Pool._locked_total): it is mutated from the
 # scheduler thread (pool construction, staging alloc, free_block) AND the reader thread
 # (staging close at ticket finalize).
@@ -471,6 +506,10 @@ class SessionTierStore:
         # unlink in invalidate_shutdown_marker so the discard hot path pays neither the
         # dir fsync nor the ENOENT syscall when no marker exists.
         self._marker_present = False
+        # P9 two-phase commit: True from the arm call until the commit fully lands -
+        # an OSError inside that window must NEVER lead to temp cleanup (the token and
+        # anchors on disk are the only recovery evidence; see the compact except path).
+        self._swap_armed = False
         # Blob bytes freed by L2 discards (regions read as zero holes) until compaction
         # reclaims them; boot replay recomputes this from the recovered record set.
         if self.dir is not None:
@@ -1491,8 +1530,18 @@ class SessionTierStore:
         blob mutation since boot followed the durable blob-before-journal order and the
         shutdown finished (flush + compact + final fsyncs). The generation guards against
         a size coincidence: a compaction can legitimately shrink the journal back to a
-        stale marker's recorded size."""
+        stale marker's recorded size.
+        B3: a VALID marker with dead records still journaled (the compact was deferred
+        by in-flight blob reads, or aborted before arm) would fast-path-boot those dead
+        records back as LIVE segments (discard durability) AND seed the P8 ledger 0/0 -
+        the zombies would then evade the next compact forever. No marker: the next boot
+        takes the full path, seeds the honest ledger, and the next compact reclaims."""
         if not self.enabled or not self._journal_path:
+            return
+        if self._dead_records:
+            logger.warning("session tier: shutdown marker skipped, %d dead records left "
+                           "(compact deferred/aborted); next boot re-verifies and the "
+                           "next compact reclaims them", self._dead_records)
             return
         try:
             rec = {"journal_bytes": os.path.getsize(self._journal_path),
@@ -1584,7 +1633,10 @@ class SessionTierStore:
         """Boot path: rebuild the L2 index from the journal. A truncated or torn tail
         (SIGKILL mid-append) stops replay at the last complete record. Idempotent: the
         L2 index is rebuilt from scratch each call."""
-        if not self.enabled or not self._journal_path or not os.path.exists(self._journal_path):
+        if not self.enabled or not self._journal_path:
+            return 0
+        self._recover_swap()
+        if not os.path.exists(self._journal_path):
             return 0
         with open(self._journal_path, "rb") as f:
             journal = f.read()
@@ -1712,8 +1764,8 @@ class SessionTierStore:
         (physical holes: discards, previous generations) must NOT gate this - with zero
         dead records compact() is a no-op and every ok-offer would pay a full journal
         parse for nothing (P5-iron finding 1). The holes= stat (watermark-minus-live)
-        resets to 0 after a compact while physical interior holes remain: reclaiming
-        them needs the P9 file rewrite, not this gate."""
+        resets to 0 after a compact, which since P9 physically reclaims them in the
+        same pass."""
         if not self.enabled or self._blob_fd < 0:
             return 0
         if self._blob_eof < _COMPACT_FLOOR_BYTES or \
@@ -1727,21 +1779,33 @@ class SessionTierStore:
         return dropped
 
     def compact(self) -> int:
-        """Shutdown-checkpoint log compaction (TASK.md Component 3): rewrite the blob with
-        only the live segments - at their ORIGINAL offsets, dead regions left as holes -
-        then rewrite the journal to the surviving records. Crash safety: the compacted blob
-        is fsync'ed and atomically renamed BEFORE the journal rewrite, so a SIGKILL between
-        the two leaves the OLD journal against the NEW blob; replay's payload-crc check
-        drops every dead record (its region reads as a zero hole), converging to exactly
-        the live segments. With zero dead records this is a no-op (returns 0).
+        """Shutdown-checkpoint log compaction (TASK.md Component 3) with the P9 physical
+        shrink: the live segments are DENSELY repacked into blob.bin.new (dead regions
+        reclaimed, file == live volume) and the journal is rewritten to the new offsets;
+        the pair is swapped under a two-phase commit armed by swap.token, so a SIGKILL
+        at any point converges at boot to either the old or the new state (see
+        _recover_swap) - replay's payload-crc check stays the last resort. With zero
+        dead records this is a no-op (returns 0).
         Lock coverage: runs entirely under the store's global RLock, serializing against
-        offer/evict/discard. A restore's blob read happens outside that lock, but reads a
-        LIVE record, which keeps its ORIGINAL offset across the rewrite (only dead regions
-        become holes), and a mid-restore segment is refs-guarded against discard - a
-        reader can never see different bytes for its segment."""
+        offer/evict/discard - no journal appends can happen inside. Blob READERS
+        (restore, prefetch staging) read by path outside that lock under a refs pin
+        taken under it; since P9 moves the offsets, the swap is DEFERRED (no-op) while
+        any refs pin is held: the check and the swap sit in the same lock hold. After
+        an unrecoverable armed failure ("left for boot recovery") the store keeps
+        running on mismatched in-memory offsets until restart; boot recovery converges,
+        and new compactions are refused while the swap token is pending."""
         if not self.enabled or self._blob_fd < 0:
             return 0
         with self._lock:
+            # Never start a second swap on top of a diverged disk: a pending swap token
+            # means a previous armed failure left its evidence for boot recovery - the
+            # next boot converges byte-exactly, but only if that evidence survives.
+            token = self._read_swap_token()
+            if token is not None:
+                logger.warning("session tier: compaction skipped, an armed swap token "
+                               "is still pending (%s); boot recovery owns it",
+                               self._describe_swap_token(token))
+                return 0
             # The rewrite moves both files: a marker a previous shutdown left behind no
             # longer describes this state the moment the rewrite starts.
             self.invalidate_shutdown_marker()
@@ -1756,39 +1820,403 @@ class SessionTierStore:
                     if (rec["path_key"], rec["off"], rec["n"]) in live]
             if len(keep) == len(records):
                 return 0                      # nothing dead: no-op (also covers empty journal)
-            tmp = self._blob_path + ".compact"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            ro = os.open(self._blob_path, os.O_RDONLY)   # _blob_fd itself is write-only
+            readers = [seg for seg in self._segments.values() if seg.refs]
+            if readers:
+                # A shrinking swap moves the offsets a by-path reader may be mid-read
+                # on: defer to the next trigger (pins drop within one restore).
+                logger.info("session tier: compaction deferred, %d blob reads in flight",
+                            len(readers))
+                return 0
+            old_size = os.path.getsize(self._blob_path)
+            live_bytes = sum((r["n"] + _BLK - 1) // _BLK * _BLK for r in keep)
+            logger.info("session tier: compact shrink start: %d records, live %.2f GiB "
+                        "(blob %.2f GiB)", len(keep), live_bytes / 2**30,
+                        old_size / 2**30)
+            # Cleanup stays legal only while the commit has NOT started: an OSError in
+            # the copy/journal/arm phase leaves the old pair untouched, so the staged
+            # files are pure garbage. The moment _commit_swap begins (anchors, renames)
+            # the swap counts as ARMED: an OSError must NEVER lead to temp cleanup -
+            # the token and anchors on disk are the only evidence boot recovery can
+            # finish or roll the swap back from. (W10: pre-fix cleanup after rename#1
+            # erased the anchors and left the NEW blob against the OLD journal -
+            # replay dropped every live record.)
             try:
-                for rec in keep:
-                    # copy the PADDED record span: the O_DIRECT reader reads block-aligned
-                    # windows, so a truncated tail would break restores of the last segment
-                    span = (rec["n"] + _BLK - 1) // _BLK * _BLK
-                    os.pwrite(fd, os.pread(ro, span, rec["off"]), rec["off"])
-                os.fsync(fd)
-            finally:
-                os.close(ro)
-                os.close(fd)
-            os.rename(tmp, self._blob_path)   # atomic: old blob intact until here
+                layout, total = self._copy_blob_shrunk(keep)
+                journal = self._write_journal_new(keep, layout)
+                self._arm_swap_token(total, journal, old_size)
+                self._swap_armed = True
+                self._commit_swap()
+            except OSError as e:
+                if self._swap_armed and self._rollback_armed_swap():
+                    logger.warning("session tier: compact shrink rolled back after "
+                                   "error (%s); blob unchanged", e)
+                elif self._swap_armed:
+                    logger.warning("session tier: compact shrink error after arm (%s); "
+                                   "token and anchors left for boot recovery", e)
+                else:
+                    logger.warning("session tier: compact shrink aborted before arm "
+                                   "(%s); blob unchanged", e)
+                    self._cleanup_swap_temps()
+                self._swap_armed = False
+                return 0
+            self._swap_armed = False
+            # Post-commit in-memory swap: segments jump to their dense offsets and BOTH
+            # fds are reopened on the renamed files (the journal-fd reopen discipline
+            # from the P3 era, extended to the blob fd - both names are new inodes).
+            by_key = {(seg.path_key.hex(), seg.l2_off, seg.l2_n): seg
+                      for seg in self._segments.values() if seg.in_l2}
+            for i, rec in enumerate(keep):
+                by_key[(rec["path_key"], rec["off"], rec["n"])].l2_off = layout[i]
+            new_fd = os.open(self._blob_path, os.O_WRONLY | os.O_CREAT, 0o644)
+            try:
+                new_jfd = os.open(self._journal_path,
+                                  os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            except OSError:
+                os.close(new_fd)      # keep BOTH old fds open and in charge
+                raise
             os.close(self._blob_fd)
-            self._blob_fd = os.open(self._blob_path, os.O_WRONLY | os.O_CREAT, 0o644)
-            self._rewrite_journal(keep)
-            # The rename above orphaned the open journal fd: it still points at the old
-            # (now unlinked) inode, so subsequent appends would be lost at reboot. Reopen
-            # the fresh file - same O_APPEND discipline as at __init__.
             os.close(self._journal_fd)
-            self._journal_fd = os.open(self._journal_path,
-                                       os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-            self._ssd_used = sum((r["n"] + _BLK - 1) // _BLK * _BLK
-                                 for r in keep)
-            # Runtime compaction is new (phase 1 ran it shutdown-only): re-sync _blob_eof
-            # to the truncated file, or the next append's journal offset would point above
-            # its data. Dead accounting is fully reclaimed by the rewrite.
+            self._blob_fd, self._journal_fd = new_fd, new_jfd
+            self._ssd_used = live_bytes
+            # The dense file has no holes: watermark and the P8 record ledger reset.
             self._blob_eof = os.lseek(self._blob_fd, 0, os.SEEK_END)
             self._dead_bytes = 0
             self._dead_records = 0
             self._dead_record_bytes = 0
+            logger.info("session tier: compact shrink: blob %.2f GiB -> %.2f GiB",
+                        old_size / 2**30, total / 2**30)
             return len(records) - len(keep)
+
+    def _fsync_dir(self) -> None:
+        dfd = os.open(self.dir, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+
+    def _copy_blob_shrunk(self, keep: list[dict]) -> tuple[dict[int, int], int]:
+        """P9 copy pass: every kept record's padded span is copied from the live blob
+        to its DENSE new offset in blob.bin.new by parallel pread->pwrite workers (P4
+        pipeline precedent, FREETOKEN_COMPACT_WRITERS). Each worker crcs the payload
+        bytes it copies (the first n of the span, per the record's crc_alg - padding is
+        not hashed, matching _write_blob) and a mismatch fails the whole copy: a live
+        record whose bytes no longer verify must never be moved. The PADDED span is
+        copied because the O_DIRECT reader reads block-aligned windows. OSError aborts
+        with the old blob untouched."""
+        tmp = self._blob_path + ".new"
+        dst = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        src = os.open(self._blob_path, os.O_RDONLY)   # _blob_fd itself is write-only
+        layout: dict[int, int] = {}
+        spans = []
+        off = 0
+        for i, rec in enumerate(keep):
+            span = (rec["n"] + _BLK - 1) // _BLK * _BLK
+            layout[i] = off
+            spans.append((off, rec["off"], span, rec["n"],
+                          rec.get("crc"), rec.get("crc_alg")))
+            off += span
+        total = off
+        # Preallocate: block allocation off the writers' critical path (P9B iron: the
+        # extent allocation stalls showed as a mid-copy dip on the NVMe).
+        os.ftruncate(dst, total)
+
+        def _copy_one(idx: int) -> None:
+            dst_off, src_off, span, need, crc, alg = spans[idx]
+            run, done = 0, 0
+            while done < span:
+                n = min(_COMPACT_CHUNK, span - done)
+                buf = os.pread(src, n, src_off + done)
+                if len(buf) < n:      # torn historical hole: keep the layout dense,
+                    buf += b"\0" * (n - len(buf))   # the crc check flags live corruption
+                view = memoryview(buf)
+                w = 0
+                while w < n:
+                    w += os.pwrite(dst, view[w:], dst_off + done + w)
+                # The chunk lives in .new now: drop the source cache page so a 100+ GiB
+                # copy cannot evict the rest of the page cache from under the system.
+                os.posix_fadvise(src, src_off + done, n, os.POSIX_FADV_DONTNEED)
+                if crc is not None and done < need:
+                    take = view[:min(n, need - done)]
+                    run = (crc32c.crc32c(take, value=run) if alg == _CRC32C_ALG
+                           else zlib.crc32(take, run))
+                done += n
+            if crc is not None and run != crc:
+                raise OSError(f"payload crc mismatch moving record at {src_off}")
+
+        try:
+            workers = min(_compact_writers(_COMPACT_WRITERS), len(keep))
+            if workers <= 1:
+                for i in range(len(keep)):
+                    _copy_one(i)
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    list(ex.map(_copy_one, range(len(keep))))
+            os.fdatasync(dst)
+            # The copy is on disk: release its cache too.
+            os.posix_fadvise(dst, 0, total, os.POSIX_FADV_DONTNEED)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(src)
+            os.close(dst)
+        return layout, total
+
+    def _write_journal_new(self, keep: list[dict], layout: dict[int, int]) -> bytes:
+        """journal.log.new: the kept records with their P9 dense offsets. Every other
+        field is unchanged - including the payload crc, which covers record CONTENT,
+        not offsets - so replay verification semantics are identical."""
+        out = bytearray()
+        for i, rec in enumerate(keep):
+            new_rec = dict(rec)
+            new_rec["off"] = layout[i]
+            payload = json.dumps(new_rec, sort_keys=True).encode()
+            out += struct.pack("<II", len(payload), zlib.crc32(payload)) + payload
+        tmp = self._journal_path + ".new"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            pos, view = 0, memoryview(out)
+            while pos < len(out):
+                pos += os.write(fd, view[pos:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return bytes(out)
+
+    def _arm_swap_token(self, blob_size: int, journal: bytes,
+                        old_blob_size: int) -> None:
+        """Arm the two-phase commit: from the durable rename of this token on, any crash
+        is recovered by boot (_recover_swap: finish or roll back), not by luck. The OLD
+        pair's sizes ride along as arm-time context (the recovery rollback/completed
+        decision keys on the .old anchors, which are unambiguous even when the old
+        volume coincides with the new one - W11)."""
+        rec = {"blob_size": blob_size, "journal_bytes": len(journal),
+               "journal_sha256": hashlib.sha256(journal).hexdigest(),
+               "old_blob_size": old_blob_size,
+               "old_journal_bytes": os.path.getsize(self._journal_path),
+               "generation": self._marker_generation}
+        tmp = os.path.join(self.dir, _SWAP_TOKEN_NAME + ".new")
+        with open(tmp, "wb") as f:
+            f.write(json.dumps(rec, sort_keys=True).encode())
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, os.path.join(self.dir, _SWAP_TOKEN_NAME))
+        self._fsync_dir()
+
+    def _read_swap_token(self) -> dict | None:
+        try:
+            with open(os.path.join(self.dir, _SWAP_TOKEN_NAME), "rb") as f:
+                mk = json.loads(f.read())
+        except (OSError, ValueError):
+            return None
+        return mk if isinstance(mk, dict) else None
+
+    @staticmethod
+    def _describe_swap_token(token: dict) -> str:
+        """One-line human form of a pending swap token for the compact-skip warning."""
+        try:
+            return "generation=%s blob_size=%d journal_bytes=%d" % (
+                token.get("generation"), int(token["blob_size"]),
+                int(token["journal_bytes"]))
+        except (KeyError, TypeError, ValueError):
+            return "unreadable"
+
+    def _swap_token_matches(self, token: dict) -> bool:
+        """O(journal) verification of an armed swap: the staged pair's sizes match the
+        token and the staged journal is byte-identical to the one hashed at arm time.
+        The blob CONTENT was already verified per record by the copy workers before the
+        token was armed - a sparse hole cannot exist past that barrier - so sizes plus
+        the journal hash prove the staged pair is exactly the armed state."""
+        try:
+            blob_ref = int(token["blob_size"])
+            journal_ref = int(token["journal_bytes"])
+            sha_ref = token["journal_sha256"]
+        except (KeyError, TypeError, ValueError):
+            return False
+        blob_new = self._blob_path + ".new"
+        blob = blob_new if os.path.exists(blob_new) else self._blob_path
+        try:
+            if os.path.getsize(blob) != blob_ref:
+                return False
+            journal_new = self._journal_path + ".new"
+            src = journal_new if os.path.exists(journal_new) else self._journal_path
+            with open(src, "rb") as f:
+                data = f.read()
+        except OSError:
+            return False
+        return (len(data) == journal_ref
+                and hashlib.sha256(data).hexdigest() == sha_ref)
+
+    def _commit_swap(self) -> None:
+        """Swap the staged pair into place: hard-link anchors keep the old inodes alive
+        under .old names (boot recovery's rollback path), then both renames, then the
+        anchors and the token go away. The anchors and the token are unlinked ONLY after
+        the renames are durable: an OSError before that point leaves them up (W10) and
+        either the caller's synchronous rollback or boot recovery converges from them.
+        Any SIGKILL inside leaves the token on disk and boot recovery converges - crash
+        table in .tasks/boot-shutdown-io/p9-plan."""
+        blob_old, journal_old = self._blob_path + ".old", self._journal_path + ".old"
+        for link in (blob_old, journal_old):   # stale anchors from an older attempt
+            try:
+                os.unlink(link)
+            except OSError:
+                pass
+        os.link(self._blob_path, blob_old)
+        os.link(self._journal_path, journal_old)
+        self._fsync_dir()
+        os.rename(self._blob_path + ".new", self._blob_path)
+        os.rename(self._journal_path + ".new", self._journal_path)
+        self._fsync_dir()                      # renames durable BEFORE the anchors go
+        for path in (blob_old, journal_old, os.path.join(self.dir, _SWAP_TOKEN_NAME)):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self._fsync_dir()
+
+    def _rollback_armed_swap(self) -> bool:
+        """Synchronous best-effort rollback of an ARMED swap through the .old anchors
+        (same semantics as the recovery rollback branch): restore the old inodes while
+        they are still anchored, then drop the staged files and the token. Returns False
+        when the anchors are gone (the commit is past rollback) or the rollback itself
+        errored - in both cases everything stays on disk for boot recovery."""
+        blob_old, journal_old = self._blob_path + ".old", self._journal_path + ".old"
+        if not (os.path.exists(blob_old) or os.path.exists(journal_old)):
+            return False
+        try:
+            for link, path in ((blob_old, self._blob_path),
+                               (journal_old, self._journal_path)):
+                if os.path.exists(link):
+                    os.rename(link, path)
+            self._cleanup_swap_temps()
+            self._fsync_dir()
+            return True
+        except OSError:
+            return False
+
+    def _cleanup_swap_temps(self) -> int:
+        """Remove swap temp files (interrupted copy, rolled-back commit) and the legacy
+        pre-P9 compact temps; returns how many names were removed."""
+        removed = 0
+        for name in (_BLOB_NAME + ".new", _JOURNAL_NAME + ".new",
+                     _SWAP_TOKEN_NAME + ".new", _SWAP_TOKEN_NAME,
+                     _BLOB_NAME + ".old", _JOURNAL_NAME + ".old",
+                     _BLOB_NAME + ".compact", _JOURNAL_NAME + ".compact"):
+            try:
+                os.unlink(os.path.join(self.dir, name))
+                removed += 1
+            except OSError:
+                pass
+        return removed
+
+    def _recover_swap(self) -> None:
+        """Boot-time recovery of an interrupted shrinking compact, run BEFORE the journal
+        is read. Token absent: the commit never armed - only temp files to clean. Token
+        present and verified: finish the swap (rename whatever .new staged files are
+        left). Token present but mismatched: roll back ONLY while the old pair is
+        provably restorable - the .old anchors are up (the commit started but never
+        reached its unlink phase), or the commit never started and the on-disk pair
+        still carries the token's OLD sizes (a corrupted staged file). Otherwise the
+        commit completed - complete instead; the mismatch is then post-commit damage
+        outside the fault model (replay's payload-crc check is the last resort). The
+        anchors are the phase indicator: stronger than sizes, which are ambiguous when
+        the old volume coincides with the new one (W11). Every branch swallows its own
+        errors: recovery must never kill the boot."""
+        if not self._journal_path:
+            return
+        changed = False
+        for attempt in (1, 2):                 # one retry: a transient EIO mid-rename
+            try:
+                token = self._read_swap_token()
+                if token is None:
+                    changed |= self._cleanup_swap_temps() > 0
+                    break
+                if not self._swap_token_matches(token):
+                    # W11: the rollback-vs-completed decision must be deterministic.
+                    # Roll back only while the old pair is provably restorable: either
+                    # the .old anchors are still up (the commit started but never
+                    # reached its unlink phase - the anchors are the phase indicator,
+                    # stronger than sizes, which are ambiguous when the old volume
+                    # coincides with the new one), or the commit never started at all
+                    # and the on-disk pair still carries the token's OLD sizes (a
+                    # corrupted staged file before any rename). Otherwise the commit
+                    # completed - complete instead; the mismatch is then post-commit
+                    # damage outside the fault model (replay's payload-crc check is
+                    # the last resort).
+                    if (os.path.exists(self._blob_path + ".old")
+                            or os.path.exists(self._journal_path + ".old")
+                            or self._disk_pair_is_old(token)):
+                        for link, path in ((self._blob_path + ".old", self._blob_path),
+                                           (self._journal_path + ".old",
+                                            self._journal_path)):
+                            if os.path.exists(link):
+                                os.rename(link, path)
+                        changed = True
+                        logger.warning("session tier: swap token verification FAILED; "
+                                       "rolled back to the pre-compact files")
+                else:
+                    blob_new = self._blob_path + ".new"
+                    journal_new = self._journal_path + ".new"
+                    if os.path.exists(blob_new):
+                        os.rename(blob_new, self._blob_path)
+                        changed = True
+                    if os.path.exists(journal_new):
+                        os.rename(journal_new, self._journal_path)
+                        changed = True
+                    logger.info("session tier: completed interrupted compact swap")
+                changed |= self._cleanup_swap_temps() > 0
+                break
+            except OSError as e:
+                if attempt == 1:
+                    logger.warning("session tier: swap recovery hit %s; retrying once", e)
+                    continue
+                logger.warning("session tier: swap recovery failed after retry (%s); "
+                               "the replay crc check converges from here", e)
+                changed = True      # partial moves: resync the fds/sizes below anyway
+        if changed:
+            try:
+                self._fsync_dir()
+            except OSError:
+                pass
+            # __init__ opened both fds on the pre-recovery inodes and seeded the
+            # provisional sizes from them - resync after any recovery move. Atomic tail:
+            # open both, then close both - a failure of the second open keeps the old
+            # fds open and in charge instead of leaving one closed.
+            try:
+                new_fd = os.open(self._blob_path, os.O_WRONLY | os.O_CREAT, 0o644)
+                try:
+                    new_jfd = os.open(self._journal_path,
+                                      os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                except OSError:
+                    os.close(new_fd)
+                    raise
+                os.close(self._blob_fd)
+                os.close(self._journal_fd)
+                self._blob_fd, self._journal_fd = new_fd, new_jfd
+                self._ssd_used = os.path.getsize(self._blob_path)
+                self._blob_eof = self._ssd_used
+            except OSError as e:
+                logger.warning("session tier: post-recovery fd reopen failed (%s); "
+                               "keeping the pre-recovery fds", e)
+
+    def _disk_pair_is_old(self, token: dict) -> bool:
+        """W11 classifier half: the on-disk pair still carries the token's OLD sizes,
+        i.e. the commit never renamed anything (a corrupted staged file before the
+        anchors exist is recoverable by plain cleanup). Missing legacy fields or a size
+        mismatch -> False."""
+        try:
+            old_blob = int(token["old_blob_size"])
+            old_journal = int(token["old_journal_bytes"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        try:
+            return (os.path.getsize(self._blob_path) == old_blob
+                    and os.path.getsize(self._journal_path) == old_journal)
+        except OSError:
+            return False
 
     def _parse_journal(self) -> list[dict]:
         """Ordered, crc-checked journal records (same format replay rebuilds from)."""
@@ -1807,16 +2235,6 @@ class SessionTierStore:
             records.append(json.loads(payload))
             pos += 8 + plen
         return records
-
-    def _rewrite_journal(self, records: list[dict]) -> None:
-        tmp = self._journal_path + ".compact"
-        with open(tmp, "wb") as f:
-            for rec in records:
-                payload = json.dumps(rec, sort_keys=True).encode()
-                f.write(struct.pack("<II", len(payload), zlib.crc32(payload)) + payload)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, self._journal_path)
 
     # ----------------------------------------------------------------- metrics
 
