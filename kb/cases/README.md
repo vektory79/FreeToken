@@ -71,10 +71,12 @@ Specification / Acceptance / Checklist.
   `FREETOKEN_FTW_IO_BACKEND`, незакоммичено; гейт фазы не взят: очередь
   опровергнута как рычаг - плато задают стыки конвейера загрузки;
   CPU-гейт взят: sys x1.45) -
-  [P7-NOTES.md](boot-shutdown-io/P7-NOTES.md); из железной руки P5
-  зафиксированы брифы P8 (watermark no-op
-  + честный dead-учёт) и P9 (реальное сжатие файла компактом + темп)
-  (OPEN, компакт-рычаги).
+  [P7-NOTES.md](boot-shutdown-io/P7-NOTES.md); P8 реализован 2026-10-01
+  (CPU-волна, анкоммичено: record-based гейт компакта по ledger мёртвых
+  записей вместо watermark-дыр, stats_line dead=Nrec/X MiB + holes=Y MiB,
+  батарея 157 passed, STOP GATE READY) -
+  [P8-NOTES.md](boot-shutdown-io/P8-NOTES.md); P9 (реальное сжатие файла
+  компактом + темп) остаётся OPEN.
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
