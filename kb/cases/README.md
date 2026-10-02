@@ -68,11 +68,11 @@ Specification / Acceptance / Checklist.
   темп 0.60 ГБ/с) -
   [P5-NOTES.md](boot-shutdown-io/P5-NOTES.md); P7 реализован 2026-09-30
   (io_uring ctypes бэкенд чтения FTW-банков, opt-in
-  `FREETOKEN_FTW_IO_BACKEND`, незакоммичено; гейт фазы не взят: очередь
+  `FREETOKEN_FTW_IO_BACKEND`, закоммичен 21f1525; гейт фазы не взят: очередь
   опровергнута как рычаг - плато задают стыки конвейера загрузки;
   CPU-гейт взят: sys x1.45) -
   [P7-NOTES.md](boot-shutdown-io/P7-NOTES.md); P8 реализован 2026-10-01
-  (CPU-волна, анкоммичено: record-based гейт компакта по ledger мёртвых
+  (CPU-волна, закоммичен 373505b: record-based гейт компакта по ledger мёртвых
   записей вместо watermark-дыр, stats_line dead=Nrec/X MiB + holes=Y MiB,
   батарея 157 passed, STOP GATE READY) -
 [P8-NOTES.md](boot-shutdown-io/P8-NOTES.md); P9 реализован 2026-10-01
@@ -86,6 +86,15 @@ Specification / Acceptance / Checklist.
 - [ftw-gguf-fastpath/](ftw-gguf-fastpath/) — формат брифа с задачей-строкой S:
   ускорение загрузки GGUF->FTW. Вход: [TASK.md](ftw-gguf-fastpath/TASK.md).
   Статус: DONE.
+- [llama-swap-stream-stall/](llama-swap-stream-stall/) - инцидент: застревание
+  стрим-ответа через llama-swap (статистика запроса есть, access-строки
+  "200 OK" нет, клиент ждёт сек/мин/час). Root cause 1 - эвикция mid-stream
+  из matrix-конфига llama-swap без GLM (OPEN, решение за оператором);
+  root cause 2 - мёртвый is_disconnected в starlette 1.6 и сирота-декод
+  (закрыт: watcher на request.receive(), abort-once, [stall]-телеметрия).
+  Внутри - бриф S1: abort in-flight users при смерти бэкенда/шатдауне (OPEN,
+  отдельный PR). Вход: [TASK.md](llama-swap-stream-stall/TASK.md). Статус:
+  фикс rc2 COMMITTED (fc5fd4a); rc1 и S1 - OPEN.
 - [gguf-glm5next-hybrid/](gguf-glm5next-hybrid/) — эталонный план-пакет:
   TASK + PLAN + task-01..07 + verification/ (A/B-таблицы, батарея, bisect,
   re-acceptance). Учит, как измерением разворачивают NO-GO вердикт. Входы:

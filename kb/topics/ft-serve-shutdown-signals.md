@@ -120,3 +120,7 @@ setsid (процесс = лидер группы) и останавливает 
 - Механика session-tier flush, журнал и метрики:
   [session-cache-tiering.md](session-cache-tiering.md); числа железных рук
   tier-кампании - [session-cache-tiering-arms.md](../baselines/session-cache-tiering-arms.md).
+- Стрим-стол через llama-swap (эвикция mid-stream не закрывает стрим клиента -
+  47 c до закрытия; мёртвый is_disconnected в starlette 1.6 и сирота-декод;
+  бриф S1: abort in-flight при смерти бэкенда/шатдауне):
+  [../cases/llama-swap-stream-stall/TASK.md](../cases/llama-swap-stream-stall/TASK.md).
