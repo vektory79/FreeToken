@@ -82,9 +82,18 @@ Specification / Acceptance / Checklist.
   [P9-NOTES.md](boot-shutdown-io/P9-NOTES.md); P10 (оверблап пин-конвейера
   загрузки банков) отброшена 2026-10-02: стыки опровергнуты P10-iron (диск
   занят 98-99% фазы - оверлапу нет места), волна не хранится; находки -
-  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md), раздел P10-iron; бриф P12
-  (темп пути чтения FTW-банков: zero-fill в preadv) зафиксирован
-  2026-10-02 (OPEN, отдельная сессия, старт по явному запросу).
+  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md), раздел P10-iron; P11
+  (разнос компакта и teardown шатдауна) закрыта 2026-10-02 атрибуцией
+  P11-iron: премиса конкурентной стены опровергнута (teardown - строго
+  последовательный хвост 12-13 с после компакта), кода нет, время
+  шатдауна 38-52 с уже на HEAD, кандидат-рычаг - durable-tombstone в
+  журнале (забрифицирован как P13) -
+  [P9-NOTES.md](boot-shutdown-io/P9-NOTES.md); бриф P12 (темп
+  пути чтения FTW-банков: zero-fill в preadv) зафиксирован 2026-10-02
+  (OPEN, отдельная сессия, старт по явному запросу); бриф P13
+  (durable-tombstone записи в журнале L2: быстрый шатдаун на большом live)
+  зафиксирован 2026-10-03 из P11-iron (OPEN, отдельная сессия, старт по
+  явному запросу).
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
