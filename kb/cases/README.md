@@ -79,7 +79,12 @@ Specification / Acceptance / Checklist.
   (закоммичен ab52a33: two-phase сжатие тир-блоба компактом с бут-рекавери; гейты:
   файл==live PASS - 153.19 -> 31.95 GiB, темп PARTIAL 1.40 ГБ/с device =
   x2.3 базы, стена - teardown шатдауна; батарея 183 passed) -
-  [P9-NOTES.md](boot-shutdown-io/P9-NOTES.md).
+  [P9-NOTES.md](boot-shutdown-io/P9-NOTES.md); P10 (оверблап пин-конвейера
+  загрузки банков) отброшена 2026-10-02: стыки опровергнуты P10-iron (диск
+  занят 98-99% фазы - оверлапу нет места), волна не хранится; находки -
+  [P1-NOTES.md](boot-shutdown-io/P1-NOTES.md), раздел P10-iron; бриф P12
+  (темп пути чтения FTW-банков: zero-fill в preadv) зафиксирован
+  2026-10-02 (OPEN, отдельная сессия, старт по явному запросу).
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
