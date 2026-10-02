@@ -2,8 +2,8 @@
 name: "ft-p7-io-uring-wave"
 description: "P7 io_uring ctypes wave: opt-in uncommitted, QD lever refuted (26s/5.16), CPU gate sys x1.45, settle-order lesson"
 type: project
-lastUpdated: 2026-09-30T22:31
-lastRecall: 2026-09-30T22:35
+lastUpdated: 2026-09-30T23:47
+lastRecall: 2026-09-30T23:38
 ---
 
 # P7 io_uring ctypes wave (boot-shutdown-io, 2026-09-30, UNCOMMITTED @ 512b511)
@@ -50,3 +50,10 @@ mixed-тест обязателен (запись в kb/methods/deterministic-co
 - .tasks/boot-shutdown-io/p7-plan/{report.md,fix-report.md}, p7-iron/ (results.md,
   раннер, journal-backup). kb: P7-NOTES.md + 6 правок (TASK/README/ftw-load-path/
   methods/glossary/P1-NOTES) - НЕКОММИЧЕНЫ; P7-NOTES.md уже застейджен ловушкой.
+
+## P7 закоммичен (2026-09-30, вечер)
+- **21f1525** perf(checkpoint): io_uring read backend for ftw banks (3 файла, 873+).
+- **fc9a04a** docs(kb): record p7 wave notes and p10 overlap-pipeline brief (7 kb-файлов).
+- РЕШЕНИЕ ПОЛЬЗОВАТЕЛЯ: default = direct (opt-in подтверждён).
+- Статус "UNCOMMITTED" в этой записи устарел. P10-бриф (оверклап пин-конвейера)
+  зафиксирован в TASK.md - следующий рычаг P1-гейта, старт только по явному запросу.

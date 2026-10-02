@@ -3,7 +3,7 @@ name: "ft-p5-committed-p8p9-briefs"
 description: "P5 committed 94e4783 + docs 512b511; P8 watermark-no-op and P9 file-shrink briefs fixated; campaign status"
 type: project
 lastUpdated: 2026-09-30T21:04
-lastRecall: 2026-09-30T22:35
+lastRecall: 2026-10-01T12:47
 ---
 
 # P5 committed; P8/P9 briefs fixated (2026-09-30)

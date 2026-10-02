@@ -3,7 +3,7 @@ name: "ft-p3-parallel-flush-wave"
 description: "P3 parallel pwrite + group fdatasync + crc32c; stale journal-fd HEAD bug; committed de26ba1; iron producer-bound"
 type: project
 lastUpdated: 2026-09-30T22:40
-lastRecall: 2026-09-30T22:34
+lastRecall: 2026-10-01T11:36
 ---
 
 # P3 parallel-flush wave (boot-shutdown-io, 2026-09-29, COMMITTED de26ba1)

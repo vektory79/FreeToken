@@ -3,7 +3,7 @@ name: "ft-gguf-native-serving-skill"
 description: "gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag"
 type: project
 lastUpdated: 2026-09-27T22:10
-lastRecall: 2026-09-28T17:53
+lastRecall: 2026-09-30T23:48
 ---
 
 # GGUF native serving skill: reusable methodology for any model family

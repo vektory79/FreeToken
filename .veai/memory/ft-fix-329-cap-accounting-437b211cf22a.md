@@ -3,7 +3,7 @@ name: "ft-fix-329-cap-accounting"
 description: "Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid"
 type: project
 lastUpdated: 2026-09-30T22:40
-lastRecall: 2026-09-30T22:34
+lastRecall: 2026-09-30T23:48
 ---
 
 # Fix :329 - boot cap-accounting reseed (COMMITTED ab3a117, 2026-09-29)

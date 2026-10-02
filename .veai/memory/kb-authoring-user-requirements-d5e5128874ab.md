@@ -3,7 +3,7 @@ name: "kb-authoring-user-requirements"
 description: "User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity"
 type: feedback
 lastUpdated: 2026-09-21T20:49
-lastRecall: 2026-09-30T22:19
+lastRecall: 2026-10-02T20:28
 ---
 
 # User requirements for the kb/ knowledge base (feedback, 2026-09-20)

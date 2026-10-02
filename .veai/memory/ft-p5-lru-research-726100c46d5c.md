@@ -3,7 +3,7 @@ name: "ft-p5-lru-research"
 description: "P5 LRU already in prod; wipe was :329 degenerate; P5-minimum overflow observability committed 94e4783; iron accepted"
 type: project
 lastUpdated: 2026-09-30T22:41
-lastRecall: 2026-09-30T22:35
+lastRecall: 2026-10-01T00:10
 ---
 
 # P5/LRU research: eviction already in prod; wipe degenerate closed by :329 (2026-09-30)

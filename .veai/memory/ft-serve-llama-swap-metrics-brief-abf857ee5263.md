@@ -3,7 +3,7 @@ name: "ft-serve-llama-swap-metrics-brief"
 description: "llama-swap stats accepted on HW; endpoint /api/metrics/activity; D4 tail-chunk inflation; page_size=64 quirk"
 type: project
 lastUpdated: 2026-09-26T19:12
-lastRecall: 2026-09-26T19:01
+lastRecall: 2026-10-02T18:59
 ---
 
 # llama-swap stats for ft serve: W1+W5 ACCEPTED on hardware (2026-09-27)
