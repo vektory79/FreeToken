@@ -456,17 +456,59 @@ class FrontendManager:
         yield b"data: [DONE]\n\n"
         logger.debug("Finished streaming response for user %s", uid)
 
+    async def _watch_disconnect(self, request: Request, on_disconnect: Callable[[], None]):
+        """Block on the ASGI receive channel and fire on_disconnect at http.disconnect.
+
+        Per-chunk request.is_disconnected() cannot do this job on starlette 1.6: it awaits
+        receive() inside a pre-cancelled anyio scope, so the disconnect message is never
+        observed. A plain client cut is also covered by starlette's listen_for_disconnect
+        on the current stacks (uvicorn 0.52.4 dev / 0.53.0 prod over h11 report spec 2.3),
+        but that path has no explicit marker and disappears on spec 2.4 servers; the
+        watcher aborts from outside the generator frame - including when the driving task
+        is parked in send() backpressure (flow.drain) - and logs the disconnect itself.
+        """
+        while True:
+            message = await request.receive()
+            if message.get("type") == "http.disconnect":
+                on_disconnect()
+                return
+
     async def stream_with_cancellation(self, generator, request: Request, uid: int):
+        watcher: asyncio.Task | None = None
+        current: asyncio.Task | None = None
+        aborted = False
+
+        def _on_disconnect() -> None:
+            nonlocal aborted
+            aborted = True
+            logger.info("Client disconnected for user %s", uid)
+            asyncio.create_task(self.abort_user(uid))
+            if current is not None and not current.done():
+                current.cancel()
+
         try:
             async for chunk in generator:
-                # detect if the client has disconnected
-                if await request.is_disconnected():
-                    logger.info("Client disconnected for user %s", uid)
-                    raise asyncio.CancelledError
+                if watcher is None:
+                    # Lazily: the driving task only exists once the consumer starts
+                    # iterating (starlette runs the body in its own task).
+                    current = asyncio.current_task()
+                    watcher = asyncio.create_task(self._watch_disconnect(request, _on_disconnect))
                 yield chunk
         except asyncio.CancelledError:
-            asyncio.create_task(self.abort_user(uid))
+            # Cancelled either by _on_disconnect (which already aborts) or by the server
+            # (shutdown / task teardown): abort exactly once per request either way.
+            if not aborted:
+                asyncio.create_task(self.abort_user(uid))
             raise
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                # Reap the cancelled task so a shutdown race cannot leave a pending
+                # "Task was destroyed but it is pending" / unretrieved exception.
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
 
     async def abort_user(self, uid: int):
         await asyncio.sleep(0.1)

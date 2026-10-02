@@ -21,6 +21,7 @@ from .api_models import (
     ToolChoiceObject,
 )
 from .function_call_parser import ToolCallItem
+from freetoken.utils import init_logger
 from .request_logger import log_request
 from .generation import (
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -43,6 +44,8 @@ from .generation import (
 #: The wire superset plus "off", DeepSeek's disable synonym that
 #: effort_toggle_kwargs has always honored.
 _ACCEPTED_EFFORTS = (*KNOWN_REASONING_EFFORTS, "off")
+
+logger = init_logger(__name__, "OpenAIAPI")
 
 
 def _thinking_type(req: Any) -> str | None:
@@ -266,6 +269,10 @@ async def stream_chat_completion_chunks(
     cached_tokens = 0
     prefill_ms = 0.0
     decode_ms = 0.0
+    t_gendone = 0.0
+    t_finish_sent = 0.0
+    t_usage_sent = 0.0
+    t_done_sent = 0.0
     tool_calls_sent = 0
     open_tool: dict[str, Any] | None = None
     events = generate_events(uid, spec, state, source="/v1/chat/completions")
@@ -377,7 +384,14 @@ async def stream_chat_completion_chunks(
             cached_tokens = ev.cached_tokens
             prefill_ms = ev.prefill_ms
             decode_ms = ev.decode_ms
+            t_gendone = time.monotonic()
             yield _sse(_chat_chunk(req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]))
+            t_finish_sent = time.monotonic()
+            if t_gendone > 0.0 and t_finish_sent - t_gendone > 1.0:
+                logger.warning(
+                    "[stall] uid=%s %.2fs to deliver finish chunk after GenDone (drain/slow consumer?)",
+                    uid, t_finish_sent - t_gendone,
+                )
 
     if req.stream_options and req.stream_options.include_usage:
         yield _sse(
@@ -395,8 +409,32 @@ async def stream_chat_completion_chunks(
                 ),
             }
         )
+        t_usage_sent = time.monotonic()
+        if t_gendone > 0.0 and t_usage_sent - t_finish_sent > 1.0:
+            logger.warning(
+                "[stall] uid=%s %.2fs to deliver usage chunk (drain/slow consumer?)",
+                uid, t_usage_sent - t_finish_sent,
+            )
+    else:
+        t_usage_sent = t_finish_sent
 
     yield b"data: [DONE]\n\n"
+    t_done_sent = time.monotonic()
+    if t_gendone > 0.0 and t_done_sent - t_usage_sent > 1.0:
+        logger.warning(
+            "[stall] uid=%s %.2fs to deliver [DONE] (drain/slow consumer?)",
+            uid, t_done_sent - t_usage_sent,
+        )
+    if t_gendone > 0.0:
+        logger.info(
+            "[stall] uid=%s finalize: GenDone->finish %.0fms, finish->usage %.0fms, usage->[DONE] %.0fms",
+            uid,
+            (t_finish_sent - t_gendone) * 1e3,
+            (t_usage_sent - t_finish_sent) * 1e3,
+            (t_done_sent - t_usage_sent) * 1e3,
+        )
+    else:
+        logger.info("[stall] uid=%s stream closed without GenDone (error path)", uid)
 
 
 async def handle_completion(
