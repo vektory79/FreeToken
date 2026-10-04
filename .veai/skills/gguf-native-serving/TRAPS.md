@@ -1,4 +1,4 @@
-# TRAPS.md - 66 ловушек для native GGUF serving (T01-T66, рецепты D01-D10)
+# TRAPS.md - 67 ловушек для native GGUF serving (T01-T67, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -382,6 +382,25 @@ kb/topics/decode-chain-microfusion.md; все четыре env-ручки вал
   (реплей conversion-time имён тензоров) падали KeyError на загрузке (~21 c,
   rc=2, WeightLoadError). После любого loader-фьюжна - обнови FTW conversion
   path И бут-тест на FTW-чекпоинте, не только raw GGUF.
+
+## Boot/shutdown I/O кампания 2026-09-30..2026-10-04 (checkpoint/FTW) T67
+
+Ловушки кампании boot-shutdown-io (волны P1-P12; артефакты
+.tasks/boot-shutdown-io/; кейс kb/cases/boot-shutdown-io; P12 wave-1
+2026-10-04, NO-GO).
+
+- **T67** (process, attribution) Лимитер-атрибуция обязана быть ключена к
+  дефолтной конфигурации, выведенной ЦЕПОЧКОЙ ИЗ ИСХОДНИКОВ
+  (expert_banks.py:572 workers=8 -> engine/engine.py:1022-1031 ->
+  ftw.py:769 _bank_pool_workers(8)), а не к ярлыку из брифа/артефакта прошлой
+  волны: P12 wave-1 заякорила вердикт замера на pool=4 как "дефолт фазы" при
+  дефолте pool=8 - поймано только ревью. Гипотезу "X лимитирует стенку"
+  гейтить ДО кода: A/B холод-vs-тёплый dest и потолком ПОЛНОГО устранения X;
+  потолок не берёт гейт - стоп, кода нет (P12: zero-fill 8.6% @ pool=8 <
+  гейта 10%; warm-потолок 22.85 с формально касается гейта 23 с, но warm
+  нереализуем - fresh mmap first-touch zero неизбежен, MAP_POPULATE лишь
+  переносит цену). Метод-карточка: kb/methods/limiter-attribution.md;
+  прецедент: P12 wave-1 (kb/cases/boot-shutdown-io).
 
 ## Debugging
 
