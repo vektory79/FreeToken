@@ -231,6 +231,32 @@ def test_ftw_gguf_types_meta_rejected(tmp_path, meta, why):
         load_ftw_banks(str(out), num_layers=2)
 
 
+@pytest.mark.parametrize(
+    ("meta", "why"),
+    [
+        ({}, "old-converter dir without the meta: re-convert contract"),
+        ({"gguf_types": [[18, 18, 23]]}, "malformed meta: wrong layer count"),
+    ],
+)
+def test_ftw_gguf_types_meta_rejected_to_device(tmp_path, meta, why):
+    # the resident path carries the same contract: a gguf checkpoint reaching
+    # load_ftw_banks_to_device must raise (re-convert / config mismatch), not
+    # silently load kind=None banks; the guard sits before any bank read, so
+    # this runs on CPU and never needs a device
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks_to_device
+
+    out = tmp_path / "ckpt"
+    w = FTWWriter(str(out))
+    for name, shape in (("gate", (4, 8, 3)), ("up", (4, 8, 3)), ("down", (4, 5, 2))):
+        for layer in range(2):
+            w.add_tensor(
+                f"{name}#L{layer:05d}", torch.zeros(shape, dtype=torch.uint8), kind="experts_bank"
+            )
+    w.finalize({"quant_format": "gguf", **meta})
+    with pytest.raises(RuntimeError, match="gguf_types"):
+        load_ftw_banks_to_device(str(out), num_layers=2, device=torch.device("cpu"))
+
+
 def test_ftw_persisted_types_feed_capability_gates(ftw_gguf_ckpt):
     # the hybrid gate + --moe-cpu-layers auto consult gguf_expert_bank_types, which is
     # bare-.gguf-only: on an FTW dir it must fall back to the persisted index meta
