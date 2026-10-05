@@ -119,6 +119,12 @@ Specification / Acceptance / Checklist.
 - [gguf-glm5next-path-a/](gguf-glm5next-path-a/) — Path A (offload-этап): PLAN
   с фазами 0..6, boot-smoke-отчёты, разбор root-cause в phase6. Вход:
   [PLAN.md](gguf-glm5next-path-a/PLAN.md).
+- [gguf-glm5next-vision/](gguf-glm5next-vision/) — бриф поддержки зрения
+  (mmproj) для GGUF glm5next: визуальная башня из отдельного mmproj-BF16.gguf
+  (arch clip, 348 тензоров), флаг --mmproj вместо автопоиска, image-процессор
+  из GGUF-метаданных без HF-файлов; оба пути загрузки (raw .gguf и GGUF-FTW).
+  Референс - NVFP4-путь. Вход: [TASK.md](gguf-glm5next-vision/TASK.md).
+  Статус: NOT STARTED (бриф 2026-09-27).
 - [merge-main-work/](merge-main-work/) — процедура интеграции origin/main:
   discovery/adaptation/test-waves в трёх раундах (round2, round3, rebase).
   Шаблон discovery-этапа:

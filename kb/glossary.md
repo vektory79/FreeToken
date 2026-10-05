@@ -80,6 +80,10 @@
 
 ## M
 
+- **mmproj** — отдельный GGUF-файл визуальной башни мультимодальной модели
+  (в метаданных arch `clip`, llama.cpp-имена тензоров `v.blk.N.*` / `mm.*`):
+  конвертер llama.cpp выносит веса зрения из текстового gguf сюда —
+  [TASK.md](cases/gguf-glm5next-vision/TASK.md).
 - **MMQ** — квантованный матричный мультипликатор gguf-ядра (multi-material
   quantized matmul), основа grouped MMQ префилла —
   [TASK.md](cases/mmq-prefill-kernel/TASK.md).
