@@ -3,7 +3,7 @@ name: "local-llm-vram-protocol"
 description: "Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model"
 type: feedback
 lastUpdated: 2026-09-28T20:12
-lastRecall: 2026-10-04T19:41
+lastRecall: 2026-10-05T12:59
 ---
 
 # Local-LLM VRAM constraint on the FreeToken rig (feedback, set 2026-09-20)

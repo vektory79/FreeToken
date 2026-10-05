@@ -9,7 +9,6 @@
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-78dd276b7ddd.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
 - [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-08c4102d02ca.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate
-- [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-7b70b4071ae8.md) — Skill merge-main-into-vektory79 (.veai/skills): merge origin/main into vektory79; duplicates->main; boot-smoke
 - [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-3ab3f82469b1.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
@@ -78,5 +77,7 @@
 - [ft-fix-329-cap-accounting](ft-fix-329-cap-accounting-c912c8f24f20.md) — Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-5ce36c040947.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
 - [ft-serve-boot-shutdown-io-research](ft-serve-boot-shutdown-io-research-ab444aa50b22.md) — HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore
-- [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-c82db5a7f2f2.md) — P11 attribution 2d57b78; P13 tombstone IMPLEMENTED 2026-10-04, HW gates taken (16.3s vs 55.7s), commit pending
 - [ft-p13-tombstone-wave](ft-p13-tombstone-wave-1de30f6941d6.md) — P13 tombstone COMMITTED (12623ff code + 91e53ff kb); KeyError accepted; sub-floor gate refined; case P1-P13 all closed
+- [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-4af8a5b1be10.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
+- [ft-merge-round4-closed](ft-merge-round4-closed-acbf7277ce25.md) — Round 4 aa0e71c fully CLOSED: boot-smoke PASS, GPU 103/0, F1 fixed by 9ac8830 (guard in load_ftw_banks_to_device)
+- [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-13c8c4a0d708.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3

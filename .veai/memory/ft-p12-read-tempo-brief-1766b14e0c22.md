@@ -3,7 +3,7 @@ name: "ft-p12-read-tempo-brief"
 description: "P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ default pool=8 < 10% gate; premise refuted, no code; kb fixated"
 type: project
 lastUpdated: 2026-10-04T18:36
-lastRecall: 2026-10-04T22:23
+lastRecall: 2026-10-05T15:28
 ---
 
 # P12 read-path tempo: ЗАКРЫТА NO-GO (wave-1 2026-10-04, no code @ 2d57b78)

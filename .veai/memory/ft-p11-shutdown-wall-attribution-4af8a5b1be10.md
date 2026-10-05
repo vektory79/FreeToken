@@ -1,9 +1,9 @@
 ---
 name: "ft-p11-shutdown-wall-attribution"
-description: "P11 attribution 2d57b78; P13 tombstone IMPLEMENTED 2026-10-04, HW gates taken (16.3s vs 55.7s), commit pending"
+description: "P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed"
 type: project
-lastUpdated: 2026-10-05T00:33
-lastRecall: 2026-10-05T10:42
+lastUpdated: 2026-10-05T15:34
+lastRecall: 2026-10-05T15:30
 ---
 
 # P11 shutdown-wall attribution (boot-shutdown-io, 2026-10-02, no code @ b99e967)
@@ -46,8 +46,16 @@ Durable-tombstone запись в журнале (новый тип, задев�
   (4 kb-файла: P9-NOTES коррекция стены, TASK.md + P13-бриф, README, session-cache-tiering).
 - P13: durable-tombstone записи в журнале L2 — discard долговечен немедленно, шатдаун-компакт
   опционален (быстрый шатдаун на большом live). OPEN, отдельная сессия, старт по явному
-  запросу. Якоря: replay_journal :1632, _write_journal_new :1968, two-phase W1-W14.
+  запросу. Якоря: replay_journal :1632, _write_journal_new :1968, двухфазный W1-W14.
 - Статус "некоммичено (4 kb-файла)" в этой записи устарел — всё в 2d57b78.
 
-## Обновление 2026-10-05: P13 РЕАЛИЗОВАНА, HW-гейты взяты
-Пункт "P13 бриф зафиксирован (OPEN)" устарел: волна 2026-10-04 реализовала durable-tombstone (session_tier.py +130, cache.py +9, tests +277), tier 122 passed, батарея 2492, ревью x2 NOT BLOCKING + fix-TP (2 комментария, fsync-ассерт, ledger-тест). HW A/B (кап 32 GiB, прод-тир-копия): стоп 16.3 с vs BASE 55.7 с (-71%), компакт-фаза отсутствует (была 37.8 с), воскрешений нет (35/35 cached=0), 159/159 md5 сурвиворов, resume HIT fast-path "honored 80 tombstones", филл +1.3% (fsync в шуме), второй skip-стоп 18 с. Открыто у пользователя: KeyError-даунгрейд (старый бинарник + томбстоуны = краш реплея), тиры ниже P8-floor 256 MiB без пошаутдаунной реакламации, коммит волны. Детали: ft-p13-tombstone-wave.
+## Обновление 2026-10-05: P13 РЕАЛИЗОВАНА И ЗАКОММИЧЕНА, кейс P1-P13 закрыт
+Пункты "P13 бриф зафиксирован (OPEN)" выше устарели: волна 2026-10-04 реализовала
+durable-tombstone (session_tier.py +130, cache.py +9, tests +277), tier 122 passed,
+батарея 2492, ревью x2 NOT BLOCKING + fix-TP (2 комментария, fsync-ассерт, ledger-тест).
+HW A/B (кап 32 GiB, прод-тир-копия): стоп 16.3 с vs BASE 55.7 с (-71%), компакт-фаза
+отсутствует (была 37.8 с), воскрешений нет (35/35 cached=0), 159/159 md5 сурвиворов,
+resume HIT fast-path "honored 80 tombstones", филл +1.3% (fsync в шуме), второй
+skip-стоп 18 с. ЗАКРЫТО: код закоммичен 12623ff, kb 91e53ff; KeyError-даунгрейд принят
+как известное ограничение; sub-floor гейтиг уточнён; кейс boot-shutdown-io P1-P13 все
+закрыты. Детали: ft-p13-tombstone-wave.
