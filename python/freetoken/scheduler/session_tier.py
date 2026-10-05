@@ -450,11 +450,16 @@ class SessionTierStore:
         # watermark seed carries physical holes no record-based compact can reclaim.
         self._dead_records = 0
         self._dead_record_bytes = 0
+        # P13: dead records WITHOUT a durable tombstone in the journal. Only these can
+        # resurrect on a fast-path boot (the marker skips payload verification), so they
+        # alone block the shutdown marker and force the shutdown compact rewrite.
+        self._marker_blockers = 0
         self._counters: Counter = Counter(offers_ok=0, offers_rej=0, offers_dedup=0,
                                           probe_hit=0,
                                           probe_miss=0, note_match=0, restore_l1=0,
                                           restore_l2=0, evictions=0, demotions=0,
-                                          discards=0, prefetch_begin=0, prefetch_adopt=0,
+                                          discards=0, tombstones=0, prefetch_begin=0,
+                                          prefetch_adopt=0,
                                           prefetch_abandon=0, prefetch_fail=0,
                                           prefetch_rej_cap=0, prefetch_probe_hit=0,
                                           prefetch_probe_miss=0)
@@ -1140,7 +1145,9 @@ class SessionTierStore:
 
     def _discard(self, seg: _Segment) -> int:
         """Append-only blob: the discarded padded span becomes a zero hole, reclaimable
-        only by compaction once the dead-record ledger trips (maybe_compact). Returns
+        only by compaction once the dead-record ledger trips (maybe_compact). The P13
+        tombstone makes the discard itself durable immediately (replay kills the victim
+        on both boot paths), so the hole is pure space, never a resurrection. Returns
         the padded span freed from the capacity accounting."""
         padded = (seg.l2_n + _BLK - 1) // _BLK * _BLK
         with self._account_lock:      # racing the writer thread's journal accounting
@@ -1149,6 +1156,14 @@ class SessionTierStore:
             if seg.in_l2:             # its journal record just became compact-droppable
                 self._dead_records += 1
                 self._dead_record_bytes += padded
+                # P13: durable NOW. Builder-thread evictions race the coordinator's
+                # appends lock-free: atomic O_APPEND write + order-independent tomb filter.
+                if self._append_tombstone(seg.path_key, seg.l2_off, seg.l2_n):
+                    self._counters["tombstones"] += 1
+                else:
+                    # Not durable: the discard stays compact-durable only (pre-P13), so
+                    # it blocks the marker and forces the shutdown compact rewrite.
+                    self._marker_blockers += 1
         self._counters["discards"] += 1
         for i, key in enumerate(seg.page_keys):
             entries = self._index.get(key, [])
@@ -1164,9 +1179,9 @@ class SessionTierStore:
             self._close_staging(t)
             t.state = "abandoned"
             self._counters["prefetch_abandon"] += 1
-        # Discard mutates no on-disk bytes (journal and blob eof untouched), so the
-        # marker's size checks cannot see it: without this explicit drop the next boot
-        # could fast-path-resurrect the evicted segment.
+        # A landed tombstone grows the journal, so the marker size checks would
+        # self-invalidate on their own; this explicit drop covers the failed-append
+        # case: no on-disk trace, a stale-valid marker would resurrect the segment.
         self.invalidate_shutdown_marker()
         return padded
 
@@ -1535,13 +1550,17 @@ class SessionTierStore:
         by in-flight blob reads, or aborted before arm) would fast-path-boot those dead
         records back as LIVE segments (discard durability) AND seed the P8 ledger 0/0 -
         the zombies would then evade the next compact forever. No marker: the next boot
-        takes the full path, seeds the honest ledger, and the next compact reclaims."""
+        takes the full path, seeds the honest ledger, and the next compact reclaims.
+        P13: a dead record WITH a durable tombstone cannot fast-path-resurrect (replay
+        filters tombstones before the fast-path ledger seed), so only UNtombstoned dead
+        (_marker_blockers) block the marker - tombstoned dead stay out of the way."""
         if not self.enabled or not self._journal_path:
             return
-        if self._dead_records:
-            logger.warning("session tier: shutdown marker skipped, %d dead records left "
-                           "(compact deferred/aborted); next boot re-verifies and the "
-                           "next compact reclaims them", self._dead_records)
+        if self._marker_blockers:
+            logger.warning("session tier: shutdown marker skipped, %d dead records "
+                           "without a durable tombstone (compact deferred/aborted); "
+                           "next boot re-verifies and the next compact reclaims them",
+                           self._marker_blockers)
             return
         try:
             rec = {"journal_bytes": os.path.getsize(self._journal_path),
@@ -1629,6 +1648,24 @@ class SessionTierStore:
             return False
         return True
 
+    def _append_tombstone(self, path_key: bytes, off: int, n: int) -> bool:
+        """P13: one fsync'ed tombstone record - the discard is durable immediately, no
+        compact needed. The record carries the victim's exact survival key
+        (path_key, off, n), the same identity compact()'s keep-set matches on; replay
+        kills the matching earlier record on BOTH boot paths. False = not durable
+        (a marker blocker; the shutdown compact falls back to the classic rewrite)."""
+        rec = {"t": 1, "path_key": path_key.hex(), "off": off, "n": n}
+        payload = json.dumps(rec, sort_keys=True).encode()
+        try:
+            os.write(self._journal_fd,
+                     struct.pack("<II", len(payload), zlib.crc32(payload)) + payload)
+            os.fsync(self._journal_fd)
+        except OSError as e:
+            logger.warning("session tier: tombstone append failed (%s); the discard "
+                           "stays compact-durable only", e)
+            return False
+        return True
+
     def replay_journal(self) -> int:
         """Boot path: rebuild the L2 index from the journal. A truncated or torn tail
         (SIGKILL mid-append) stops replay at the last complete record. Idempotent: the
@@ -1654,6 +1691,24 @@ class SessionTierStore:
         if torn:
             logger.warning("session tier: journal tail truncated/torn, "
                            "%d of %d bytes recovered", pos, len(journal))
+        # P13 durable tombstones: a {"t":1} record kills the earlier live record with
+        # the same (path_key, off, n) identity on BOTH boot paths - the marker fast
+        # path included, so a valid marker can never resurrect a tombstoned discard
+        # (the basis for the P13 marker/shutdown-compact optionality). Tombstones are
+        # appended after their victims (append-only journal), but the filter is
+        # order-independent anyway; the tombstone records themselves never become
+        # segments. Old journals carry no "t" records and replay bit-identically.
+        dropped, dropped_bytes, pdropped = 0, 0, 0
+        tomb_keys = {(r["path_key"], r["off"], r["n"]) for r in records if r.get("t")}
+        if tomb_keys:
+            victims = [r for r in records if not r.get("t")
+                       and (r["path_key"], r["off"], r["n"]) in tomb_keys]
+            records = [r for r in records if not r.get("t")
+                       and (r["path_key"], r["off"], r["n"]) not in tomb_keys]
+            dropped = len(victims)
+            dropped_bytes = sum((v["n"] + _BLK - 1) // _BLK * _BLK for v in victims)
+            logger.info("session tier: replay honored %d tombstones, %d records stay "
+                        "dead (compact reclaims later)", len(tomb_keys), dropped)
         # Clean-shutdown fast path: after a graceful shutdown every record followed the
         # durable blob-before-journal order, so the payload crc re-read below is pure
         # redundancy (~22 s on a 41 GiB L2). Marker sizes matching the on-disk files plus
@@ -1676,10 +1731,10 @@ class SessionTierStore:
                         "(%s; actual journal_bytes=%d blob_eof=%d); "
                         "full payload verification", recorded, len(journal), blob)
         # P8 dead-record ledger seed: how many journal records the next compact() will
-        # actually drop. Fast path: shutdown compacts, journal == live. Full path:
-        # payload-dropped records stay in the journal file (replay never rewrites it)
-        # and the compact parser still sees them; kept records all become segments.
-        dropped, dropped_bytes = 0, 0
+        # actually drop. The P13 tombstone victims above seed it on BOTH paths (they
+        # stay in the journal file until a compact). Full path: payload-dropped records
+        # stay in the journal file (replay never rewrites it) and the compact parser
+        # still sees them; kept records all become segments.
         if not fast:
             # Payload-crc validation: a record whose blob region no longer matches (holes
             # left by compaction, a torn append that advanced EOF) is dead - drop, never
@@ -1691,7 +1746,7 @@ class SessionTierStore:
                 except OSError:
                     blob_fd = -1
             if blob_fd >= 0:
-                kept, dropped, dropped_bytes = [], 0, 0
+                kept, pdropped, pbytes = [], 0, 0
                 for rec in records:
                     ok = True
                     if "crc" in rec:
@@ -1702,12 +1757,15 @@ class SessionTierStore:
                         except OSError:
                             ok = False
                     (kept.append(rec) if ok else None)
-                    dropped += 0 if ok else 1
-                    dropped_bytes += 0 if ok else (rec["n"] + _BLK - 1) // _BLK * _BLK
+                    pdropped += 0 if ok else 1
+                    pbytes += 0 if ok else (rec["n"] + _BLK - 1) // _BLK * _BLK
                 os.close(blob_fd)
                 records = kept
-                if dropped:
-                    logger.info("session tier: replay dropped %d dead/torn records", dropped)
+                dropped += pdropped
+                dropped_bytes += pbytes
+                if pdropped:
+                    logger.info("session tier: replay dropped %d dead/torn records",
+                                pdropped)
         with self._lock:
             for t in list(self._tickets.values()):   # boot replay: no ticket survives it
                 self._tickets.pop(id(t), None)
@@ -1741,6 +1799,10 @@ class SessionTierStore:
             self._ssd_used = live
             self._dead_records = dropped
             self._dead_record_bytes = dropped_bytes
+            # P13: payload-dead records carry no tombstone - they alone can resurrect on
+            # a fast-path boot, so they alone block the marker and the shutdown-compact
+            # skip. Tombstoned victims were filtered before this point on both paths.
+            self._marker_blockers = pdropped
         # Moved here from __init__: before replay only the blob-size watermark exists,
         # after the reseed above _ssd_used is the live figure both paths must report.
         logger.info("session tier on: L1=%.2f GiB, L2 dir=%s cap=%.2f GiB used=%.2f GiB",
@@ -1765,7 +1827,10 @@ class SessionTierStore:
         dead records compact() is a no-op and every ok-offer would pay a full journal
         parse for nothing (P5-iron finding 1). The holes= stat (watermark-minus-live)
         resets to 0 after a compact, which since P9 physically reclaims them in the
-        same pass."""
+        same pass. P13: tombstoned victims count into _dead_record_bytes (the replay
+        seed and every discard), so journal growth from tombstones is bounded by this
+        same gate - a tombstone costs ~100 journal bytes against its victim's padded
+        span."""
         if not self.enabled or self._blob_fd < 0:
             return 0
         if self._blob_eof < _COMPACT_FLOOR_BYTES or \
@@ -1785,7 +1850,9 @@ class SessionTierStore:
         the pair is swapped under a two-phase commit armed by swap.token, so a SIGKILL
         at any point converges at boot to either the old or the new state (see
         _recover_swap) - replay's payload-crc check stays the last resort. With zero
-        dead records this is a no-op (returns 0).
+        dead records this is a no-op (returns 0). P13 tombstone records are applied-
+        dropped here, never carried into the new journal: their victims are gone, a
+        carried tombstone would have nothing left to kill and would grow forever.
         Lock coverage: runs entirely under the store's global RLock, serializing against
         offer/evict/discard - no journal appends can happen inside. Blob READERS
         (restore, prefetch staging) read by path outside that lock under a refs pin
@@ -1817,7 +1884,8 @@ class SessionTierStore:
             live = {(seg.path_key.hex(), seg.l2_off, seg.l2_n)
                     for seg in self._segments.values() if seg.in_l2}
             keep = [rec for rec in records
-                    if (rec["path_key"], rec["off"], rec["n"]) in live]
+                    if not rec.get("t")   # P13 tombstone: applied, never carried
+                    and (rec["path_key"], rec["off"], rec["n"]) in live]
             if len(keep) == len(records):
                 return 0                      # nothing dead: no-op (also covers empty journal)
             readers = [seg for seg in self._segments.values() if seg.refs]
@@ -1883,9 +1951,34 @@ class SessionTierStore:
             self._dead_bytes = 0
             self._dead_records = 0
             self._dead_record_bytes = 0
+            self._marker_blockers = 0
             logger.info("session tier: compact shrink: blob %.2f GiB -> %.2f GiB",
                         old_size / 2**30, total / 2**30)
-            return len(records) - len(keep)
+            # Tombstones are journal bookkeeping, not data records: the dropped-count
+            # stays ledger-aligned (victims + payload-dead only).
+            return len(records) - len(keep) - sum(1 for r in records if r.get("t"))
+
+    def shutdown_compact(self) -> int:
+        """P13: the shutdown compact is optional once every dead record carries a
+        durable tombstone - replay filters tombstoned records on both boot paths, so
+        skipping the rewrite cannot resurrect a discard; the P8 runtime gate reclaims
+        the holes and tombstones at a later idle point. Below the P8 floor the skip
+        does not apply: that gate can never fire on such a small blob, so the compact
+        keeps running (the pre-P13 unconditional rewrite). A failed tombstone append
+        leaves its discard compact-durable only: the un-tombstoned dead force the
+        classic rewrite here (the pre-P13 shutdown, byte-for-byte)."""
+        if not self.enabled or self._blob_fd < 0:
+            return 0
+        # The rewrite costs ~live bytes: below the P8 floor that is nearly free, so
+        # small tiers keep the pre-P13 hygiene compact (their dead can never reach
+        # the runtime gate); skip only where the rewrite actually saves time.
+        if (self._dead_records and not self._marker_blockers
+                and self._blob_eof >= _COMPACT_FLOOR_BYTES):
+            logger.info("session tier: shutdown compact skipped, %d dead records are "
+                        "all tombstoned; the runtime gate reclaims later",
+                        self._dead_records)
+            return 0
+        return self.compact()
 
     def _fsync_dir(self) -> None:
         dfd = os.open(self.dir, os.O_RDONLY)
@@ -2263,7 +2356,7 @@ class SessionTierStore:
                 f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
                 f"restore={snap['restore_l1']}(l1)/{snap['restore_l2']}(l2), "
                         f"evict={snap['evictions']}, demote={snap['demotions']}, "
-                        f"discard={snap['discards']}, "
+                        f"discard={snap['discards']}, tomb={snap['tombstones']}, "
                         f"dead={snap['dead_records']}rec/"
                         f"{snap['dead_record_bytes'] / 2**20:.1f}MiB, "
                         # display clamp: crash-window compact leaves dead spans above the truncated blob_eof

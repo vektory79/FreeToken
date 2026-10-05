@@ -924,9 +924,10 @@ class CacheManager:
     def shutdown_tier(self) -> int:
         """Graceful-shutdown hook: offer the LIVE tree's boundaries to the store (they die
         with the process otherwise; the adaptive keep-set filters), then flush live tier
-        segments to L2 and compact the journal (dead records dropped; crash-safe
-        convergence via replay's payload-crc check). Hybrid offers its snapshot-bearing
-        boundaries; a KV-only tree offers every live boundary (its tip per session)."""
+        segments to L2 and optionally compact the journal (P13: skipped when every dead
+        record carries a durable tombstone; crash-safe convergence via replay's
+        payload-crc check). Hybrid offers its snapshot-bearing boundaries; a KV-only tree
+        offers every live boundary (its tip per session)."""
         if self.tier_store is None:
             return 0
         # Drop the previous stop's marker BEFORE any flush/compact mutation: a half-
@@ -941,7 +942,7 @@ class CacheManager:
             self._tier_prefetch_drop(key)
         self.tier_store.drop_tickets()           # safety net for anything untracked
         flushed = self.tier_store.flush_live()
-        self.tier_store.compact()
+        self.tier_store.shutdown_compact()
         # Barrier after the final fsyncs: the next boot may skip the payload re-read.
         self.tier_store.write_shutdown_marker()
         line = self.tier_store.stats_line()

@@ -314,16 +314,17 @@ def test_sigkill_replay_after_supersede_keeps_exactly_live_set(tmp_path):
     assert hit is not None and hit[0] == 2
     assert boot.restore(hit[1])[0] == [data for _, data in pages]
 
-    # uncompacted crash: the superseded record resurrects at replay, a deeper offer
-    # supersedes BOTH stale segments, and compaction converges to the live set
+    # uncompacted crash: P13 - the superseded record is tombstoned at discard, so it
+    # stays dead across the reboot (pre-P13 it resurrected and a deeper offer had to
+    # supersede BOTH stale segments before compaction converged)
     d2 = tmp_path / "tier2"
     store2 = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d2)))
     keys, pages = _chain([(8, 0), (8, 1), (8, 2)])
     assert store2.offer(b"path", 1, pages[:1])
     assert store2.offer(b"path", 2, pages[:2])           # supersede #1
     reborn = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d2)))
-    assert reborn.replay_journal() == 2                  # both regions intact pre-compact
-    assert len(reborn._segments) == 2
+    assert reborn.replay_journal() == 1                  # the tombstone holds pre-compact
+    assert len(reborn._segments) == 1
     assert reborn.offer(b"path", 3, pages)               # supersedes both stale segments
     assert len(reborn._segments) == 1
     assert reborn.compact() == 2
@@ -465,7 +466,8 @@ def test_journal_replay_after_sigkill_truncated_tail(tmp_path):
     for i, (keys, pages) in enumerate(chains, start=1):
         assert store.offer(f"path-{i}".encode(), 3, pages, _snap(f"{i}"))
     assert store.flush_live() == 2
-    assert store.evict_store(2) == 2  # L1 is now empty; everything lives in L2 + journal
+    # the records live in L2 + journal now (flush demoted them): a torn tail must keep
+    # them all - no discards here, so no tombstones either
 
     # SIGKILL mid-append: a half-written record (header claims more bytes than exist)
     with open(os.path.join(d, "journal.log"), "ab") as f:
@@ -904,9 +906,12 @@ def _tier_files(d):
     return sorted(p.name for p in os.scandir(str(d)))
 
 
-def _shrink_fixture(root, n=3, dead=(1,)):
+def _shrink_fixture(root, n=3, dead=(1,), blob_above_floor=False):
     """n offers in L2-only mode; the `dead` indexes evicted (true discards -> dead
-    records). Survivors are validated first so LRU evicts exactly the dead ones."""
+    records). Survivors are validated first so LRU evicts exactly the dead ones.
+    blob_above_floor extends blob.bin with a sparse tail so the watermark (_blob_eof)
+    sits just above the P8 compact floor - the shape of a tier that once grew past
+    the floor; the P13 shutdown-skip gate reads that watermark, not the live set."""
     d = root / "tier"
     store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
     data = {}
@@ -921,6 +926,13 @@ def _shrink_fixture(root, n=3, dead=(1,)):
             hit = store.probe([chain_page_key(None, (i,))])
             store.restore(hit[1])
         assert store.evict_store(len(dead)) == len(dead)
+    if blob_above_floor:
+        import freetoken.scheduler.session_tier as st_mod
+        target = st_mod._COMPACT_FLOOR_BYTES + 4096
+        with open(d / "blob.bin", "r+b") as f:
+            f.seek(target - 1)
+            f.write(b"\0")                  # sparse: prior generations, no live bytes
+        store._blob_eof = os.fstat(store._blob_fd).st_size
     return d, store, data
 
 
@@ -1016,7 +1028,8 @@ def test_compact_sigkill_matrix_converges(tmp_path, monkeypatch, window):
     n = boot.replay_journal()
     shrunk = (d / "blob.bin").stat().st_size == 3 * 4096
     if window in ("copy", "jnew", "token"):
-        assert not shrunk and n == 4        # old state: the dead record still replays
+        assert not shrunk and n == 3        # old state: the P13 tombstone keeps the
+                                            # discarded record dead (pre-P13: replayed)
     else:
         assert shrunk and n == 3            # recovery completed the swap
     assert _tier_files(d) == ["blob.bin", "journal.log"]
@@ -1044,8 +1057,8 @@ def test_boot_recovery_completes_armed_swap(tmp_path, monkeypatch):
 
 def test_boot_recovery_rolls_back_broken_staged_pair(tmp_path, monkeypatch):
     """P9 (g2): armed token + corrupted staged blob (truncated) -> boot rolls back to
-    the .old inodes; the OLD layout is intact bit-for-bit (the dead record resurrects -
-    it was never physically dropped), swap debris is gone."""
+    the .old inodes; the OLD layout is intact bit-for-bit (and the discarded record
+    stays dead - its tombstone is in the rolled-back journal), swap debris is gone."""
     d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
     _crash_on_fs(monkeypatch, lambda n, a: n == "link")
     with pytest.raises(_Crash):
@@ -1055,7 +1068,7 @@ def test_boot_recovery_rolls_back_broken_staged_pair(tmp_path, monkeypatch):
         f.truncate(4096)
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
     with _tier_log_capture() as cap:
-        assert boot.replay_journal() == 3
+        assert boot.replay_journal() == 2
     assert any("rolled back" in m for m in cap.messages)
     assert (d / "blob.bin").stat().st_size == 3 * 4096
     assert _tier_files(d) == ["blob.bin", "journal.log"]
@@ -1076,7 +1089,7 @@ def test_boot_recovery_rolls_back_stale_staged_journal(tmp_path, monkeypatch):
         f.write(bytes([b[0] ^ 0xFF]))
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
     with _tier_log_capture() as cap:
-        assert boot.replay_journal() == 3
+        assert boot.replay_journal() == 2   # old journal intact; the tombstone holds
     assert any("rolled back" in m for m in cap.messages)
     assert (d / "blob.bin").stat().st_size == 3 * 4096
     _restore_all(boot, data, [2, 3])
@@ -1187,7 +1200,8 @@ def test_compact_oserror_mid_commit_converges_to_old_pair(tmp_path, monkeypatch)
     assert not any("left for boot recovery" in m for m in cap.messages)
     assert _tier_files(d) == ["blob.bin", "journal.log"]   # no anchors/token debris
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    assert boot.replay_journal() == 3                       # the OLD pair is intact
+    assert boot.replay_journal() == 2                       # the OLD pair is intact;
+                                                            # the tombstone holds
     _restore_all(boot, data, [2, 3])
 
 
@@ -1209,7 +1223,7 @@ def test_compact_oserror_before_arm_aborts_clean(tmp_path, monkeypatch):
     assert any("aborted before arm" in m for m in cap.messages)
     assert _tier_files(d) == ["blob.bin", "journal.log"]
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    assert boot.replay_journal() == 3
+    assert boot.replay_journal() == 2                       # old pair intact, tombstone holds
     _restore_all(boot, data, [2, 3])
 
 
@@ -1231,31 +1245,31 @@ def test_boot_recovery_rollback_with_anchors(tmp_path, monkeypatch):
         f.write(bytes([b[0] ^ 0xFF]))                        # corrupt the staged journal
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
     with _tier_log_capture() as cap:
-        assert boot.replay_journal() == 3
+        assert boot.replay_journal() == 2   # rolled back to the old pair; tombstone holds
     assert any("rolled back" in m for m in cap.messages)
     assert _tier_files(d) == ["blob.bin", "journal.log"]
     _restore_all(boot, data, [2, 3])
 
 
-def test_marker_skipped_when_dead_records_left(tmp_path, monkeypatch):
-    """Fix B3: a deferred compact leaves dead records journaled - writing a VALID marker
-    would bless the state as a clean-shutdown checkpoint even though journal != live set
-    (a later invariant break). No marker: the next boot takes the full path (the zombies
-    resurrect per discard durability - same on both paths) and the next compact run
-    classifies them as dead again."""
-    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+def test_marker_written_when_deferred_dead_all_tombstoned(tmp_path, monkeypatch):
+    """P13 refines B3: a deferred compact leaves dead records journaled, but with a
+    durable tombstone each they cannot fast-path-resurrect (replay filters tombstones
+    before the fast-path ledger seed), so the marker stays honest and WRITES. The
+    pre-P13 skip remains for un-tombstoned dead - covered by the blocker test below."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,), blob_above_floor=True)
     hit = store.probe([chain_page_key(None, (2,))])
     seg = store._segments[hit[1]._seg_id]
-    seg.refs += 1                       # a blob read in flight: compact defers
+    seg.refs += 1                       # a blob read in flight: compact WOULD defer
     with _tier_log_capture() as cap:
-        _graceful_stop(store)
+        _graceful_stop_p13(store)
     seg.refs -= 1
-    assert any("marker skipped" in m for m in cap.messages)
-    assert not os.path.exists(_marker_path(d))
-    calls = _counting_pread(monkeypatch)                    # full path: payload crc ran
+    assert any("shutdown compact skipped" in m for m in cap.messages)
+    assert os.path.exists(_marker_path(d))       # tombstoned dead no longer block B3
+    calls = _counting_pread(monkeypatch)         # fast path: zero payload re-reads
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    assert boot.replay_journal() == 3
-    assert calls["n"] == 3
+    assert boot.replay_journal() == 2
+    assert calls["n"] == 0
+    assert boot.probe([chain_page_key(None, (1,))]) is None   # the tombstone holds
     _restore_all(boot, data, [2, 3])
 
 
@@ -1607,31 +1621,31 @@ def test_ticket_stress_two_threads(tmp_path, monkeypatch):
 
 
 def test_compact_keeps_both_resurrected_records_after_crash_replay(tmp_path):
-    """F1 fails-before: survival keyed by path_key last-wins dropped the OLDER live
-    record when a crashed discard left two live segments on one path (discard leaves the
-    journal record + blob region intact; replay resurrects both) - the dropped segment
-    stayed indexed but its blob region became a hole, so restore returned zeros."""
+    """F1 (P13-updated): survival keyed by EXACT identity (path, offset, length) stays
+    the compact rule, but the crashed-discard double-live-segment scenario cannot arise
+    anymore: the discard appends a durable tombstone, so the reboot replays exactly ONE
+    live segment per path and the discarded one stays dead (pre-P13 both resurrected
+    and last-wins survival would hole the older live segment's blob region)."""
     d = tmp_path / "dup"
     store = SessionTierStore(_cfg(d=str(d)))
     keys1, pages1 = _chain([(1, 0), (1, 1), (1, 2)])
     assert store.offer(b"path", 3, pages1, _snap("a"))
     assert store.flush_live() == 1          # seg1 -> L2 (journal record R1)
-    assert store.evict_store(1) == 1        # seg1 discarded; R1 + blob region survive
+    assert store.evict_store(1) == 1        # seg1 discarded; the tombstone lands too
     keys2, pages2 = _chain([(5, 0), (5, 1), (5, 2)])
     assert store.offer(b"path", 3, pages2, _snap("b"))   # re-offer same path: new seg2
-    assert store.flush_live() == 1          # seg2 -> L2 (R2); journal now has R1 + R2
+    assert store.flush_live() == 1          # seg2 -> L2 (R2); journal now has R1 + R2 + T1
 
-    # SIGKILL-style reboot: replay resurrects BOTH same-path segments
+    # SIGKILL-style reboot: the tombstone keeps R1 dead, exactly one segment is live
     reborn = SessionTierStore(_cfg(d=str(d)))
-    assert reborn.replay_journal() == 2
-    assert [s.path_key for s in reborn._segments.values()].count(b"path") == 2
-    assert reborn.compact() == 0            # identity-keyed survival: nothing is dropped
+    assert reborn.replay_journal() == 1
+    assert [s.path_key for s in reborn._segments.values()].count(b"path") == 1
+    assert reborn.compact() == 1            # R1 + T1 reclaimed, R2 kept
 
-    # both resurrected segments probe AND restore byte-exact
+    # the surviving segment probes AND restores byte-exact; the dead one never returns
     h2 = reborn.probe(keys2)[1]             # seg2's page keys only match seg2
     assert reborn.restore(h2) == ([data for _, data in pages2], [_snap("b")])
-    h1 = reborn.probe(keys1)[1]             # seg1 still indexed and readable
-    assert reborn.restore(h1) == ([data for _, data in pages1], [_snap("a")])
+    assert reborn.probe(keys1) is None      # seg1 stays discarded across boots
 
 
 # --------------------------------------------------- P2: clean-shutdown marker
@@ -1861,8 +1875,8 @@ def test_shutdown_marker_discard_invalidates(tmp_path, monkeypatch):
     calls = _counting_pread(monkeypatch)
     with _tier_log_capture() as cap:
         boot, n = _boot(str(d))
-    assert n == 1                                # resurrect semantics unchanged
-    assert calls["n"] == 1                       # full verification ran (no fast path)
+    assert n == 0                                # P13: the tombstone keeps it dead
+    assert calls["n"] == 0                       # no live records left to verify
     assert not any("fast-path" in m for m in cap.messages)
 
 
@@ -2297,14 +2311,16 @@ def test_flush_live_survives_cap_eviction_mid_iteration(tmp_path, monkeypatch):
     assert count == 2                         # s3 written, then sacrificed for s4
     assert not [s for s in store._segments.values() if s.in_l2 and s.seg_id <= 2]
     boot = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
-    # p1/p2 records resurrect too: a runtime discard rewrites no journal, and their blob
-    # regions were never overwritten (documented resurrect semantics).
-    assert boot.replay_journal() == 4
-    for i in (1, 2, 3, 4):
+    # P13: s1/s2 (runtime demotes) and s3 (sacrificed mid-flush) all carry durable
+    # tombstones - the pre-P13 documented resurrect semantics is gone; only s4 lives.
+    assert boot.replay_journal() == 1
+    for i in (1, 2, 3):
         keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
-        hit = boot.probe(keys)
-        assert hit is not None and hit[0] == 3
-        assert boot.restore(hit[1])[0] == [data for _, data in pages]
+        assert boot.probe(keys) is None
+    keys, pages = _chain([(4, 0), (4, 1), (4, 2)])
+    hit = boot.probe(keys)
+    assert hit is not None and hit[0] == 3
+    assert boot.restore(hit[1])[0] == [data for _, data in pages]
 
 
 def test_partial_pwrite_failure_keeps_segment_in_l1(tmp_path, monkeypatch):
@@ -2691,7 +2707,7 @@ def test_flush_drain_retry_admits_next_group_after_previous_settles(tmp_path, mo
     assert not [s for s in store._segments.values() if s.seg_id == 3]  # s3 sacrificed
     assert [s for s in store._segments.values() if s.seg_id == 4][0].in_l2
     boot = SessionTierStore(_cfg(ram=2048, ssd=64 * 4096, d=d))
-    assert boot.replay_journal() == 4   # s1/s2/s3 journal records resurrect (holes)
+    assert boot.replay_journal() == 1   # P13 tombstones: s1/s2/s3 stay dead, s4 lives
     keys4, pages4 = _chain([(4, 0), (4, 1), (4, 2)])
     hit = boot.probe(keys4)
     assert hit is not None and hit[0] == 3
@@ -3164,3 +3180,241 @@ def test_flush_env_garbage_writers_warns_once_per_flush(tmp_path, monkeypatch):
     writer_warnings = [m for m in cap.messages
                        if "FREETOKEN_FLUSH_WRITERS" in m and "non-integer" in m]
     assert len(writer_warnings) == 1
+
+
+# ------------------------------------------------- P13: durable tombstone records
+
+
+def _frame(rec: dict) -> bytes:
+    """One journal frame (the framing every record shares - zlib crc32, unchanged)."""
+    payload = json.dumps(rec, sort_keys=True).encode()
+    return struct.pack("<II", len(payload), zlib.crc32(payload)) + payload
+
+
+def _graceful_stop_p13(store):
+    """Mirror CacheManager.shutdown_tier's P13 discipline: drop any previous marker
+    FIRST, flush, OPTIONAL compact, then the end-of-shutdown barrier."""
+    store.invalidate_shutdown_marker()
+    store.flush_live()
+    store.shutdown_compact()
+    store.write_shutdown_marker()
+
+
+def test_tombstone_discard_survives_restart_without_compact(tmp_path, monkeypatch):
+    """P13 fails-before: an evicted L2 record must stay dead across a boot that ran no
+    compact at all (and left no marker). Pre-P13 the record resurrected: the journal
+    still listed it and its payload crc still verified over the append-only blob.
+    The tombstone append must also be fsync'ed to be durable: removing os.fsync from
+    _append_tombstone has to fail the fsync-count assert below."""
+    fsyncs = {"n": 0}
+    real_fsync = os.fsync
+
+    def counting_fsync(fd):
+        fsyncs["n"] += 1
+        return real_fsync(fd)
+
+    monkeypatch.setattr("freetoken.scheduler.session_tier.os.fsync", counting_fsync)
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=())
+    before = fsyncs["n"]
+    assert store.evict_store(1) == 1            # discards record 1, one tombstone
+    assert store._counters["tombstones"] == 1
+    assert fsyncs["n"] > before                 # the tombstone append fsynced first
+    boot, n = _boot(str(d))
+    assert n == 2                               # the tombstone keeps record 1 dead
+    assert boot.probe([chain_page_key(None, (1,))]) is None
+    _restore_all(boot, data, [2, 3])
+
+
+def test_legacy_records_replay_unchanged_next_to_hand_framed_tombstone(tmp_path):
+    """P13 compatibility: existing records gain NO new fields (a store-written journal
+    has no "t" keys); a hand-framed tombstone is honored; a legacy zlib-crc32 record
+    without crc_alg (the pre-P3 shape) still verifies and replays live next to them;
+    the filter is order-independent (the tombstone lands after the legacy record but
+    kills an earlier one)."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=())
+    recs, whole = _journal_records_raw(str(d / "journal.log"))
+    assert whole and len(recs) == 3
+    assert all("t" not in rec for rec in recs)          # the old format is untouched
+    victim = recs[0]
+
+    k9 = chain_page_key(None, (9,))
+    data9 = bytes([9]) * PAGE
+    with open(d / "blob.bin", "r+b") as f:
+        f.seek(0, os.SEEK_END)
+        off9 = f.tell()
+        f.write(data9.ljust(4096, b"\0"))       # the full padded span, like _write_blob
+    legacy = {"path_key": k9.hex(), "blen": 1, "page_keys": [k9.hex()],
+              "page_lens": [PAGE], "snap_lens": [], "blob": "blob.bin",
+              "off": off9, "n": PAGE, "ts": 1,
+              "crc": zlib.crc32(data9)}                 # no crc_alg: the pre-P3 shape
+    with open(d / "journal.log", "ab") as f:
+        f.write(_frame(legacy))
+        f.write(_frame({"t": 1, "path_key": victim["path_key"],
+                        "off": victim["off"], "n": victim["n"]}))
+
+    boot, n = _boot(str(d))
+    assert n == 3                              # rec1 tombstoned away; 2, 3 and 9 live
+    assert boot.probe([chain_page_key(None, (1,))]) is None
+    hit = boot.probe([k9])
+    assert hit is not None and hit[0] == 1     # the legacy record is live
+    assert boot.restore(hit[1])[0] == [data9]
+    _restore_all(boot, data, [2, 3])
+
+
+def test_shutdown_compact_skipped_all_dead_tombstoned_marker_fast_path(tmp_path, monkeypatch):
+    """P13 core: with every dead record tombstoned and the watermark above the P8
+    floor the shutdown compact SKIPS (no blob rewrite), the marker still WRITES (they
+    cannot fast-path-resurrect), and the next boot fast-paths with zero preads, the
+    victim gone and the P8 ledger honest."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,), blob_above_floor=True)
+    assert store._blob_eof >= st_mod._COMPACT_FLOOR_BYTES   # the skip gate's premise
+    with _tier_log_capture() as cap:
+        _graceful_stop_p13(store)
+    assert any("shutdown compact skipped" in m for m in cap.messages)
+    assert os.path.exists(_marker_path(d))
+    assert ((d / "blob.bin").stat().st_size
+            == st_mod._COMPACT_FLOOR_BYTES + 4096)          # NOT rewritten
+
+    def boom(*args, **kwargs):
+        raise AssertionError("payload pread must not happen on the fast path")
+
+    monkeypatch.setattr("freetoken.scheduler.session_tier.os.pread", boom)
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d))
+    assert n == 2
+    assert any("replay fast-path (clean shutdown marker)" in m for m in cap.messages)
+    assert any("replay honored 1 tombstones" in m for m in cap.messages)
+    assert boot.probe([chain_page_key(None, (1,))]) is None
+    assert boot._dead_records == 1 and boot._dead_record_bytes == 4096   # honest ledger
+    _restore_all(boot, data, [2, 3])
+
+
+def test_shutdown_compact_below_floor_rewrites_small_tier(tmp_path):
+    """P13 gate refine (fails-before): a tier whose blob stays below the P8 compact
+    floor keeps the pre-P13 shutdown hygiene - the compact RUNS even though every
+    dead record is already tombstoned (the runtime gate can never fire down there,
+    so the skip would leave the holes and the tombstones unreclaimed forever)."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    assert store._blob_eof < st_mod._COMPACT_FLOOR_BYTES    # below the floor
+    with _tier_log_capture() as cap:
+        _graceful_stop_p13(store)
+    assert any("compact shrink" in m for m in cap.messages)
+    assert not any("shutdown compact skipped" in m for m in cap.messages)
+    assert (d / "blob.bin").stat().st_size == 2 * 4096      # holes reclaimed
+    assert os.path.exists(_marker_path(d))
+    boot, n = _boot(str(d))
+    assert n == 2 and boot._dead_records == 0               # ledger reset by the rewrite
+    assert boot.probe([chain_page_key(None, (1,))]) is None
+    recs, whole = _journal_records_raw(str(d / "journal.log"))
+    assert whole and len(recs) == 2
+    assert all("t" not in rec for rec in recs)              # tombstones not carried
+    _restore_all(boot, data, [2, 3])
+
+
+def test_full_replay_ledger_mixed_tombstoned_and_payload_dead(tmp_path):
+    """P13 ledger exactness on the FULL replay path with mixed dead: a tombstoned
+    victim (v) and a payload-crc-dead record (pdropped) each feed the P8 ledger
+    exactly once (dead = v + pdropped), while only the untombstoned payload-dead
+    block the marker (blockers = pdropped) - a split the live count n cannot show."""
+    d, store, data = _shrink_fixture(tmp_path, n=4, dead=(1,))          # v = 1
+    with open(d / "blob.bin", "r+b") as f:      # corrupt record 2: pdropped = 1
+        f.seek(4096)
+        f.write(b"\\xde" * 256)
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d))                 # full path: no marker was ever written
+    assert n == 2                               # live: 3, 4
+    assert any("replay honored 1 tombstones" in m for m in cap.messages)
+    assert any("replay dropped 1 dead/torn records" in m for m in cap.messages)
+    assert boot._dead_records == 2              # dead = v + pdropped = 1 + 1
+    assert boot._dead_record_bytes == 2 * 4096  # both padded spans
+    assert boot._marker_blockers == 1           # blockers = pdropped, not the victim
+    assert boot.probe([chain_page_key(None, (1,))]) is None
+    assert boot.probe([chain_page_key(None, (2,))]) is None
+    _restore_all(boot, data, [3, 4])
+
+
+def test_tombstone_append_failure_forces_shutdown_compact(tmp_path, monkeypatch):
+    """A failed tombstone append (EIO) leaves the discard compact-durable only: the
+    un-tombstoned dead become a marker blocker and the shutdown compact falls back to
+    the classic rewrite (the pre-P13 shutdown, byte-for-byte). After it the marker is
+    legal again (the ledger and the blockers reset with the rewritten journal)."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=())
+    for i in (2, 3):                        # keep 2/3 warm: LRU evicts exactly 1
+        hit = store.probe([chain_page_key(None, (i,))])
+        store.restore(hit[1])
+    monkeypatch.setattr(store, "_append_tombstone", lambda pk, off, n: False)
+    assert store.evict_store(1) == 1            # the patched append bypasses the logger
+    assert store._marker_blockers == 1
+    _graceful_stop_p13(store)
+    assert (d / "blob.bin").stat().st_size == 2 * 4096      # the rewrite RAN
+    assert os.path.exists(_marker_path(d))                  # legal again after compact
+    monkeypatch.undo()
+    calls = _counting_pread(monkeypatch)
+    boot, n = _boot(str(d))
+    assert n == 2 and calls["n"] == 0                       # fast path: journal == live
+    _restore_all(boot, data, [2, 3])
+
+
+def test_marker_skipped_when_blocker_and_compact_deferred(tmp_path, monkeypatch):
+    """B3 survives for un-tombstoned dead: a failed tombstone append + a deferred
+    compact (blob reads in flight) leave dead records WITHOUT tombstones - the marker
+    must not write, or a fast-path boot would resurrect them (the pre-P13 behavior)."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=())
+    for i in (2, 3):
+        hit = store.probe([chain_page_key(None, (i,))])
+        store.restore(hit[1])
+    monkeypatch.setattr(store, "_append_tombstone", lambda pk, off, n: False)
+    assert store.evict_store(1) == 1
+    monkeypatch.undo()
+    hit = store.probe([chain_page_key(None, (2,))])
+    seg = store._segments[hit[1]._seg_id]
+    seg.refs += 1                       # a blob read in flight: compact defers
+    with _tier_log_capture() as cap:
+        _graceful_stop_p13(store)
+    seg.refs -= 1
+    assert any("compaction deferred" in m for m in cap.messages)
+    assert any("marker skipped" in m for m in cap.messages)
+    assert not os.path.exists(_marker_path(d))
+    boot, n = _boot(str(d))             # full path; the zombie returns (no tombstone)
+    assert n == 3                       # the pre-P13 discard durability, unchanged
+
+
+def test_torn_tombstone_never_applied_converges(tmp_path):
+    """Crash window of a torn tombstone: a torn tombstone tail fails the framing crc,
+    replay stops at the last complete record and converges to the pre-discard state -
+    the same semantics as a torn live-record append (no corruption, no live loss)."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=())
+    with open(d / "journal.log", "ab") as f:
+        f.write(struct.pack("<I", 18) + b'{"t":1,"pat')   # torn tombstone tail
+    with _tier_log_capture() as cap:
+        boot, n = _boot(str(d))
+    assert any("journal tail truncated/torn" in m for m in cap.messages)
+    assert n == 3
+    _restore_all(boot, data, [1, 2, 3])
+
+
+def test_tombstone_for_unknown_victim_is_harmless(tmp_path):
+    """A tombstone whose victim is already reclaimed (compact dropped both) is a no-op
+    at replay: nothing crashes, nothing extra is dropped."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    assert store.compact() == 1                     # victim + tombstone reclaimed
+    with open(d / "journal.log", "ab") as f:
+        f.write(_frame({"t": 1, "path_key": (bytes([1]) * 16).hex(),
+                        "off": 0, "n": PAGE}))
+    boot, n = _boot(str(d))
+    assert n == 2
+    _restore_all(boot, data, [2, 3])
+
+
+def test_tombstone_counter_in_snapshot_and_stats_line(tmp_path):
+    """Every durable tombstone is counted (snapshot counter + stats_line fragment)."""
+    d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
+    assert store.snapshot()["tombstones"] == 1
+    assert "tomb=1" in store.stats_line()
+    fresh = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "fresh")))
+    assert fresh.snapshot()["tombstones"] == 0
+    assert "tomb=0" in fresh.stats_line()
