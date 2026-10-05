@@ -1,9 +1,9 @@
 ---
 name: "ft-p7-io-uring-wave"
-description: "P7 io_uring ctypes wave: opt-in uncommitted, QD lever refuted (26s/5.16), CPU gate sys x1.45, settle-order lesson"
+description: "ftw_uring.py io_uring FTW read backend: committed 21f1525, opt-in default direct; QD refuted (5.16 GB/s), sys x1.45"
 type: project
-lastUpdated: 2026-09-30T23:47
-lastRecall: 2026-09-30T23:38
+lastUpdated: 2026-10-02T22:46
+lastRecall: 2026-10-02T22:42
 ---
 
 # P7 io_uring ctypes wave (boot-shutdown-io, 2026-09-30, UNCOMMITTED @ 512b511)
@@ -57,3 +57,5 @@ mixed-тест обязателен (запись в kb/methods/deterministic-co
 - РЕШЕНИЕ ПОЛЬЗОВАТЕЛЯ: default = direct (opt-in подтверждён).
 - Статус "UNCOMMITTED" в этой записи устарел. P10-бриф (оверклап пин-конвейера)
   зафиксирован в TASK.md - следующий рычаг P1-гейта, старт только по явному запросу.
+
+

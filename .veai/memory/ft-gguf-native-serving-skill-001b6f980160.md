@@ -2,8 +2,8 @@
 name: "ft-gguf-native-serving-skill"
 description: "gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag"
 type: project
-lastUpdated: 2026-09-27T22:10
-lastRecall: 2026-09-30T23:48
+lastUpdated: 2026-10-04T18:42
+lastRecall: 2026-10-04T18:37
 ---
 
 # GGUF native serving skill: reusable methodology for any model family
@@ -35,3 +35,6 @@ At the END of every session that produced reusable knowledge (root causes with c
 - TRAPS.md now T01-T66: T64 in-kernel actquant fusion collapsed MMVQ occupancy (launch counts dropped, 5.5-8.7x slowdown - check CTAs/SM + GB/s, not launch counts); T65 fused topk single-block-per-slice: exact ATen tie semantics but ~20x slower (semantics port != performance-model port); T66 load-time fused weights must emit checkpoint keys in every reader path (raw-GGUF vs FTW) or FTW boots KeyError.
 - Full numbers: kb/topics/decode-chain-microfusion.md (committed d76c3ce).
 - NOTE: a8fb231 touched ONLY TRAPS.md - the SKILL.md "63 traps" counter and ORCHESTRATION sec.10 counters were NOT synced in that pass; a future self-update pass should sync them to T66 (verify current on-disk state first).
+
+## Обновление 2026-10-04 (P12 session)
+Добавлена T67 (лимитер-атрибуция: ключить к дефолту цепочкой из исходников + гейт потолком устранения до кода; прецедент P12 wave-1, кросс-реф kb/methods/limiter-attribution.md) в новой секции "Boot/shutdown I/O кампания ... T67" (TRAPS.md :386-404). Счётчики синхронизированы до 67: TRAPS.md :1, SKILL.md :146 (был отставший 63), ORCHESTRATION.md :302 (был T01-T63). NOTE "sync counters to T66" устарел. Правки скилл-файлов НЕКОММИЧЕНЫ (user-gated).

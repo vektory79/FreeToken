@@ -3,7 +3,7 @@ name: "ft-p2-shutdown-marker-wave"
 description: "P2 clean-shutdown marker fast-path in replay_journal; committed 621d100, kb 9efdfbf; iron accepted (replay 22s->0s)"
 type: project
 lastUpdated: 2026-09-30T22:41
-lastRecall: 2026-10-01T12:11
+lastRecall: 2026-10-04T22:23
 ---
 
 # P2 shutdown-marker wave (boot-shutdown-io, 2026-09-27/28, COMMITTED 621d100)

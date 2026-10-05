@@ -3,7 +3,7 @@ name: "gguf-hybrid-decode-handshake-floor"
 description: "Hybrid decode per-layer cost model: no fixed handshake floor; CPU-leg x fetch-volume coupling; 26.9 GB/s idle-inflated"
 type: project
 lastUpdated: 2026-09-26T22:29
-lastRecall: 2026-09-28T18:54
+lastRecall: 2026-10-02T22:43
 ---
 
 # GGUF hybrid per-layer cost: fetch volume (endogenous to CPU-leg speed) + ~0.6-1.0 ms sync

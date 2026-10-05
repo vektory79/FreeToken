@@ -2,8 +2,8 @@
 name: "ft-serve-boot-shutdown-io-research"
 description: "HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore"
 type: project
-lastUpdated: 2026-09-27T23:17
-lastRecall: 2026-10-01T12:11
+lastUpdated: 2026-10-04T20:57
+lastRecall: 2026-10-04T22:52
 ---
 
 # ft serve boot/shutdown I/O research (2026-09-26, research-only, NO fixes implemented)
@@ -74,3 +74,9 @@ nvme0n1 990 EVO Plus ~6.4 GB/s sustained). Deliverable = chat report; fixes defe
   (QD1 + per-segment fsync) as agreed; compact is NOT part of their shutdown cost.
 - Production tier dir untouched by probes: 99 records intact, no drops, l2 used unchanged;
   journal backup in .tasks/boot-shutdown-io/.
+
+## Обновление 2026-10-04 (P12 wave-1): прогнозы P1-левера закрыты цепочкой волн
+Прогноз этой записи "fewer streams + deeper per-stream queues (io_uring), est ~1.4-1.5x" закрыт: P1 pool = 1.12x (свип пула плоский), P7 io_uring QD опровергнут (5.16 ГБ/с), P12 zero-fill NO-GO (доля 8.6% @ дефолт pool=8 < гейта 10%; warm-потолок 22.85 с нереализуем; кандидаты ~0/отрицательны). Плато 5.2-5.4 ГБ/с = диск (98-99% busy) + форма пути; гейт P1 (23 с / 5.5 ГБ/с) на default-пути недостижим известными рычагами. Гейт берут только born-pinned руки ценой общего бута (не рекомендация). kb: TASK.md P12 блок закрытия, P1-NOTES коррекция, kb/methods/limiter-attribution.md.
+
+## Alloc-bench (2026-10-04, follow-up вопроса про ~50 с RAM-аллокации born-pinned)
+Замер 6 рук по 125.2 GiB (freetoken.kernel.pinned, сериализовано, .tasks/boot-shutdown-io/alloc-bench/): cudaHostAlloc серийный 21.5 с (6.25 ГБ/с); +zero_() = 25.2 с (zero_ = 3.7 с, на FTW избыточен); параллель 8/16 тредов = 0 выигрыша (21.7); ОДИН большой блок = 0 выигрыша (22.2) - драйвер сериализует изнутри, потолок ~6 ГБ/с неускоряем; cudaHostRegister = 19 ГБ/с (7 с на 125 GiB, дешёвый); python-touch parallel(8) = 2 ГБ/с (GIL). Large pages для host-pinned CUDA API нет. Структурный вердикт: born-pinned платит 21-25 с неускоряемой аллокации за ~3 с выигрыша бара - структурно проигрывает дефолту (там touch спрятан под IO, +8.6%); unlock-рычага аллокации для P10/P12 нет. Сходится с P10-iron бутами (+21..26 с wall).

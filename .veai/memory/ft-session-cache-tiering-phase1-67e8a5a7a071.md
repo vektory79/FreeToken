@@ -3,7 +3,7 @@ name: "ft-session-cache-tiering-phase1"
 description: "Phase-1 tiering: SessionTierStore d77d15e/4b6aacb, L1 10 GiB cap; Qwen3.8 QSA hazard resolved by phase-2 codec"
 type: project
 lastUpdated: 2026-09-27T17:52
-lastRecall: 2026-09-30T22:35
+lastRecall: 2026-10-04T19:41
 ---
 
 # Session-cache-tiering phase 1 (SessionTierStore) - CPU phase done, uncommitted

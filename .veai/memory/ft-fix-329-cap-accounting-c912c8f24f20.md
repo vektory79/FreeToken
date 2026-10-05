@@ -2,8 +2,8 @@
 name: "ft-fix-329-cap-accounting"
 description: "Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid"
 type: project
-lastUpdated: 2026-09-30T22:40
-lastRecall: 2026-09-30T23:48
+lastUpdated: 2026-10-04T19:44
+lastRecall: 2026-10-04T19:42
 ---
 
 # Fix :329 - boot cap-accounting reseed (COMMITTED ab3a117, 2026-09-29)
@@ -44,5 +44,6 @@ P5-исследовании, ft-p5-lru-research).
 
 ## Брифы P4/P5/P6
 Были зафиксированы в kb/cases/boot-shutdown-io/TASK.md (порядок P6 -> P4/P5, P5 после
-ask) - ВСЕ исполнены и закоммичены позже; актуальные статусы в волнах p4/p5 записях
-и ft-p5-committed-p8p9-briefs.
+ask) - ВСЕ исполнены и закоммичены позже; актуальные статусы в wave-памятиях
+ft-p4-flush-pipeline-wave, ft-p5-lru-research, ft-p8-record-compact-gate,
+ft-p9-two-phase-compact-wave.

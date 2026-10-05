@@ -3,7 +3,7 @@ name: "merge-wave-interrupted-provenance"
 description: "Continue interrupted merge wave safely: git merge-tree bit-for-bit check + provenance rules + tee runner stdout"
 type: project
 lastUpdated: 2026-09-20T19:45
-lastRecall: 2026-09-26T23:45
+lastRecall: 2026-10-02T22:50
 ---
 
 # Continue an interrupted merge wave instead of redoing it (round 3, 2026-09-20)

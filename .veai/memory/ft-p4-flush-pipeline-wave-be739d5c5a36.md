@@ -3,7 +3,7 @@ name: "ft-p4-flush-pipeline-wave"
 description: "P4 zero-copy pwritev flush pipeline + P6 env overrides; iron accepted 2.18-2.46 GB/s; commits b99a103, dd349a6"
 type: project
 lastUpdated: 2026-09-30T22:40
-lastRecall: 2026-10-01T11:36
+lastRecall: 2026-10-02T20:44
 ---
 
 # P4 flush-pipeline wave + P6 env-override + iron acceptance (boot-shutdown-io, 2026-09-30)

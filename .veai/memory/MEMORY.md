@@ -21,7 +21,6 @@
 - [ft-gate-baseline-nan-flake](ft-gate-baseline-nan-flake-438a2a9c30e0.md) — Cap-test NaN flake root-caused to torch.empty x and FIXED in v3a (zeros); gate scale 2135 tests; classification method
 - [glm53-post-iommu-baseline](glm53-post-iommu-baseline-28c5cc0c6fd3.md) — GLM-5.3 NVFP4 post-iommu baseline: 1M/512k budget recipes, chunk-size prefill lever; 09-14 fail-fast transient
 - [ft-gate-nodeid-collection-drift](ft-gate-nodeid-collection-drift-ed9c69f3e41e.md) — Full-gate nodeid counts drift across runs: test_quant_config.py collection-time glob parametrization; key on failure set
-- [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-08f4f089d42d.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
 - [ft-serve-test-and-e2e-gotchas](ft-serve-test-and-e2e-gotchas-ed33892b6a6b.md) — FreeToken e2e gotchas: pytest --extra dev, chat 422 no model, backend-death hang, log-tail watchdog harness
 - [nvme-990evo-plus-iommu-fio-gotchas](nvme-990evo-plus-iommu-fio-gotchas-0b993bdb2c17.md) — Samsung 990 EVO Plus NVMe: sustained 6.4 GB/s (7.25 = SLC burst); fio libaio, dd caps 1.5; old ~4 GB/s likely IOMMU tax
 - [ft-dense-q80-gemm-campaign](ft-dense-q80-gemm-campaign-8b567bc03197.md) — dense-q80-gemm campaign: q8_0 ALU-bound; N-split +2.61%; dense tile64 +40.46%; all committed (HEAD 8e2e4c7)
@@ -62,19 +61,22 @@
 - [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-67e8a5a7a071.md) — Phase-1 tiering: SessionTierStore d77d15e/4b6aacb, L1 10 GiB cap; Qwen3.8 QSA hazard resolved by phase-2 codec
 - [ft-lever3-chain-cl1](ft-lever3-chain-cl1-575cdd6e73ae.md) — mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons distilled+committed 61397a2/d76c3ce/a8fb231
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a5f991dc9f99.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-e52457d2cc1e.md) — gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag
-- [ft-serve-boot-shutdown-io-research](ft-serve-boot-shutdown-io-research-6d55b44776e7.md) — HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore
 - [local-llm-vram-protocol](local-llm-vram-protocol-c8f46ab09a59.md) — Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model
-- [ft-p1-ftw-pool-wave](ft-p1-ftw-pool-wave-51dde77307cc.md) — P1 FTW bank-pool: COMMITTED 94d5e4a; HW accepted partially: 1.12x, sys 2.3x, gate open
 - [ft-decode-research-campaign](ft-decode-research-campaign-0fabb44fa748.md) — GGUF decode 5-arm A/B + additive step model + T1 block decomposition; harness .tasks/decode-research
 - [ft-decode-lever-research](ft-decode-lever-research-e9917fbc0e8e.md) — GGUF glm5next hybrid decode lever study: R1-R3 hypothesis closures, FA N/A for GDN+DSA arch, user-config gotcha
-- [ft-p5-committed-p8p9-briefs](ft-p5-committed-p8p9-briefs-30ab54ca8cb5.md) — P5 committed 94e4783 + docs 512b511; P8 watermark-no-op and P9 file-shrink briefs fixated; campaign status
-- [ft-fix-329-cap-accounting](ft-fix-329-cap-accounting-437b211cf22a.md) — Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid
 - [ft-p3-parallel-flush-wave](ft-p3-parallel-flush-wave-97975cd582d2.md) — P3 parallel pwrite + group fdatasync + crc32c; stale journal-fd HEAD bug; committed de26ba1; iron producer-bound
 - [ft-p4-flush-pipeline-wave](ft-p4-flush-pipeline-wave-be739d5c5a36.md) — P4 zero-copy pwritev flush pipeline + P6 env overrides; iron accepted 2.18-2.46 GB/s; commits b99a103, dd349a6
 - [ft-p2-shutdown-marker-wave](ft-p2-shutdown-marker-wave-dcfe8ba89f9d.md) — P2 clean-shutdown marker fast-path in replay_journal; committed 621d100, kb 9efdfbf; iron accepted (replay 22s->0s)
-- [ft-p5-lru-research](ft-p5-lru-research-726100c46d5c.md) — P5 LRU already in prod; wipe was :329 degenerate; P5-minimum overflow observability committed 94e4783; iron accepted
-- [ft-p7-io-uring-wave](ft-p7-io-uring-wave-b29797374ca2.md) — P7 io_uring ctypes wave: opt-in uncommitted, QD lever refuted (26s/5.16), CPU gate sys x1.45, settle-order lesson
-- [ft-p8-record-compact-gate](ft-p8-record-compact-gate-ef56905cc0e3.md) — P8 record-based compact gate: COMMITTED 373505b + docs 1de8069; honest dead/holes stats, 157 passed; P9 open
 - [ft-p9-two-phase-compact-wave](ft-p9-two-phase-compact-wave-01cc9c4eaba9.md) — P9 two-phase blob compact: COMMITTED ab52a33, docs e45c592 + P11 brief; tempo PARTIAL
 - [ft-stream-stall-llama-swap](ft-stream-stall-llama-swap-b55d15dac47e.md) — Stream-stall: fix COMMITTED fc5fd4a + case/brief S1 f454715; config matrix = operator decision
+- [ft-p8-record-compact-gate](ft-p8-record-compact-gate-dd1fce1710fc.md) — P8 record-dead compact gate: committed 373505b + docs 1de8069; honest dead/holes stats, 157 passed; P9 landed ab52a33
+- [ft-p7-io-uring-wave](ft-p7-io-uring-wave-9db8ddac17e6.md) — ftw_uring.py io_uring FTW read backend: committed 21f1525, opt-in default direct; QD refuted (5.16 GB/s), sys x1.45
+- [ft-p5-lru-research](ft-p5-lru-research-b498a9e9b960.md) — P5 LRU already in prod; wipe was :329 degenerate; 94e4783 overflow observability committed; P8/P9 briefs executed
+- [ft-p1-ftw-pool-wave](ft-p1-ftw-pool-wave-c9b7aa30344f.md) — P1 FTW bank-pool committed 94d5e4a; P10 seams refuted; P12 read-tempo CLOSED NO-GO (zero-fill 8.6% @ pool=8)
+- [ft-p12-read-tempo-brief](ft-p12-read-tempo-brief-1766b14e0c22.md) — P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ default pool=8 < 10% gate; premise refuted, no code; kb fixated
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-001b6f980160.md) — gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag
+- [ft-fix-329-cap-accounting](ft-fix-329-cap-accounting-c912c8f24f20.md) — Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid
+- [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-5ce36c040947.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
+- [ft-serve-boot-shutdown-io-research](ft-serve-boot-shutdown-io-research-ab444aa50b22.md) — HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore
+- [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-c82db5a7f2f2.md) — P11 attribution 2d57b78; P13 tombstone IMPLEMENTED 2026-10-04, HW gates taken (16.3s vs 55.7s), commit pending
+- [ft-p13-tombstone-wave](ft-p13-tombstone-wave-1de30f6941d6.md) — P13 tombstone COMMITTED (12623ff code + 91e53ff kb); KeyError accepted; sub-floor gate refined; case P1-P13 all closed

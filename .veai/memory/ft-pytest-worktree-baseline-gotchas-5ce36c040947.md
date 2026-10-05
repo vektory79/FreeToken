@@ -2,8 +2,8 @@
 name: "ft-pytest-worktree-baseline-gotchas"
 description: "FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause"
 type: project
-lastUpdated: 2026-09-19T18:18
-lastRecall: 2026-09-30T22:12
+lastUpdated: 2026-10-04T19:44
+lastRecall: 2026-10-04T22:16
 ---
 
 # FreeToken pytest/worktree gotchas (merge wave 2026-09-15)
@@ -28,3 +28,6 @@ A/B worktree runs pre-merge 6e673ab vs merge f786d7c: byte-identical failure pro
 
 ## Collection-count anomaly + baseline drift (2026-09-19, dense-q80 N-split wave)
 Two identical full-gate invocations collected DIFFERENT node counts (2473 vs 2410) with identical 16-failure sets. ROOT-CAUSED (see ft-gate-nodeid-collection-drift): tests/models/test_quant_config.py parametrizes at COLLECTION time over globbed model directories, so the total drifts with directory contents on disk; key full-gate comparisons on the FAILURE SET, not collected totals, and treat the final run + `--collect-only` as authoritative. Same wave: the 3x test_prefill_hit_d2d cudaMemcpyBatchAsync probes did NOT fail (first observed quiet miss of a baseline class) - baseline classes can go quiet; a quiet baseline class is drift, not a regression. Current gate scale on this box: 2395 of 2410 collected (16 Environment failures / 2173 passed / 206 skipped).
+
+## pgrep self-match escalation (2026-09-22)
+The "harmless self-match" above holds ONLY for report-only census. When census GATES a launch (refuse-if-live), a false positive BLOCKS the wave: gate census must match the real invocation shape (`[f]t serve --port`), never a bare pattern that appears in the wrapper's own cmdline. Full protocol: process-hygiene-protocol.

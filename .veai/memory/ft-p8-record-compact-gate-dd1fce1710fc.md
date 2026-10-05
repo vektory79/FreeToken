@@ -1,9 +1,9 @@
 ---
 name: "ft-p8-record-compact-gate"
-description: "P8 record-based compact gate: COMMITTED 373505b + docs 1de8069; honest dead/holes stats, 157 passed; P9 open"
+description: "P8 record-dead compact gate: committed 373505b + docs 1de8069; honest dead/holes stats, 157 passed; P9 landed ab52a33"
 type: project
-lastUpdated: 2026-10-01T12:43
-lastRecall: 2026-10-01T12:47
+lastUpdated: 2026-10-02T22:46
+lastRecall: 2026-10-05T10:54
 ---
 
 # P8 record-based compact gate (boot-shutdown-io, 2026-10-01, UNCOMMITTED @ fc9a04a)

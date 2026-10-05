@@ -1,9 +1,9 @@
 ---
 name: "ft-p1-ftw-pool-wave"
-description: "P1 FTW bank-pool: COMMITTED 94d5e4a; HW accepted partially: 1.12x, sys 2.3x, gate open"
+description: "P1 FTW bank-pool committed 94d5e4a; P10 seams refuted; P12 read-tempo CLOSED NO-GO (zero-fill 8.6% @ pool=8)"
 type: project
-lastUpdated: 2026-09-29T22:57
-lastRecall: 2026-09-30T22:19
+lastUpdated: 2026-10-04T18:36
+lastRecall: 2026-10-04T19:40
 ---
 
 # P1 FTW bank-pool wave (boot-shutdown-io case, CPU part, 2026-09-29)
@@ -76,3 +76,16 @@ CPU-only; железная рука отложена.
 НЕ взят (25 с / 5.00 ГБ/с при цели <=23 / >=5.5; пул исчерпан), CPU-гейт взят (sys 2.3x).
 Следующий рычаг: ctypes io_uring/libaio или оверлап пин-конвейера - ОТКРЫТО, решение
 пользователя. kb-правки приёмки P1 (4 файла) НЕКОММИЧЕНЫ.
+
+## P10 (2026-10-02): гипотеза стыков ОПРОВЕРГНУТА, волна отброшена
+- P10-iron: диск занят 98-99% фазы уже на базе (idle 1.1%) - оверлапить нечего; плато
+  5.2-5.4 ГБ/с = темп пути чтения (zero-fill внутри preadv). P10-машина = нон-регрессия,
+  отброшена (ревью M1: окно троттлило билдер, оверлап 2-3%; M2/M3).
+- ALLOC-замер: born-pinned руки берут гейт (22-23 с / 5.84-6.10), но общий бут ХУЖЕ
+  (80-85 с vs 59 с готовности; аллокации +26..111 с CPU вне бара) - замер, НЕ рекомендация.
+- Следующий рычаг: **P12** (бриф в TASK.md, OPEN): темп пути чтения - сначала замер доли
+  zero-fill, потом код (кандидаты: pre-zeroed anonymous page как dest, GPU-side fill
+  born-pinned only, large pages). Старт по явному запросу.
+
+## P12 закрыт NO-GO (2026-10-04)
+"Следующий рычаг P12" из хвоста этой записи закрыт волной-1: доля zero-fill 8.6% @ дефолт pool=8 (НЕ 4) < гейта 10%, warm-потолок 22.85 с нереализуем (first-touch zero на fresh mmap неизбежен), кандидаты ~0/отрицательны; кода нет, kb зафиксирована (карточка kb/methods/limiter-attribution.md). Детали: ft-p12-read-tempo-brief.

@@ -3,7 +3,7 @@ name: "ft-serve-shutdown-grace-kills-tier-flush"
 description: "ft serve tier-flush on llama-swap stop FIXED: worker SIGTERM handler, commit f5e51fd"
 type: project
 lastUpdated: 2026-09-26T11:17
-lastRecall: 2026-10-02T18:59
+lastRecall: 2026-10-04T22:23
 ---
 
 # ft serve: default 10 s SIGINT grace kills the session-tier shutdown flush (HW-confirmed 2026-09-25)

@@ -3,7 +3,7 @@ name: "ft-qwen38-flashnext-tier-fit"
 description: "Qwen3.8 qwen4_exp QSAKVCache tier-fit anchors; QSA corruption hazard RESOLVED by phase-2 codec (ft-tier-phase2-swave)"
 type: project
 lastUpdated: 2026-09-26T17:24
-lastRecall: 2026-09-26T17:21
+lastRecall: 2026-10-04T19:41
 ---
 
 # Qwen3.8-Flash-Next (qwen4_exp) tier fit + phase-2 scoping

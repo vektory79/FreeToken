@@ -3,7 +3,7 @@ name: "glm53-flash-nvfp4-cache-budget"
 description: "GLM-5.3-Flash-NVFP4 boot: cache_budget min-plan math, recipes, FTW load ladder; decode numbers superseded post-iommu"
 type: project
 lastUpdated: 2026-09-15T14:56
-lastRecall: 2026-09-30T22:34
+lastRecall: 2026-10-04T19:40
 ---
 
 # GLM-5.3-Flash-NVFP4 on RTX 5090: --moe-cache-auto budget floor

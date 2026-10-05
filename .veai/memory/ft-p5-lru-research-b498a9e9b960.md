@@ -1,9 +1,9 @@
 ---
 name: "ft-p5-lru-research"
-description: "P5 LRU already in prod; wipe was :329 degenerate; P5-minimum overflow observability committed 94e4783; iron accepted"
+description: "P5 LRU already in prod; wipe was :329 degenerate; 94e4783 overflow observability committed; P8/P9 briefs executed"
 type: project
-lastUpdated: 2026-09-30T22:41
-lastRecall: 2026-10-01T00:10
+lastUpdated: 2026-10-02T22:47
+lastRecall: 2026-10-02T22:46
 ---
 
 # P5/LRU research: eviction already in prod; wipe degenerate closed by :329 (2026-09-30)
@@ -49,7 +49,7 @@ Read-only исследование по вопросу пользователя 
   репрефилл. Overflow-строка прод-масштаба; без кап-давления - тишина. Wipe: 0
   инцидентов. Fast-path бут 0 с.
 
-## Вне-гейтовые находки -> брифы P8/P9 (детали в ft-p5-committed-p8p9-briefs)
+## Вне-гейтовые находки -> брифы P8/P9 (оба брифа ИСПОЛНЕНЫ: ft-p8-record-compact-gate, коммит 373505b; ft-p9-two-phase-compact-wave, коммит ab52a33)
 - (P8) maybe_compact сеется watermark'ом, но compact() но-оп при 0 мёртвых ЗАПИСЕЙ ->
   каждый оффер впустую парсит журнал; строка "dead=90284 MiB" дезинформирует
   (водяной знак вечно "просрочен").
