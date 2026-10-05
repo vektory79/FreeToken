@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Iterator, Tuple
 
 import torch
 from freetoken.core import get_global_ctx
@@ -599,6 +599,19 @@ def _assert_moe_vec_chunk(tokens: int, top_k: int) -> None:
         )
 
 
+def iter_moe_layers(model) -> Iterator[MoELayer]:
+    if isinstance(model, MoELayer):
+        yield model
+    if not isinstance(model, BaseOP):
+        return
+    for value in model.__dict__.values():
+        if isinstance(value, BaseOP):
+            yield from iter_moe_layers(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from iter_moe_layers(item)
+
+
 def make_moe_layer(
     config: "ModelConfig",
     *,
@@ -647,10 +660,10 @@ def make_moe_layer(
         has_bias=has_bias,
         quant_config=quant_config,
         prefix=prefix,
+        layer_id=layer_id,
     )
     if offload:
         assert layer_id is not None, "offload MoE backends need the layer_id"
-        kwargs["layer_id"] = layer_id
         kwargs["strategy"] = config.moe_strategy
         kwargs["decode_target"] = config.decode_target
     return layer_cls(**kwargs)
