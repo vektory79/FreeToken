@@ -21,19 +21,19 @@
 
 ## Артефакты руки
 
-- Arm: [arm_base_t2.json](../../../.tasks/decode-research/arm_base_t2.json),
-  [arm_base_t2.log](../../../.tasks/decode-research/arm_base_t2.log),
-  [cpu_base_t2.csv](../../../.tasks/decode-research/cpu_base_t2.csv).
+- Arm: `arm_base_t2.json`,
+  `arm_base_t2.log`,
+  `cpu_base_t2.csv`.
 - Трейс:
-  [t2_phase_trace.csv](../../../.tasks/decode-research/instr_t2/t2_phase_trace.csv) -
+  `t2_phase_trace.csv` (утрачен) -
   22,848 записей; decode-блок = 22,680 = 540 шагов x 42 вызова
   (pool0=39 / pool1=1 / pool2=2 на шаг).
 - Статистика драйвера:
-  [stats_base_t2.json](../../../.tasks/decode-research/instr_t2/stats_base_t2.json)
+  `stats_base_t2.json`
   (step_spans_ms n=10, mean 66.51).
 - Анализаторы:
-  [analyze_t2_phases.py](../../../.tasks/decode-research/analyze_t2_phases.py),
-  [t2_supplement.py](../../../.tasks/decode-research/instr_t2/t2_supplement.py).
+  `analyze_t2_phases.py`,
+  `t2_supplement.py`.
 
 Заметка о самодостаточности: `.tasks/` в .gitignore, перечисленные
 raw-артефакты в kb не зеркалились (локальные копии); в kb опубликована

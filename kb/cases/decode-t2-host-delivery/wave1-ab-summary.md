@@ -42,12 +42,12 @@ CONFIRMED; канал доставки = env-knob, коммита нет (реш
 pool1 ~0.17-0.18 ms/вызов во всех руках.
 
 Артефакты рук (raw, `.tasks/` в .gitignore - локальные копии):
-[arm_base_r3.json](../../../.tasks/decode-research/arm_base_r3.json),
-[arm_t2d.json](../../../.tasks/decode-research/arm_t2d.json),
-[arm_t2d_r2.json](../../../.tasks/decode-research/arm_t2d_r2.json); трейсы
-[t2_phase_trace_base_r3.csv](../../../.tasks/decode-research/instr_t2/t2_phase_trace_base_r3.csv),
-[t2_phase_trace_t2d.csv](../../../.tasks/decode-research/instr_t2/t2_phase_trace_t2d.csv),
-[t2_phase_trace_t2d_r2.csv](../../../.tasks/decode-research/instr_t2/t2_phase_trace_t2d_r2.csv).
+`arm_base_r3.json`,
+`arm_t2d.json`,
+`arm_t2d_r2.json`; трейсы
+`t2_phase_trace_base_r3.csv` (утрачен),
+`t2_phase_trace_t2d.csv` (утрачен),
+`t2_phase_trace_t2d_r2.csv` (утрачен).
 
 ## Гейты против TASK.md
 
@@ -102,7 +102,7 @@ pool1 ~0.17-0.18 ms/вызов во всех руках.
 - OpenRGB ~80% десктоп-консьюмер виден в preflight батареи - персистентный
   пользовательский тулинг, не трогали.
 - Старые выводы батареи env1 от 2026-09-18 забэкаплены в
-  [env1_mmq_pre_t2d_backup](../../../.tasks/mmq-prefill-kernel/quality/env1_mmq_pre_t2d_backup).
+  `env1_mmq_pre_t2d_backup`.
 
 ## Что НЕ сделано / что дальше
 

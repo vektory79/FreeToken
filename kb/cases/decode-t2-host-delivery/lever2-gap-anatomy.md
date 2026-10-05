@@ -40,7 +40,7 @@ Wave 1 [wave1-ab-summary.md](wave1-ab-summary.md) (lever #1 t2d принят,
 ## 1. Бюджет шага t2d (выводится заново из трейса wave 1)
 
 Метод: тот же, что в Step 0, но на трейсе t2d
-([t2_phase_trace_t2d.csv](../../../.tasks/decode-research/instr_t2/t2_phase_trace_t2d.csv),
+(`t2_phase_trace_t2d.csv`, утрачен,
 587 полных шагов x 42 вызова; шаг = 42 последовательные записи, порядок
 вызовов p0:0-7, p1:0, p2:0, p0:8-38, p2:1). Конверт = max(t_flag) -
 min(t_door) шага; busy пула = сумма (t_flag - t_door); гэп = конверт - busy.
@@ -61,7 +61,7 @@ Trim 10% краёв (boot-выбросы). Числа: mean и p50 по 587 ша
 
 Гэп = время между CPU-окнами вызовов пула [t_flag(L) -> t_door(L+1)].
 Все 41 грань шага, mean по шагам
-([t2_phase_trace_t2d_r2.csv](../../../.tasks/decode-research/instr_t2/t2_phase_trace_t2d_r2.csv)
+(`t2_phase_trace_t2d_r2.csv`, утрачен
 даёт то же в пределах 0.1 ms):
 
 | грань | кол-во | mean ms | sum ms/шаг |
@@ -305,11 +305,11 @@ C2 опровергнут измерением (0.13 ms/шаг всех memcpy) 
 
 ## Артефакты
 
-- Трейсы wave 1: [.tasks/decode-research/instr_t2/](../../../.tasks/decode-research/instr_t2/)
+- Трейсы wave 1: `.tasks/decode-research/instr_t2/`
   (t2_phase_trace_t2d.csv, t2_phase_trace_t2d_r2.csv; step0_phase_table.csv
   для справки old-layout).
 - Проба: probe_nsys_gap.py + analyze_nsys_gap.py + analyze_nsys_gap2.py в
-  [.tasks/decode-research/](../../../.tasks/decode-research/); репорт и sqlite
+  `.tasks/decode-research/`; репорт и sqlite
   instr_t2/nsys_gap/ (nsys_gap.nsys-rep 77.5 MB, nsys_gap.sqlite 240 MB,
   probe_summary.json, serve.log). Первая (пустая) попытка - в serve.log того
   же каталога до перезаписи; урок про --duration описан в разделе 3.

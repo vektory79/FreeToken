@@ -2,11 +2,11 @@
 
 Status: RESEARCH 2026-09-27; код не менялся, коммитов нет. Источник - СУЩЕСТВУЮЩИЙ
 экспорт lever-2 пробы (новая nsys-проба НЕ запускалась):
-[instr_t2/nsys_gap/nsys_gap.sqlite](../../../.tasks/decode-research/instr_t2/nsys_gap/nsys_gap.sqlite)
+`instr_t2/nsys_gap/nsys_gap.sqlite` (утрачен)
 (240 MB, 1.84M ядер), 468 декод-шагов, бёрст по `_ensure_experts_hybrid_kernel`
-(42/шаг). Скрипты волны: [analyze_nsys_chain_anatomy.py](../../../.tasks/decode-research/analyze_nsys_chain_anatomy.py)
-(пер-кernel статистика), [analyze_nsys_chain_sites.py](../../../.tasks/decode-research/analyze_nsys_chain_sites.py)
-(пер-сайт разброс + гэп-банды), [gguf_meta.py](../../../.tasks/decode-research/gguf_meta.py)
+(42/шаг). Скрипты волны: `analyze_nsys_chain_anatomy.py`
+(пер-кernel статистика), `analyze_nsys_chain_sites.py`
+(пер-сайт разброс + гэп-банды), `gguf_meta.py`
 (чтение GGUF-заголовка для форматов/форм). Начальная точка:
 [lever2-gap-anatomy.md](lever2-gap-anatomy.md).
 
