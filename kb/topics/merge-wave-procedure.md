@@ -2,9 +2,9 @@
 title: "Регламент интеграции origin/main в приватную ветку: волны, прерванная волна, boot-smoke"
 date: 2026-09-22
 hardware: RTX 5090 32GB (boot-smoke)
-branch-commits: "vektory79; слияния: раунд 1 - merge-коммит 380e9eb (родители 6e673ab + afd99cb, 8 конфликтных файлов / 16 ханков), раунд 2 - afd99cb -> cac247a (ноль конфликтов), раунд 3 - merge 5001504 (родители 1445fc1 + 6410c97, ноль текстовых конфликтов, продолжен после прерывания); rebase-подход отклонён в пользу merge"
+branch-commits: "vektory79; слияния: раунд 1 - merge-коммит 380e9eb (родители 6e673ab + afd99cb, 8 конфликтных файлов / 16 ханков), раунд 2 - afd99cb -> cac247a (ноль конфликтов), раунд 3 - merge 5001504 (родители 1445fc1 + 6410c97, ноль текстовых конфликтов, продолжен после прерывания), раунд 4 - merge aa0e71c (родители 41d3581 + 581fdca = upstream/main, 3 конфликта по 1 ханку); rebase-подход отклонён в пользу merge"
 status: validated
-tags: [merge, main, waves, discovery, adaptation-log, test-results, boot-smoke, provenance, merge-tree, stash, duplicates]
+tags: [merge, main, upstream, remotes, waves, discovery, adaptation-log, test-results, boot-smoke, provenance, merge-tree, stash, duplicates]
 ---
 
 # Интеграция origin/main в приватную ветку: регламент волн
@@ -36,6 +36,76 @@ main выигрывает; merge вместо rebase (rebase-экспериме�
   раунд 3 - [discovery-report.md](../cases/merge-main-work/merge-main-round3-work/discovery-report.md),
   [adaptation-log.md](../cases/merge-main-work/merge-main-round3-work/adaptation-log.md),
   [test-results.md](../cases/merge-main-work/merge-main-round3-work/test-results.md).
+
+## Резолв целевого ref: опрашивай ВСЕ remote
+
+В репо ДВА remote: origin (приватный) и upstream (FlashML-org), и новые
+изменения могут попадать в upstream/main при стоящем origin/main. Discovery
+раунда 4 сначала вернул NOTHING_TO_MERGE по origin/main (его tip 6410c97 уже
+был влит раундом 3), и только пользовательская подсказка вскрыла
+upstream-дельту в 13 коммитов (581fdca). Правило: discovery обязан опрашивать
+ВСЕ remote (`git remote -v` + fetch + merge-base/rev-list по каждому) ДО
+вердикта nothing-to-merge; родство проверять через
+`git merge-base --is-ancestor` (в раунде 4 upstream/main оказался той же
+линией, строго впереди origin/main, так что сохранение раунда 3 было
+верифицировано).
+
+## Раунд 4 (2026-10-05): первый upstream/main-мердж
+
+Целевым ref впервые был upstream/main (581fdca, 13 коммитов / 71 файл);
+origin/main (6410c97) - строгий предок upstream/main, раунд 3 сохранился
+полностью. Merge-коммит aa0e71c (родители 41d3581 + 581fdca), ровно 3 конфликта
+по одному ханку (остальные 20 файлов пересечения - авто-юнион):
+
+- [**ftw.py**](../../python/freetoken/checkpoint/ftw.py) (структурный):
+  upstream #601 вынес классификацию bank-записей в хелпер
+  `_split_bank_entries`; веточные inline-сплит и кросс-чек отпали как точные
+  дубликаты (main-wins), а веточная gguf_types-валидация перенесена verbatim в
+  `load_ftw_banks` (ftw.py:684-714) сразу после распаковки хелпера, с явным
+  `reader.close()` перед каждым raise (хелпер сам бросает без закрытия, а
+  блок стоит ПОСЛЕ его try/except). Валидация осталась ТОЛЬКО в
+  `load_ftw_banks`, не в хелпере: иначе гейтился бы новый upstream
+  `load_ftw_banks_to_device` (fused NVFP4/MXFP4 путь), которого у HEAD не
+  было, - семантическая эквивалентность с HEAD сохранена.
+- **engine.py** (тривиальный импорт): сохранены оба импорта
+  (`physical_core_cpus` ветки + `attach_resident_banks` upstream #601);
+  upstream-импорт `attach_offload_moe_cache` отпал сознательно: веточная
+  маршрутизация signature-групп сводится к тому же single-cache attach для
+  однородных файлов.
+- **test_e4m3_compat.py**: обе стороны добавили разные тесты в одно место -
+  оба сохранены рядом (веточный constexpr-тест + upstream ROCm-тест).
+
+Дубликатов нет: upstream #601 fused banks и веточная gguf-цепочка
+сосуществуют (gguf грузится через `load_ftw_banks`, fused - через
+`load_ftw_banks_to_device`, роутинг по resident-флагу). CPU-тесты на слитом
+дереве: 286 passed / 0 новых failed / 150 Environment-skips суммарно (269 +
+17 top-up; все 3 failed - класс Environment без GPU, на pre-merge HEAD
+падают так же). Boot-smoke и GPU-порции тестов исполнены в cloud-окне в тот же
+день по VRAM-протоколу ([orchestration-notes.md](../methods/orchestration-notes.md)):
+boot-smoke PASS - /ready 200 после 112s (envelope 94-132s), слот-гейт молчит,
+decode 18.67 tok/s, SIGTERM rc=143 штатно, VRAM 1098 -> 29276 -> 1098 MiB ровно
+baseline; GPU-порции 103 passed / 0 failed (test_ftw_gguf_banks 10,
+test_gguf_expert_banks 49, test_qsa_backend 10, test_qsa_pool_fp8 9,
+test_e4m3_compat 5+1 ROCm-skip, test_cpu_moe_gguf_iq 20) - закрыты и долги
+CPU-окна (PinFailed-тест, gguf_types raise-path, 2 CUDA expert_banks,
+11 qsa GPU-only); аменд не потребовался, HEAD остался aa0e71c. Артефакты окна -
+[boot-smoke-r4.log](../../.tasks/merge-main-round4-work/boot-smoke-r4.log) и
+[test-results.md](../../.tasks/merge-main-round4-work/test-results.md) (секция
+Cloud window); артефакты CPU-части раунда (discovery / adaptation / test /
+review) остались в рабочей папке волны и в kb не зеркалированы - суть
+дистиллирована здесь.
+
+Follow-up F1 (minor, не merge-регрессия): upstream
+[load_ftw_banks_to_device](../../python/freetoken/checkpoint/ftw.py)
+(ftw.py:851-915) не запускает gguf_types-валидацию - gguf-FTW, доехавший до
+resident fused-пути, молча дал бы ExpertBanks с gguf_types=None. Сегодня
+недостижимо: resident-ветка требует `method is not None`
+([expert_banks.py](../../python/freetoken/moe/expert_banks.py):611), а
+gguf-модели грузятся с method=None через gguf-провайдер
+(expert_banks.py:617-618). Закрыто коммитом 9ac8830: guard отзеркален в
+load_ftw_banks_to_device перед любыми чтениями (тот же re-convert контракт),
+тест test_ftw_gguf_types_meta_rejected_to_device - fails-before/passes-after,
+CPU-исполним.
 
 ## Правила разрешения конфликтов
 
