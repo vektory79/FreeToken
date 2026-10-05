@@ -91,10 +91,12 @@ Specification / Acceptance / Checklist.
   [P9-NOTES.md](boot-shutdown-io/P9-NOTES.md); P12 (темп
   пути чтения FTW-банков: zero-fill в preadv) ЗАКРЫТА NO-GO 2026-10-04
   (доля zero-fill 8.6% на дефолте pool=8 < гейта волны 10%, кода нет;
-  бриф 2026-10-02 из P10-iron); бриф P13
-  (durable-tombstone записи в журнале L2: быстрый шатдаун на большом live)
-  зафиксирован 2026-10-03 из P11-iron (OPEN, отдельная сессия, старт по
-  явному запросу).
+  бриф 2026-10-02 из P10-iron); P13 (durable-tombstone
+  записи в журнале L2: быстрый шатдаун на большом live) РЕАЛИЗОВАНА
+  (HW-гейты взяты 2026-10-04: стоп 16.3 с vs 55.7 с = -71% на капе 32 GiB,
+  компакт-фаза отсутствует, воскрешений нет, байт-точность/resume HIT;
+  коммит волны и 2 открытых решения - у пользователя; бриф 2026-10-03
+  из P11-iron).
 - [ft-gguf-serve-tuning/](ft-gguf-serve-tuning/) — тюнинг serving-флагов:
   REPORT с победителем и PHASE2-план как шаблон фазировки. Вход:
   [REPORT.md](ft-gguf-serve-tuning/REPORT.md).
