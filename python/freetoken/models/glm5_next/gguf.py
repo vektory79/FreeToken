@@ -77,6 +77,53 @@ _MMPROJ_PINNED = {
     "attention_bias": True,
 }
 
+# Image-serving pins (the NVFP4 checkpoint's processor_config.json + config.json):
+# the token-budget defaults and the image placeholder id. The id itself is derived
+# from the GGUF vocab and must land on the pin - a reordered vocab is a different
+# checkpoint than the one the vision tower was verified against.
+_IMAGE_TOKEN = "<|image|>"
+_GLM5NEXT_IMAGE_TOKEN_ID = 154854
+_IMAGE_PROCESSOR_PINNED = {"min_image_tokens": 16, "max_image_tokens": 8000}
+
+
+def resolve_gguf_image_serving(model_path: str, metadata: dict) -> int:
+    """image_token_id for a multimodal GGUF boot, or ValueError naming the gap.
+
+    The GGUF tokenizer ships no template of its own beyond the metadata KV; image
+    input needs a template that renders the image placeholder wrapper and a vocab
+    that maps the placeholder string to the pinned token id.
+    """
+    template = metadata.get("tokenizer.chat_template")
+    if not template:
+        raise ValueError(
+            f"GGUF {model_path}: no tokenizer.chat_template metadata; a chat template "
+            "is required for image input"
+        )
+    if _IMAGE_TOKEN not in template:
+        raise ValueError(
+            f"GGUF {model_path}: the chat template renders no {_IMAGE_TOKEN!r} image "
+            "placeholder; image prompts would silently lose the image"
+        )
+    tokens = metadata.get("tokenizer.ggml.tokens")
+    if tokens is None:
+        raise ValueError(
+            f"GGUF {model_path}: no tokenizer.ggml.tokens metadata; cannot resolve "
+            "the image token id"
+        )
+    try:
+        token_id = list(tokens).index(_IMAGE_TOKEN)
+    except ValueError:
+        raise ValueError(
+            f"GGUF {model_path}: the vocab carries no {_IMAGE_TOKEN!r} token"
+        ) from None
+    if token_id != _GLM5NEXT_IMAGE_TOKEN_ID:
+        raise ValueError(
+            f"GGUF {model_path}: {_IMAGE_TOKEN!r} sits at vocab id {token_id} != the "
+            f"GLM-5.3-Flash reference {_GLM5NEXT_IMAGE_TOKEN_ID}; a different vocab "
+            "layout invalidates the pinned image token id"
+        )
+    return token_id
+
 
 def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
     """VisionConfig for the glm5next tower from a clip-architecture mmproj GGUF.
@@ -196,6 +243,62 @@ def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
         swiglu_limit=swiglu,
         attention_bias=_MMPROJ_PINNED["attention_bias"],
     )
+
+
+def parse_mmproj_image_processor_config(mmproj_path: str) -> dict:
+    """Glm5NextImageProcessor kwargs from a clip-architecture mmproj GGUF.
+
+    patch/merge sizes and the CLIP normalization come from clip.* metadata;
+    temporal_patch_size is pinned (the metadata does not carry it) and verified
+    against the patch-embedding slice count when the tensor table exposes it;
+    the token budget is the NVFP4 reference pin. image_size is read for the
+    patch-grid sanity check only - the reference image processor resizes
+    dynamically and carries no image_size field.
+    """
+    from freetoken.models.gguf.reader import _reader, load_gguf_metadata
+
+    m = load_gguf_metadata(mmproj_path)
+
+    def c(key: str):
+        val = m.get(f"clip.{key}")
+        if val is None:
+            raise ValueError(f"mmproj {mmproj_path}: missing required metadata key clip.{key}")
+        return val
+
+    patch = int(c("vision.patch_size"))
+    image_size = int(c("vision.image_size"))
+    merge = int(c("vision.spatial_merge_size"))
+    if image_size % patch != 0:
+        raise ValueError(
+            f"mmproj {mmproj_path}: clip.vision.image_size {image_size} is not a "
+            f"multiple of clip.vision.patch_size {patch}"
+        )
+    mean = [float(x) for x in c("vision.image_mean")]
+    std = [float(x) for x in c("vision.image_std")]
+    if len(mean) != 3 or len(std) != 3:
+        raise ValueError(
+            f"mmproj {mmproj_path}: clip.vision.image_mean/std must carry one entry "
+            f"per RGB channel, got {len(mean)}/{len(std)}"
+        )
+    temporal = _MMPROJ_PINNED["temporal_patch_size"]
+    slices = [
+        n
+        for n, _ in ((t.name, t) for t in _reader(mmproj_path).tensors)
+        if n == "v.patch_embd.weight" or n.startswith("v.patch_embd.weight.")
+    ]
+    if slices and len(slices) != temporal:
+        raise ValueError(
+            f"mmproj {mmproj_path}: {len(slices)} v.patch_embd.weight slices != "
+            f"temporal_patch_size {temporal}"
+        )
+    return {
+        "patch_size": patch,
+        "merge_size": merge,
+        "temporal_patch_size": temporal,
+        "image_mean": mean,
+        "image_std": std,
+        **_IMAGE_PROCESSOR_PINNED,
+    }
 
 
 # mmproj block tensors -> the tail of the visual.blocks.N.<rel> param (everything
@@ -511,6 +614,11 @@ def parse_gguf_config(shim: "GgufConfigShim") -> "ModelConfig":
             )
         ),
         moe_weight_format="gguf",
+        # multimodal GGUF boot: the shim precomputed the image placeholder id
+        # (fail-fast on a missing template/vocab entry) and carries the tower path
+        # the image processor fallback reads its clip.* metadata from
+        image_token_id=getattr(shim, "image_token_id", None),
+        mmproj_path=getattr(shim, "mmproj_path", None),
     )
 
 

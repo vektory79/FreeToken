@@ -317,6 +317,9 @@ class ModelConfig:
     output_multiplier: float | None = None
     vision_config: Any | None = None
     image_token_id: int | None = None
+    # raw-GGUF vision boot (--mmproj): the mmproj file the image processor fallback
+    # reads its clip.* metadata from; None for every HF / text-only checkpoint
+    mmproj_path: str | None = None
     attention_groups: Tuple[AttentionGroupConfig, ...] = ()
     has_attn_bias: bool = False
     has_router_bias: bool = False

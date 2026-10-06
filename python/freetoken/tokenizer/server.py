@@ -137,6 +137,7 @@ def tokenize_worker(
     model_source: str = "huggingface",
     ack_queue: mp.Queue[str] | None = None,
     mm: MultimodalConfig | None = None,
+    mmproj_path: str | None = None,
 ) -> None:
     send_backend = ZmqPushQueue(backend_addr, create=False, encoder=BaseBackendMsg.encoder)
     send_frontend = ZmqPushQueue(frontend_addr, create=False, encoder=BaseFrontendMsg.encoder)
@@ -150,7 +151,9 @@ def tokenize_worker(
     from .detokenize import DetokenizeManager
     from .tokenize import TokenizeManager
 
-    tokenize_manager = TokenizeManager(tokenizer, get_mm_processor(tokenizer_path, mm))
+    tokenize_manager = TokenizeManager(
+        tokenizer, get_mm_processor(tokenizer_path, mm, mmproj_path=mmproj_path)
+    )
     detokenize_manager = DetokenizeManager(
         tokenizer, load_eos_token_ids(tokenizer_path, tokenizer)
     )

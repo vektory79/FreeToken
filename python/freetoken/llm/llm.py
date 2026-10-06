@@ -42,7 +42,7 @@ class LLM(Scheduler):
         self.counter = 0
         from freetoken.mm.processor import get_mm_processor
 
-        self._mm_processor = get_mm_processor(model_path, config.mm)
+        self._mm_processor = get_mm_processor(model_path, config.mm, mmproj_path=config.mmproj_path)
 
     def _tokenize_one(self, prompt: List[int] | str) -> torch.Tensor:
         if isinstance(prompt, str):

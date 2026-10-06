@@ -309,7 +309,8 @@ class FrontendManager:
                 from freetoken.utils import load_tokenizer
 
                 self._frontend_tokenizer = TokenizeManager(
-                    load_tokenizer(self.config.model_path), get_mm_processor(self.config.model_path, self.config.mm)
+                    load_tokenizer(self.config.model_path),
+                    get_mm_processor(self.config.model_path, self.config.mm, mmproj_path=self.config.mmproj_path),
                 )
             return self._frontend_tokenizer
 

@@ -38,6 +38,16 @@ _CONTEXT = 1_048_576
 # slice -- same split as the real file's metadata.
 _HEAD_COUNT_KV = [1 if (i % 4 == 3 or i == _NUM_LAYERS) else 0 for i in range(46)]
 
+# tokenizer KVs the image-serving path (phase 3) consumes: the chat template must
+# render the image placeholder and the vocab must map it to the pinned id 154854
+# (the real checkpoint's layout). Only merged into default-metadata writes: guard
+# tests with custom metadata never boot multimodal.
+_TOKENIZER_METADATA: dict = {
+    "tokenizer.chat_template": "{%- macro emit_image() -%}<|image|>{%- endmacro -%}",
+    "tokenizer.ggml.tokens": ["<pad>"] * _VOCAB,
+}
+_TOKENIZER_METADATA["tokenizer.ggml.tokens"][154854] = "<|image|>"
+
 _GLM5NEXT_METADATA: dict = {
     "glm5next.block_count": 46,
     "glm5next.nextn_predict_layers": 1,
@@ -84,12 +94,17 @@ def _write_gguf(path, *, arch="glm5next", metadata=None, untied=False) -> str:
     import gguf
 
     meta = _GLM5NEXT_METADATA if metadata is None else metadata
+    if metadata is None:
+        # default-metadata writes double as multimodal-boot fixtures (phase 3)
+        meta = {**meta, **_TOKENIZER_METADATA}
     w = gguf.GGUFWriter(str(path), arch)
     for key, val in sorted(meta.items()):
         if isinstance(val, bool):
             w.add_bool(key, val)
         elif isinstance(val, list):
             w.add_array(key, val)
+        elif isinstance(val, str):
+            w.add_string(key, val)
         elif isinstance(val, float):
             w.add_float32(key, val)
         else:
@@ -698,6 +713,8 @@ def _write_iter_gguf(path, *, metadata=None, tensors=None) -> str:
     import gguf
 
     meta = _ITER_METADATA if metadata is None else metadata
+    if metadata is None:
+        meta = {**meta, **_TOKENIZER_METADATA}
     entries = _iter_tensor_set() if tensors is None else tensors
     w = gguf.GGUFWriter(str(path), "glm5next")
     for key, val in sorted(meta.items()):
@@ -705,6 +722,8 @@ def _write_iter_gguf(path, *, metadata=None, tensors=None) -> str:
             w.add_bool(key, val)
         elif isinstance(val, list):
             w.add_array(key, val)
+        elif isinstance(val, str):
+            w.add_string(key, val)
         elif isinstance(val, float):
             w.add_float32(key, val)
         else:
@@ -1479,6 +1498,8 @@ _CLIP_METADATA: dict = {
     "clip.vision.projection_dim": 4096,
     "clip.vision.spatial_merge_size": 2,
     "clip.vision.swiglu_limit": 10.0,
+    "clip.vision.image_mean": [0.48145467, 0.45782751, 0.40821072],
+    "clip.vision.image_std": [0.26862955, 0.26130259, 0.27577710],
     "general.name": "Glm-5.3-Flash",
     "general.type": "mmproj",
 }
@@ -2164,3 +2185,209 @@ def test_load_vision_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf
     assert seen["mmproj_path"] == full_vision_mmproj_gguf
     assert any(name.startswith("visual.") for name in out)
     assert "visual.patch_embed.proj.weight" in out
+
+
+# ------------------------------------------------------------------------------
+# Phase 3: image processor + image-serving facts from the mmproj/tokenizer metadata
+# ------------------------------------------------------------------------------
+
+
+def test_mmproj_image_processor_config_full_map(mmproj_gguf):
+    from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
+
+    kw = parse_mmproj_image_processor_config(mmproj_gguf)
+    assert kw["patch_size"] == 14
+    assert kw["merge_size"] == 2
+    assert kw["temporal_patch_size"] == 2
+    assert kw["min_image_tokens"] == 16
+    assert kw["max_image_tokens"] == 8000
+    assert kw["image_mean"] == pytest.approx([0.48145467, 0.45782751, 0.40821072], abs=1e-6)
+    assert kw["image_std"] == pytest.approx([0.26862955, 0.26130259, 0.27577710], abs=1e-6)
+
+
+def test_mmproj_image_processor_config_missing_key_fails_fast(tmp_path):
+    from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
+
+    meta = {k: v for k, v in _CLIP_METADATA.items() if k != "clip.vision.image_mean"}
+    p = _write_mmproj_gguf(tmp_path / "nonorm.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="clip.vision.image_mean"):
+        parse_mmproj_image_processor_config(p)
+
+
+def test_mmproj_image_processor_config_bad_geometry_fails_fast(tmp_path):
+    from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
+
+    meta = {**_CLIP_METADATA, "clip.vision.image_size": 450}
+    p = _write_mmproj_gguf(tmp_path / "badgeom.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="multiple"):
+        parse_mmproj_image_processor_config(p)
+
+
+def test_gguf_image_serving_resolves_pinned_token(glm5next_gguf):
+    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
+    from freetoken.models.gguf.reader import load_gguf_metadata
+
+    assert resolve_gguf_image_serving(glm5next_gguf, load_gguf_metadata(glm5next_gguf)) == 154854
+
+
+def _write_metadata_only_gguf(path, metadata) -> str:
+    import gguf
+
+    w = gguf.GGUFWriter(str(path), "glm5next")
+    for key, val in sorted(metadata.items()):
+        if isinstance(val, bool):
+            w.add_bool(key, val)
+        elif isinstance(val, list):
+            w.add_array(key, val)
+        elif isinstance(val, str):
+            w.add_string(key, val)
+        elif isinstance(val, float):
+            w.add_float32(key, val)
+        else:
+            w.add_int32(key, val)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.close()
+    return str(path)
+
+
+def test_gguf_image_serving_missing_template_fails_fast(tmp_path):
+    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
+
+    p = _write_metadata_only_gguf(tmp_path / "notmpl.gguf", dict(_GLM5NEXT_METADATA))
+    from freetoken.models.gguf.reader import load_gguf_metadata
+
+    with pytest.raises(ValueError, match="chat template"):
+        resolve_gguf_image_serving(p, load_gguf_metadata(p))
+
+
+def test_gguf_image_serving_template_without_placeholder_fails_fast(tmp_path):
+    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
+    from freetoken.models.gguf.reader import load_gguf_metadata
+
+    meta = {
+        **_GLM5NEXT_METADATA,
+        "tokenizer.chat_template": "plain template, no image macro",
+        "tokenizer.ggml.tokens": _TOKENIZER_METADATA["tokenizer.ggml.tokens"],
+    }
+    p = _write_metadata_only_gguf(tmp_path / "noimg.gguf", meta)
+    with pytest.raises(ValueError, match="placeholder"):
+        resolve_gguf_image_serving(p, load_gguf_metadata(p))
+
+
+def test_gguf_image_serving_vocab_without_token_fails_fast(tmp_path):
+    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
+    from freetoken.models.gguf.reader import load_gguf_metadata
+
+    meta = {
+        **_GLM5NEXT_METADATA,
+        "tokenizer.chat_template": _TOKENIZER_METADATA["tokenizer.chat_template"],
+        "tokenizer.ggml.tokens": ["a", "b", "c"],
+    }
+    p = _write_metadata_only_gguf(tmp_path / "novocab.gguf", meta)
+    with pytest.raises(ValueError, match="vocab carries no"):
+        resolve_gguf_image_serving(p, load_gguf_metadata(p))
+
+
+def test_gguf_image_serving_wrong_token_id_fails_fast(tmp_path):
+    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
+    from freetoken.models.gguf.reader import load_gguf_metadata
+
+    toks = ["x"] * 12
+    toks[3] = "<|image|>"
+    meta = {
+        **_GLM5NEXT_METADATA,
+        "tokenizer.chat_template": _TOKENIZER_METADATA["tokenizer.chat_template"],
+        "tokenizer.ggml.tokens": toks,
+    }
+    p = _write_metadata_only_gguf(tmp_path / "wrongid.gguf", meta)
+    with pytest.raises(ValueError, match="3 != the GLM-5.3-Flash reference 154854"):
+        resolve_gguf_image_serving(p, load_gguf_metadata(p))
+
+
+def test_mmproj_boot_carries_image_token_and_processor_path(glm5next_gguf, mmproj_gguf):
+    from freetoken.models.gguf.config import build_gguf_shim
+    from freetoken.models.glm5_next.gguf import parse_gguf_config
+
+    shim = build_gguf_shim(glm5next_gguf, mmproj_path=mmproj_gguf)
+    assert shim.image_token_id == 154854
+    cfg = parse_gguf_config(shim)
+    assert cfg.image_token_id == 154854
+    assert cfg.mmproj_path == mmproj_gguf
+    assert cfg.vision_config is not None
+
+
+def test_get_mm_processor_text_only_gguf_is_none(glm5next_gguf):
+    from freetoken.mm.processor import get_mm_processor
+
+    assert get_mm_processor(glm5next_gguf) is None
+
+
+def test_get_mm_processor_reraises_operator_errors(glm5next_gguf, tmp_path):
+    """The blanket except that turns foreign configs into None must not swallow the
+    explicit --mmproj operator errors: a bad flag is a boot stop, not a silent
+    text-only downgrade."""
+    from freetoken.mm.processor import get_mm_processor
+
+    bad = _write_mmproj_gguf(tmp_path / "wrong.gguf", arch="glm5next")
+    with pytest.raises(ValueError, match="!= 'clip'"):
+        get_mm_processor(glm5next_gguf, mmproj_path=bad)
+    with pytest.raises(ValueError, match="not found"):
+        get_mm_processor(glm5next_gguf, mmproj_path=str(tmp_path / "absent.gguf"))
+
+
+def test_mm_processor_fallback_builds_image_processor_from_mmproj(glm5next_gguf, mmproj_gguf):
+    from freetoken.mm.processor import get_mm_processor
+
+    proc = get_mm_processor(glm5next_gguf, mmproj_path=mmproj_gguf)
+    assert proc is not None
+    assert proc.placeholder == [154854]
+    assert proc.merge == 2
+    assert proc.patch_dim == 3 * 2 * 14 * 14
+    ip = proc._image_processor()
+    assert type(ip).__name__ == "Glm5NextImageProcessor"
+    assert ip.patch_size == 14
+    assert ip.merge_size == 2
+    assert ip.temporal_patch_size == 2
+    assert ip.min_image_tokens == 16
+    assert ip.max_image_tokens == 8000
+    assert list(ip.image_mean) == pytest.approx([0.48145467, 0.45782751, 0.40821072], abs=1e-6)
+
+
+def test_mm_processor_preprocessor_config_file_takes_precedence(tmp_path):
+    """The NVFP4-style path (a directory shipping preprocessor_config.json) must keep
+    using the file: the mmproj fallback only fills the GGUF-shaped gap."""
+    import json
+
+    from types import SimpleNamespace
+
+    from freetoken.mm.config import MultimodalConfig
+    from freetoken.mm.processors.glm5_next import Glm5NextMMProcessor
+
+    (tmp_path / "preprocessor_config.json").write_text(
+        json.dumps({"image_processor_type": "Glm5NextImageProcessor", "min_image_tokens": 123})
+    )
+    hf_config = SimpleNamespace(
+        vision_config=SimpleNamespace(
+            spatial_merge_size=2, in_channels=3, temporal_patch_size=2, patch_size=14
+        ),
+        image_token_id=7,
+        mmproj_path=None,
+    )
+    proc = Glm5NextMMProcessor(hf_config, str(tmp_path), MultimodalConfig())
+    assert proc._image_processor().min_image_tokens == 123
+
+
+def test_mm_processor_mmproj_boot_wraps_image_into_mm_item(glm5next_gguf, mmproj_gguf):
+    """Full CPU pass over the fallback: metadata-built image processor, MMItem wire
+    format and the placeholder expansion the chat template slots into."""
+    from PIL import Image
+
+    from freetoken.mm.processor import get_mm_processor
+
+    proc = get_mm_processor(glm5next_gguf, mmproj_path=mmproj_gguf)
+    item = proc.process([Image.new("RGB", (448, 448), (127, 127, 127))])[0]
+    assert item.feature.shape == (1024, 1176)
+    assert item.feature.dtype == torch.bfloat16
+    assert item.model_specific_data["grid_thw"] == [1, 32, 32]
+    assert len(proc.prompt_replacement(item).full) == 256

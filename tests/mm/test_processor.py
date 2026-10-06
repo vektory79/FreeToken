@@ -404,7 +404,7 @@ def test_registry_resolves_by_architecture(monkeypatch):
         "/text-only": _hf_config(vision=False),
         "/unknown-vlm": _hf_config(arch="SomeOtherForConditionalGeneration"),
     }
-    monkeypatch.setattr(freetoken.utils, "cached_load_hf_config", lambda p: configs[p])
+    monkeypatch.setattr(freetoken.utils, "cached_load_hf_config", lambda p, **kw: configs[p])
     assert isinstance(get_mm_processor("/qwen"), QwenVLMMProcessor)
     assert get_mm_processor("/qwen", MultimodalConfig(disabled_encoders=frozenset({"vision"}))) is None  # --mm-disable vision
     assert isinstance(get_mm_processor("/gemma"), Gemma4MMProcessor)

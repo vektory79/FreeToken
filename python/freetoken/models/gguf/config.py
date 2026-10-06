@@ -36,6 +36,13 @@ _GGUF_VISION_CONFIG_HOOK: dict[str, str] = {
     "glm5next": "freetoken.models.glm5_next.gguf:parse_mmproj_vision_config",
 }
 
+# arch -> "module:attr" resolving the image placeholder token id from the main
+# GGUF's tokenizer metadata. Fails fast on a missing chat template / vocab entry:
+# image prompts would otherwise silently lose the image.
+_GGUF_VISION_SERVING_HOOK: dict[str, str] = {
+    "glm5next": "freetoken.models.glm5_next.gguf:resolve_gguf_image_serving",
+}
+
 
 @dataclass(frozen=True)
 class GgufConfigShim:
@@ -45,10 +52,12 @@ class GgufConfigShim:
     metadata: dict[str, Any]
     vocab_size: int
     tie_word_embeddings: bool
-    # raw-gguf vision boot facts (--mmproj): the tower file path and the vision config
-    # derived from its clip.* metadata; both None serves the checkpoint text-only
+    # raw-gguf vision boot facts (--mmproj): the tower file path, the vision config
+    # derived from its clip.* metadata and the image placeholder token id resolved
+    # from the tokenizer metadata; all None serves the checkpoint text-only
     mmproj_path: str | None = None
     vision_config: Any = None
+    image_token_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal HF-config-like dict for trunk code that introspects the config
@@ -80,7 +89,9 @@ def _vocab_size(model_path: str) -> int:
 
 def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConfigShim:
     arch = gguf_architecture(model_path)
+    metadata = load_gguf_metadata(model_path)
     vision_config = None
+    image_token_id = None
     if mmproj_path is not None:
         # fail fast before anything else reads the flag: a missing or non-clip file is
         # an operator error, and the error must name the file
@@ -100,6 +111,10 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
             )
         module_name, _, attr = _GGUF_VISION_CONFIG_HOOK[arch].partition(":")
         vision_config = getattr(importlib.import_module(module_name), attr)(mmproj_path)
+        module_name, _, attr = _GGUF_VISION_SERVING_HOOK[arch].partition(":")
+        image_token_id = getattr(importlib.import_module(module_name), attr)(
+            model_path, metadata
+        )
     else:
         registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
         if registry_key is None:
@@ -108,7 +123,6 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
                 f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)})"
             )
     names = gguf_tensor_names(model_path)
-    metadata = load_gguf_metadata(model_path)
     if names:
         # No separate output projection -> embeddings are tied.
         tie_word_embeddings = "output.weight" not in names
@@ -133,6 +147,7 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
         tie_word_embeddings=tie_word_embeddings,
         mmproj_path=mmproj_path,
         vision_config=vision_config,
+        image_token_id=image_token_id,
     )
 
 

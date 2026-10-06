@@ -186,21 +186,38 @@ def content_hash(feature: torch.Tensor, extra: bytes = b"") -> int:
     return int.from_bytes(hasher.digest()[:8], "little") % (1 << 62)
 
 
-def get_mm_processor(model_path: str, mm: MultimodalConfig | None = None) -> MMProcessor | None:
-    """A processor for the checkpoint under the mm knobs, or None when no encoder is left to serve: the family registers none, the checkpoint ships none, or mm.disabled_encoders names them all; callers keep the instance, it holds the loaded image processor."""
+def get_mm_processor(
+    model_path: str, mm: MultimodalConfig | None = None, mmproj_path: str | None = None
+) -> MMProcessor | None:
+    """A processor for the checkpoint under the mm knobs, or None when no encoder is left to serve: the family registers none, the checkpoint ships none, or mm.disabled_encoders names them all; callers keep the instance, it holds the loaded image processor.
+
+    mmproj_path threads the raw-GGUF vision flag through so the shim builds the
+    multimodal spec; on an HF checkpoint path it must stay None (--mmproj has no
+    meaning there, cached_load_hf_config rejects it).
+    """
     from freetoken.models.register import get_model_spec
     from freetoken.utils import cached_load_hf_config
 
     try:
-        config = cached_load_hf_config(model_path)
+        config = cached_load_hf_config(model_path, mmproj_path=mmproj_path)
         spec = get_model_spec((config.architectures or [None])[0])
+    except ValueError:
+        # explicit operator errors from the --mmproj validation (missing/non-clip
+        # file, unsupported arch) must surface, not silently downgrade to text-only;
+        # foreign/missing HF configs keep the old None contract
+        if mmproj_path is not None:
+            raise
+        return None
     except Exception:  # noqa: BLE001 -- missing/foreign config or unknown architecture: no multimodal input
         return None
     mm = mm or MultimodalConfig()
     served = [e for e in spec.encoders if getattr(config, e.config_key, None) is not None and e.kind not in mm.disabled_encoders]
     if spec.mm_processor is None or not served:
         return None
-    check_mm_pad_shift(config.text_config.vocab_size)
+    # HF multimodal configs nest the vocab under text_config; the GGUF shim carries
+    # it at the top level
+    text_config = getattr(config, "text_config", None)
+    check_mm_pad_shift((text_config if text_config is not None else config).vocab_size)
     module, _, cls = spec.mm_processor.partition(":")
     return getattr(importlib.import_module(module), cls)(config, model_path, mm)
 

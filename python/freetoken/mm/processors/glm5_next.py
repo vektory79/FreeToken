@@ -22,6 +22,26 @@ class Glm5NextMMProcessor(MMProcessor):
         self.placeholder = [self.image_token_id]
         self.merge = vc.spatial_merge_size
         self.patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size**2
+        # raw-GGUF boot (--mmproj): no preprocessor_config.json exists next to a .gguf
+        # file, the image processor is built from the mmproj clip.* metadata instead
+        self._mmproj_path = getattr(hf_config, "mmproj_path", None)
+
+    def _image_processor(self) -> Any:
+        if self._mmproj_path is None:
+            return super()._image_processor()
+        # same lazy single-instance contract as the base loader: tokenizer workers
+        # share the instance across threads
+        with self._image_processor_lock:
+            if self._image_processor_instance is None:
+                from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
+                from transformers.models.glm5_next.image_processing_glm5_next import (
+                    Glm5NextImageProcessor,
+                )
+
+                self._image_processor_instance = Glm5NextImageProcessor(
+                    **parse_mmproj_image_processor_config(self._mmproj_path)
+                )
+            return self._image_processor_instance
 
     def get_mm_processor_kwargs(self, mm: MultimodalConfig) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"return_tensors": "pt"}
