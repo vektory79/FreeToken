@@ -124,11 +124,13 @@ Specification / Acceptance / Checklist.
   (arch clip, 348 тензоров), флаг --mmproj вместо автопоиска, image-процессор
   из GGUF-метаданных без HF-файлов; оба пути загрузки (raw .gguf и GGUF-FTW).
   Референс - NVFP4-путь. Вход: [TASK.md](gguf-glm5next-vision/TASK.md).
-  Статус: ФАЗЫ 1-4 ЗАКРЫТЫ (CPU) 2026-10-06, коммиты e35577d..2b91236:
-  спека и верификация 347 параметров exact
+  Статус: ЗАКРЫТ ПОЛНОСТЬЮ (PHASES 1-5, 2026-10-06), коммиты
+  e35577d..2b91236 + kb d8dee13: спека и верификация 347 параметров exact
   ([phases-1-2.md](gguf-glm5next-vision/phases-1-2.md)), image-процессор и
-  FTW-упаковка башни ([phases-3-4.md](gguf-glm5next-vision/phases-3-4.md));
-  фаза 5 (HW-волна e2e) впереди.
+  FTW-упаковка башни ([phases-3-4.md](gguf-glm5next-vision/phases-3-4.md)),
+  HW-волна e2e PASS - raw + --mmproj и самодостаточный GGUF-FTW-vision
+  (бут 47 s, 19.6-20.3 tok/s), ответы совпали с NVFP4-референсом
+  ([phase-5-hw.md](gguf-glm5next-vision/phase-5-hw.md)).
 - [merge-main-work/](merge-main-work/) — процедура интеграции origin/main:
   discovery/adaptation/test-waves в трёх раундах (round2, round3, rebase).
   Шаблон discovery-этапа:

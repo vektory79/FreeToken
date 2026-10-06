@@ -1,7 +1,8 @@
 # TASK: поддержка зрения (mmproj) для GGUF glm5next
 
-Status: PHASES 1-4 DONE (CPU), 2026-10-06, commits e35577d..2b91236; phase 5
-(HW wave) pending. Composed 2026-09-27 по итогам исследовательской сессии
+Status: ALL PHASES DONE (1-4 CPU + 5 HW), 2026-10-06, commits e35577d..2b91236
++ kb d8dee13; HW-волна - [phase-5-hw.md](phase-5-hw.md). Composed 2026-09-27
+по итогам исследовательской сессии
 (исследование проводилось на ветке vektory79, HEAD edd6309; якоря строк
 проверены против HEAD - перед редактированием перепроверить, они дрейфуют).
 Железо: локальный риг RTX 5090 (VRAM-протокол CONTRIBUTING; HW-волна -
@@ -280,23 +281,24 @@ VRAM. VRAM-интеракцию с expert offload (башня host-placement п�
 
 ## Acceptance
 
-- [ ] CPU: все новые/расширенные тесты зелёные; существующие
+- [x] CPU: все новые/расширенные тесты зелёные; существующие
   `../../../tests/models/test_glm5_next_gguf.py` и `tests/mm/` не сломаны.
-- [ ] CPU: отчёт числовой верификации всех 348 тензоров против
+- [x] CPU: отчёт числовой верификации всех 348 тензоров против
   NVFP4-референса (таблица рядом с брифом в kb/cases/gguf-glm5next-vision/), порог
   согласован.
-- [ ] CPU: parse_gguf_config собирает VisionConfig из синтетического
+- [x] CPU: parse_gguf_config собирает VisionConfig из синтетического
   mmproj; без флага - точное воспроизведение текущего поведения
   (текст-only, текущая спека реестра).
-- [ ] CPU: `ft checkpoint` GGUF-источника записывает в FTW все 348
+- [x] CPU: `ft checkpoint` GGUF-источника записывает в FTW все 348
   `visual.*` тензоров и метаданные башни; конфиг-путь бута из этого
   FTW строит башню без флага (HW e2e - фаза 5).
-- [ ] CPU: старый GGUF-FTW без vision не регрессирует (текст-only
+- [x] CPU: старый GGUF-FTW без vision не регрессирует (текст-only
   boot как сейчас).
-- [ ] HW (отдельная волна): boot + e2e image-запрос на raw .gguf (с
+- [x] HW (отдельная волна): boot + e2e image-запрос на raw .gguf (с
   флагом --mmproj) и на GGUF-FTW (башня из чекпойнта, без флага);
-  текст-only boot без флага не изменился.
-- [ ] Коммиты: Conventional Commits, по фазе; никакого push.
+  текст-only boot без флага не изменился. PASS 2026-10-06: image-e2e OK
+  на обоих путях, ответы совпали с NVFP4 - [phase-5-hw.md](phase-5-hw.md).
+- [x] Коммиты: Conventional Commits, по фазе; никакого push.
 
 ## Чек-лист сессии реализации
 
