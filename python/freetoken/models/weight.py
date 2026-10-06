@@ -19,7 +19,7 @@ import queue
 import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Iterator, Tuple
+from typing import Any, Callable, Iterator, Tuple
 
 import torch
 from freetoken.utils import cached_load_hf_config
@@ -232,7 +232,7 @@ def load_weight(
         _config, spec = _spec_for_model_path(model_path, mmproj_path=mmproj_path)
         iter_weights = _load_attr(spec.module, spec.iter_weights)
         # only a family that registers an encoder is asked about the tower; the others never load one
-        kwargs = {"include_vision": include_vision} if spec.encoders else {}
+        kwargs: dict[str, Any] = {"include_vision": include_vision} if spec.encoders else {}
         # the raw-GGUF tower streams from the operator-supplied mmproj file; a HF boot
         # never carries one (cached_load_hf_config rejects the flag on a HF config path)
         if mmproj_path is not None:

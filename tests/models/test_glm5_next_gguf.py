@@ -2064,6 +2064,33 @@ def test_gguf_vision_reader_requires_complete_patch_slices(tmp_path):
         _vision_params(p)
 
 
+def test_gguf_vision_reader_rejects_duplicate_patch_slice_index(tmp_path):
+    """The base tensor and an explicit .0 slice both claim temporal frame 0: a
+    duplicate must fail fast instead of silently picking one for the stack."""
+    tensors = dict(_vision_fixture_data())
+    tensors["v.patch_embd.weight.0"] = (np.full((_VH, 3, _VKH, _VKW), 9.0, dtype=np.float32), False)
+    p = _write_vision_mmproj(tmp_path / "dup.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="duplicate patch-embedding slice index 0"):
+        _vision_params(p)
+
+
+def test_gguf_vision_reader_rejects_block_beyond_depth(tmp_path):
+    meta = dict(_CLIP_METADATA, **{"clip.vision.block_count": 1})
+    tensors = dict(_vision_fixture_data())
+    tensors["v.blk.1.ln1.weight"] = (np.arange(_VH, dtype=np.float32), False)
+    p = _write_vision_mmproj(tmp_path / "extra.gguf", metadata=meta, tensors=tensors)
+    with pytest.raises(ValueError, match="vision block 1 outside"):
+        _vision_params(p)
+
+
+def test_gguf_vision_reader_rejects_non_clip_arch(tmp_path):
+    from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
+
+    p = _write_gguf(tmp_path / "main.gguf")  # a glm5next gguf, not a clip mmproj
+    with pytest.raises(ValueError, match="'glm5next'"):
+        list(iter_gguf_vision_weights(p))
+
+
 def test_iter_gguf_weights_streams_vision_after_trunk(glm5next_iter_gguf, vision_mmproj_gguf):
     from freetoken.models.glm5_next import iter_gguf_weights
 

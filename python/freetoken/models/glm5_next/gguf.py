@@ -245,19 +245,31 @@ def iter_gguf_vision_weights(
     a missing vision block or an incomplete patch-slice set raises ValueError
     naming the fact - no silent skips.
     """
-    from freetoken.models.gguf.reader import iter_gguf_tensors, load_gguf_metadata
+    from freetoken.models.gguf.reader import gguf_architecture, iter_gguf_tensors, load_gguf_metadata
 
     # device is accepted for reader-signature parity with the HF iter_vision_weights;
     # the loader materializes onto the model params from these CPU tensors
+    arch = gguf_architecture(mmproj_path)
+    if arch != "clip":
+        # fail here too: the reader is callable standalone, not only under build_gguf_shim
+        raise ValueError(
+            f"mmproj {mmproj_path}: architecture {arch!r} != 'clip'; an mmproj file "
+            "carries the vision tower"
+        )
     depth = int(load_gguf_metadata(mmproj_path)["clip.vision.block_count"])
     blocks: set[int] = set()
-    patch: dict[int, torch.Tensor] = {}
+    patch: dict[int, tuple[str, torch.Tensor]] = {}
     for t in iter_gguf_tensors(mmproj_path):
         name = t.name
         tensor = _cast(t, torch.bfloat16)
         if name.startswith("v.blk."):
             parts = name.split(".")
             layer, suffix = int(parts[2]), ".".join(parts[3:])
+            if layer >= depth:
+                raise ValueError(
+                    f"mmproj {mmproj_path}: vision block {layer} outside "
+                    f"clip.vision.block_count {depth}"
+                )
             rel = _VISION_BLOCK_MAP.get(suffix)
             if rel is None:
                 raise ValueError(f"unmapped mmproj tensor: {name}")
@@ -265,7 +277,15 @@ def iter_gguf_vision_weights(
             pn = f"visual.blocks.{layer}.{rel}"
             yield pn, _logged(pn, tensor, t)
         elif name == "v.patch_embd.weight" or name.startswith("v.patch_embd.weight."):
-            patch[0 if name == "v.patch_embd.weight" else int(name.rsplit(".", 1)[1])] = tensor
+            idx = 0 if name == "v.patch_embd.weight" else int(name.rsplit(".", 1)[1])
+            if idx in patch:
+                # the base tensor and a .0 slice both claim frame 0: an ambiguity
+                # stack() would resolve silently and wrongly
+                raise ValueError(
+                    f"mmproj {mmproj_path}: duplicate patch-embedding slice index {idx} "
+                    f"({patch[idx][0]} and {name})"
+                )
+            patch[idx] = (name, tensor)
         elif name == "v.patch_embd.bias":
             yield "visual.patch_embed.proj.bias", _logged("visual.patch_embed.proj.bias", tensor, t)
         elif name == "v.post_ln.weight":
@@ -290,7 +310,7 @@ def iter_gguf_vision_weights(
         )
     # stack, not cat: each slice is (out, in, kh, kw) and the temporal axis is
     # INSERTED at dim 2 -> (out, in, kt, kh, kw); cat would stretch kh instead
-    weight = torch.stack([patch[i] for i in range(temporal)], dim=2)
+    weight = torch.stack([patch[i][1] for i in range(temporal)], dim=2)
     pn = "visual.patch_embed.proj.weight"
     yield pn, _logged(pn, weight, note="temporal stack of patch_embd slices")
 

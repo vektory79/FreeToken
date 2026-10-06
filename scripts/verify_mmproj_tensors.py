@@ -32,13 +32,30 @@ def main() -> None:
     args = parser.parse_args()
 
     from freetoken.checkpoint.ftw import iter_ftw_weights
-    from freetoken.models.gguf.reader import iter_gguf_tensors
-    from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
+    from freetoken.models.gguf.reader import iter_gguf_tensors, load_gguf_metadata
+    from freetoken.models.glm5_next.gguf import _VISION_BLOCK_MAP, _VISION_MM_MAP, iter_gguf_vision_weights
 
     source_dtype = {
         t.name: ("F32" if t.ggml_type == 0 else "BF16" if t.ggml_type == 30 else str(t.ggml_type))
         for t in iter_gguf_tensors(args.mmproj)
     }
+    # reverse the reader's mapping (mmproj source name -> visual param): the report
+    # is param-level (visual.*), so the source dtype must be looked up through it
+    depth = int(load_gguf_metadata(args.mmproj)["clip.vision.block_count"])
+    src_of: dict[str, list[str]] = {}
+    for suffix, rel in _VISION_BLOCK_MAP.items():
+        for layer in range(depth):
+            src_of.setdefault(f"visual.blocks.{layer}.{rel}", []).append(f"v.blk.{layer}.{suffix}")
+    for mmproj_name, visual in _VISION_MM_MAP.items():
+        src_of.setdefault(visual, []).append(mmproj_name)
+    # the two patch-embedding slices stack into one param: carry both source dtypes
+    src_of["visual.patch_embed.proj.weight"] = ["v.patch_embd.weight", "v.patch_embd.weight.1"]
+    src_of["visual.patch_embed.proj.bias"] = ["v.patch_embd.bias"]
+    src_of["visual.post_layernorm.weight"] = ["v.post_ln.weight"]
+
+    def src_column(name: str) -> str:
+        dtypes = sorted({source_dtype[s] for s in src_of.get(name, []) if s in source_dtype})
+        return "/".join(dtypes) if dtypes else "-"
 
     got = dict(iter_gguf_vision_weights(args.mmproj))
     ref = {
@@ -50,7 +67,7 @@ def main() -> None:
 
     rows: list[dict] = []
     for name in sorted(set(got) | set(ref)):
-        row = {"name": name, "src": source_dtype.get(name, "-")}
+        row = {"name": name, "src": src_column(name)}
         if name not in got or name not in ref:
             row["status"] = "UNMATCHED"
             row["diff"] = float("nan")
