@@ -1,4 +1,4 @@
-# TRAPS.md - 67 ловушек для native GGUF serving (T01-T67, рецепты D01-D10)
+# TRAPS.md - 75 ловушек для native GGUF serving (T01-T75, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -400,7 +400,88 @@ kb/topics/decode-chain-microfusion.md; все четыре env-ручки вал
   гейта 10%; warm-потолок 22.85 с формально касается гейта 23 с, но warm
   нереализуем - fresh mmap first-touch zero неизбежен, MAP_POPULATE лишь
   переносит цену). Метод-карточка: kb/methods/limiter-attribution.md;
-  прецедент: P12 wave-1 (kb/cases/boot-shutdown-io).
+прецедент: P12 wave-1 (kb/cases/boot-shutdown-io).
+
+## mmproj-зрение кампания 2026-10-06 (GGUF vision, фазы 1-2) T68-T71
+
+- **T68** (config, design) Выбор GGUF vision-спеки возможен ТОЛЬКО в
+  build_gguf_shim: model_spec диспетчеризует реестр по architectures[0]
+  шима ДО вызова parse_config, поэтому вариант "выбрать спеку в
+  parse_gguf_config" не работает в принципе. GgufConfigShim - frozen:
+  VisionConfig собирается хуком (_GGUF_VISION_CONFIG_HOOK) внутри
+  build_gguf_shim и кладётся в шим вместе с mmproj_path;
+  parse_gguf_config читает shim.vision_config через getattr-дефолт None.
+  Без флага --mmproj путь реестра бит-в-бит прежний. Эвиденс: e35577d,
+  kb/cases/gguf-glm5next-vision/phases-1-2.md.
+- **T69** (brief, mapping) Кандидатская таблица маппинга брифа содержала
+  2 неверные строки: mm.post_norm.{weight,bias} (F32 4096, c bias) - это
+  visual.merger.post_projection_norm (torch LayerNorm), а не
+  visual.post_layernorm (RMSNorm 1024 БЕЗ bias); v.post_ln.weight (1024,
+  без bias) - visual.post_layernorm. Dim/bias-подсказки из кода
+  референса (shape vs поле конфига, наличие bias) ловят такие ошибки ДО
+  замера; верифицировать численно всегда - эталон вырожденно строгий
+  (обе стороны одного HF-источника): все 347 параметров exact при
+  max_abs_diff == 0. Эвиденс: fae88c8, tensor-verification-report.md.
+- **T70** (reader, shapes) GGUF-ридер отдаёт torch-порядок осей (ggml ne
+  reversed) -> reshape(t.shape) даёт матричный (out, in) без ручного
+  transpose; qkv хранится q|k|v по выходной оси. Conv3d patch-embed
+  shipped как два temporal-среза v.patch_embd.weight{,.1}: собирать
+  torch.stack(dim=2) -> (out, in, kt, kh, kw) = (1024, 3, 2, 14, 14);
+  cat по последней оси растянул бы kh и разнёс patch-сетку. Гварды
+  живут в ридере, не выше по стеку: arch == clip, дубликаты и дыры
+  patch-срезов, блок за clip.vision.block_count, неизвестное имя ->
+  ValueError с именем тензора. Эвиденс: fae88c8 + 747f658,
+  glm5_next/gguf.py iter_gguf_vision_weights.
+- **T71** (harness, verification) Верификационные таблицы, ключёванные
+  именами одной стороны (source-dtype по mmproj-именам при строках по
+  visual.*), молча дают дыры: строить явный обратный индекс
+  (visual.* -> mmproj-имя) и считать UNMATCHED по union имён обеих
+  сторон; source-dtype тянуть через тот же индекс (patch_embd - два
+  среза в один параметр, dtype склеивается через "/"). Инструмент:
+  scripts/verify_mmproj_tensors.py (CPU-mmap, VRAM не нужен).
+  Эвиденс: fae88c8 + 747f658.
+
+## mmproj-зрение кампания 2026-10-06 (GGUF vision, фазы 3-4) T72-T75
+
+- **T72** (tokenizer, serving) Chat-шаблон живёт в ОСНОВНОЙ GGUF
+  (tokenizer.chat_template KV, макрос emit_image рендерит обёртки
+  begin/end image), НЕ в mmproj - в mmproj tokenizer.* KVs нет вообще;
+  load_gguf_tokenizer подхватывает KV в PreTrainedTokenizerFast.
+  image_token_id выводится из vocab-массива (глиф image-placeholder,
+  id 154854 == пин NVFP4); отсутствие шаблона, глифа в шаблоне, токена
+  в vocab или несовпадение id - fail-fast, иначе image-промпт молча
+  теряет картинку. Эвиденс: d864578, resolve_gguf_image_serving.
+- **T73** (mm, exception gate) Blanket except Exception -> None в
+  get_mm_processor глотал fail-fast ValueError валидации --mmproj
+  (нет файла / не clip-арх) -> мультимодальный бут молча становится
+  text-only. Гейт: except ValueError ре-райзит при выставленном
+  mmproj_path, None-контракт чужих/отсутствующих HF-конфигов сохранён.
+  Отсутствующий обязательный clip.* ключ у image-процессора - тоже
+  fail-fast, НЕ NVFP4-пин (пин недостижим на валидном файле и только
+  маскирует дрейф конвертера). Эвиденс: d864578, mm/processor.py +
+  mm/processors/glm5_next.py.
+- **T74** (checkpoint, metadata carrier) Башня в GGUF-FTW едет в уже
+  существующем metadata-only артефакте source_metadata.gguf: конвертер
+  мержит clip.* KVs mmproj через extra_kvs в write_metadata_gguf
+  (_pack_kv: bool/int32/float32/string/однотипные массивы). Гвард
+  коллизий extra_kvs vs src_keys|OUTPUT_WEIGHT_PRESENT_KV обязателен:
+  дубликат KV репарс-проверка молча дедупнула бы, коллизия с резервом
+  молча ЗАМЕНИЛА бы факт; гетерогенный массив [1, 2.0] упаковкой по
+  первому элементу молча обрезал бы хвост. image_processor_kwargs НЕ
+  персистятся - пересчёт из тех же clip.* на буте (нет двойного
+  источника истины). Эвиденс: 2b91236, models/gguf/reader.py.
+- **T75** (config, dual-path) build_gguf_shim vision-ветка: от
+  mmproj-файла ИЛИ clip.has_vision_encoder собственных метаданных;
+  raw GGUF с clip-KVs и непустой таблицей тензоров - fail-fast
+  "pass --mmproj" (serving молча остался бы без visual весов).
+  Parse-хуки на ядро (metadata, shapes, source); shape-кросс-чеки
+  гейтятся на непустой shapes (metadata-only carrier без таблицы
+  тензоров; числовой контроль - фазовые верификации). ftw_hotfix:
+  gguf_ftw_tower_reconvert_needed гвардит выше dry-run ветки -
+  "reconvert with ft checkpoint --mmproj"; старый текст-only FTW путь
+  (ftw_lacks_vision) не тронут. Эвиденс: 2b91236, models/gguf/config.py
+  + scripts/ftw_hotfix.py; дистиллят
+  kb/cases/gguf-glm5next-vision/phases-3-4.md.
 
 ## Debugging
 

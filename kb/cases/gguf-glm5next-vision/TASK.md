@@ -1,6 +1,7 @@
 # TASK: поддержка зрения (mmproj) для GGUF glm5next
 
-Status: NOT STARTED. Composed 2026-09-27 по итогам исследовательской сессии
+Status: PHASES 1-4 DONE (CPU), 2026-10-06, commits e35577d..2b91236; phase 5
+(HW wave) pending. Composed 2026-09-27 по итогам исследовательской сессии
 (исследование проводилось на ветке vektory79, HEAD edd6309; якоря строк
 проверены против HEAD - перед редактированием перепроверить, они дрейфуют).
 Железо: локальный риг RTX 5090 (VRAM-протокол CONTRIBUTING; HW-волна -
