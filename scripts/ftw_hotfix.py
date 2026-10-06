@@ -40,6 +40,7 @@ import torch
 
 from freetoken.checkpoint.ftw import ALIGN, FORMAT_TAG, INDEX_NAME, _align_up, _dtype_of, _dtype_str, _SHARD_FMT
 from freetoken.models.config import VISION_KEY_PREFIXES
+from freetoken.models.gguf.reader import FTW_METADATA_GGUF
 from freetoken.distributed.info import set_tp_info, try_get_tp_info
 from freetoken.engine.config import EngineConfig
 from freetoken.engine.engine import _decode_target
@@ -766,6 +767,14 @@ def side_files_bytes(src: str, skip) -> int:
 
 
 # ------------------------------------------------------------------ main
+def gguf_ftw_tower_reconvert_needed(ftw_dir: str) -> bool:
+    """A GGUF-sourced FTW (source_metadata.gguf carrier): its tower either already
+    ships as visual.* (never missing) or the source had no mmproj at all, so the HF
+    rename pipeline below cannot produce it - reconversion with --mmproj is the only
+    remedy, and the HF fetch plan printed further down would mislead."""
+    return os.path.isfile(os.path.join(ftw_dir, FTW_METADATA_GGUF))
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ftw", required=True, help="FTW checkpoint dir to repair")
@@ -888,6 +897,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     tower: dict[str, torch.Tensor] = {}
+    if vision_missing and gguf_ftw_tower_reconvert_needed(ns.ftw):
+        print(
+            f"ERROR: {ns.ftw} is a GGUF-sourced FTW whose tower is missing; "
+            f"reconvert with 'ft checkpoint --mmproj <mmproj.gguf>'",
+            file=sys.stderr,
+        )
+        return 2
     if vision_missing and not ns.dry_run:
         tower = read_tower(source, ns.ftw, tower_names)
         unproduced = [n for n in vision_missing if n not in tower]

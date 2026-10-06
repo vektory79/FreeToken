@@ -45,6 +45,10 @@ def main(argv: list[str] | None = None, prog: str = "freetoken.checkpoint") -> i
     p.add_argument("--gpu", type=single_gpu_arg, default=None,
                    help="GPU for the repack: a GPU UUID (GPU-xxxx..., as nvidia-smi -L prints) or "
                         "an nvidia-smi index (default: the first visible GPU)")
+    p.add_argument("--mmproj", default=None,
+                   help="mmproj GGUF carrying the vision tower for a raw .gguf source; "
+                        "its tensors ship into the FTW as visual.* and its clip.* metadata "
+                        "merges into the checkpoint's config carrier, so serving needs no flag")
     ns = p.parse_args(argv)
 
     # same as ft serve --gpu: resolve, then bind by UUID at CUDA init
@@ -60,6 +64,7 @@ def main(argv: list[str] | None = None, prog: str = "freetoken.checkpoint") -> i
     index = convert_checkpoint(
         ns.model, ns.out, dtype=_DTYPES[ns.dtype],
         moe_backend=ns.moe_backend, quant_backend=ns.quant_backend, shard_limit=shard_limit, device=device,
+        mmproj_path=ns.mmproj,
     )
     dt = time.perf_counter() - t
     c = index["counts"]

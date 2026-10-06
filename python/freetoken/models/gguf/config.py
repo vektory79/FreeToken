@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from .reader import gguf_architecture, load_gguf_metadata, gguf_tensor_names
+from .reader import _reader, gguf_architecture, load_gguf_metadata, gguf_tensor_names
 
 # GGUF ``general.architecture`` -> FreeToken registry key (a GGUF-specific spec that
 # reuses the model classes but a GGUF parse_config / iter_weights).
@@ -33,7 +33,13 @@ GGUF_ARCH_TO_REGISTRY_VISION: dict[str, str] = {
 # arch -> "module:attr" building the tower config from the mmproj metadata. Called
 # lazily: the model modules import this one, so a top-level import would cycle.
 _GGUF_VISION_CONFIG_HOOK: dict[str, str] = {
-    "glm5next": "freetoken.models.glm5_next.gguf:parse_mmproj_vision_config",
+    "glm5next": "freetoken.models.glm5_next.gguf:vision_config_from_tower_metadata",
+}
+
+# arch -> "module:attr" building the image-processor kwargs from the same tower
+# metadata (phase-3 fallback processor)
+_GGUF_VISION_PROCESSOR_HOOK: dict[str, str] = {
+    "glm5next": "freetoken.models.glm5_next.gguf:image_processor_config_from_tower_metadata",
 }
 
 # arch -> "module:attr" resolving the image placeholder token id from the main
@@ -52,12 +58,15 @@ class GgufConfigShim:
     metadata: dict[str, Any]
     vocab_size: int
     tie_word_embeddings: bool
-    # raw-gguf vision boot facts (--mmproj): the tower file path, the vision config
-    # derived from its clip.* metadata and the image placeholder token id resolved
-    # from the tokenizer metadata; all None serves the checkpoint text-only
+    # raw-gguf vision boot facts: the tower file path (raw .gguf + --mmproj) or the
+    # tower metadata embedded in this file's KV section (a converted FTW's merged
+    # source_metadata.gguf); both absent serves the checkpoint text-only
     mmproj_path: str | None = None
     vision_config: Any = None
     image_token_id: int | None = None
+    # image-processor fallback kwargs when the tower rides in the metadata (FTW boot:
+    # no mmproj file exists to parse); None on the raw-gguf path, which parses lazily
+    image_processor_kwargs: dict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal HF-config-like dict for trunk code that introspects the config
@@ -90,8 +99,12 @@ def _vocab_size(model_path: str) -> int:
 def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConfigShim:
     arch = gguf_architecture(model_path)
     metadata = load_gguf_metadata(model_path)
+    names = gguf_tensor_names(model_path)
     vision_config = None
     image_token_id = None
+    image_processor_kwargs = None
+    tower_meta = None
+    tower_shapes: dict[str, tuple] = {}
     if mmproj_path is not None:
         # fail fast before anything else reads the flag: a missing or non-clip file is
         # an operator error, and the error must name the file
@@ -109,12 +122,28 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
                 f"--mmproj is only supported for {sorted(GGUF_ARCH_TO_REGISTRY_VISION)} "
                 f"GGUF checkpoints, not {arch!r}"
             )
-        module_name, _, attr = _GGUF_VISION_CONFIG_HOOK[arch].partition(":")
-        vision_config = getattr(importlib.import_module(module_name), attr)(mmproj_path)
-        module_name, _, attr = _GGUF_VISION_SERVING_HOOK[arch].partition(":")
-        image_token_id = getattr(importlib.import_module(module_name), attr)(
-            model_path, metadata
-        )
+        tower_meta = load_gguf_metadata(mmproj_path)
+        tower_shapes = {
+            t.name: tuple(reversed([int(d) for d in t.shape])) for t in _reader(mmproj_path).tensors
+        }
+    elif metadata.get("clip.has_vision_encoder"):
+        # tower metadata rides INSIDE this file's KV section: a converted FTW's
+        # source_metadata.gguf carries the mmproj clip.* keys merged at convert time,
+        # so a GGUF-FTW boot needs no --mmproj and never opens the source .gguf. A
+        # raw checkpoint GGUF must not reach here with vision keys - its tensor table
+        # is the LLM, not a tower, so serving would silently lack the visual weights.
+        registry_key = GGUF_ARCH_TO_REGISTRY_VISION.get(arch)
+        if registry_key is None:
+            raise ValueError(
+                f"this GGUF carries clip.* tower metadata, but {arch!r} has no vision "
+                f"registry entry (known: {sorted(GGUF_ARCH_TO_REGISTRY_VISION)})"
+            )
+        if names:
+            raise ValueError(
+                f"GGUF {model_path}: carries clip.* tower metadata but is not a "
+                "metadata-only FTW carrier; pass --mmproj with the tower file"
+            )
+        tower_meta = metadata
     else:
         registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
         if registry_key is None:
@@ -122,7 +151,22 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
                 f"GGUF architecture {arch!r} is not supported "
                 f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)})"
             )
-    names = gguf_tensor_names(model_path)
+    if tower_meta is not None:
+        module_name, _, attr = _GGUF_VISION_CONFIG_HOOK[arch].partition(":")
+        vision_config = getattr(importlib.import_module(module_name), attr)(
+            tower_meta, tower_shapes, source=str(model_path)
+        )
+        module_name, _, attr = _GGUF_VISION_SERVING_HOOK[arch].partition(":")
+        image_token_id = getattr(importlib.import_module(module_name), attr)(
+            model_path, metadata
+        )
+        if mmproj_path is None:
+            # FTW carrier: bake the processor kwargs now (the tower file they would
+            # be parsed from does not exist); the raw-gguf path parses lazily
+            module_name, _, attr = _GGUF_VISION_PROCESSOR_HOOK[arch].partition(":")
+            image_processor_kwargs = getattr(importlib.import_module(module_name), attr)(
+                tower_meta, tower_shapes, source=str(model_path)
+            )
     if names:
         # No separate output projection -> embeddings are tied.
         tie_word_embeddings = "output.weight" not in names
@@ -148,6 +192,7 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
         mmproj_path=mmproj_path,
         vision_config=vision_config,
         image_token_id=image_token_id,
+        image_processor_kwargs=image_processor_kwargs,
     )
 
 

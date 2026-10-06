@@ -76,3 +76,19 @@ def test_every_family_with_an_encoder_has_an_encoder_only_reader():
     for spec in _MODEL_REGISTRY.values():
         if spec.encoders:
             assert callable(_load_attr(spec.module, "iter_vision_weights")), spec.module
+
+
+def test_gguf_ftw_missing_tower_routes_to_reconvert(hotfix, tmp_path):
+    """A GGUF-sourced FTW whose carrier is present gets the reconvert verdict instead
+    of the HF fetch plan: on such a checkpoint the family reader over HF-named source
+    tensors cannot produce the visual.* names at all."""
+    from freetoken.models.gguf.reader import FTW_METADATA_GGUF
+
+    assert hotfix.gguf_ftw_tower_reconvert_needed(str(tmp_path)) is False
+    (tmp_path / FTW_METADATA_GGUF).write_bytes(b"")
+    assert hotfix.gguf_ftw_tower_reconvert_needed(str(tmp_path)) is True
+    # the message main() emits for this branch names the remedy
+    import inspect
+
+    src = inspect.getsource(hotfix)
+    assert "reconvert with 'ft checkpoint --mmproj <mmproj.gguf>'" in src

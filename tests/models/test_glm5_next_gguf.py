@@ -2391,3 +2391,128 @@ def test_mm_processor_mmproj_boot_wraps_image_into_mm_item(glm5next_gguf, mmproj
     assert item.feature.dtype == torch.bfloat16
     assert item.model_specific_data["grid_thw"] == [1, 32, 32]
     assert len(proc.prompt_replacement(item).full) == 256
+
+
+# ------------------------------------------------------------------------------
+# Phase 4: the converted-FTW metadata carrier boots vision without --mmproj
+# ------------------------------------------------------------------------------
+
+
+def _merged_carrier(dst, glm5next_gguf, extra_kvs) -> str:
+    from freetoken.models.gguf.reader import write_metadata_gguf
+
+    write_metadata_gguf(glm5next_gguf, dst, extra_kvs=extra_kvs)
+    return str(dst)
+
+
+def test_metadata_gguf_extra_kv_roundtrip(glm5next_gguf, tmp_path):
+    """The converter packs the tower facts as raw KV records into the byte-verbatim
+    carrier: every supported scalar/array type must read back value-identical."""
+    import math
+
+    from freetoken.models.gguf.reader import load_gguf_metadata
+
+    kvs = {
+        "ft.t.bool": True,
+        "ft.t.int": 24,
+        "ft.t.float": 1e-5,
+        "ft.t.str": "glm5next",
+        "ft.t.floats": [0.48145467, 0.45782751, 0.40821072],
+        "ft.t.ints": [2, 3],
+    }
+    p = _merged_carrier(tmp_path / "carrier.gguf", glm5next_gguf, kvs)
+    m = load_gguf_metadata(p)
+    assert m["ft.t.bool"] is True
+    assert m["ft.t.int"] == 24
+    assert math.isclose(m["ft.t.float"], 1e-5, rel_tol=1e-6)
+    assert m["ft.t.str"] == "glm5next"
+    assert m["ft.t.floats"] == pytest.approx(kvs["ft.t.floats"], abs=1e-7)
+    assert list(m["ft.t.ints"]) == [2, 3]
+
+
+def test_ftw_carrier_boots_vision_without_mmproj(glm5next_gguf, mmproj_gguf, tmp_path):
+    """A carrier with the mmproj clip.* KVs merged resolves the multimodal spec, the
+    vision config, the pinned image token and the baked processor kwargs - the same
+    facts a real converted FTW carries - with no mmproj file anywhere."""
+    from freetoken.models.gguf.reader import load_gguf_metadata
+    from freetoken.mm.processor import get_mm_processor
+    from freetoken.utils import cached_load_hf_config
+
+    mm_meta = load_gguf_metadata(mmproj_gguf)
+    p = _merged_carrier(
+        tmp_path / "carrier.gguf", glm5next_gguf,
+        {k: v for k, v in mm_meta.items() if k.startswith("clip.")},
+    )
+    shim = cached_load_hf_config(p)
+    assert shim.architectures == ["Glm5NextGGUFForConditionalGeneration"]
+    assert shim.mmproj_path is None
+    assert shim.vision_config.depth == 24
+    assert shim.image_token_id == 154854
+    assert shim.image_processor_kwargs["merge_size"] == 2
+    proc = get_mm_processor(p)
+    assert proc.placeholder == [154854]
+    ip = proc._image_processor()
+    assert ip.patch_size == 14
+    assert list(ip.image_mean) == pytest.approx(mm_meta["clip.vision.image_mean"], abs=1e-6)
+
+
+def test_metadata_gguf_extra_kv_collision_fails_fast(glm5next_gguf, tmp_path):
+    """An extra KV clashing with a source KV (or the reserved output-weight fact) would
+    write a duplicate record the re-parse silently dedupes - name the clash instead."""
+    import pytest
+
+    from freetoken.models.gguf.reader import OUTPUT_WEIGHT_PRESENT_KV, write_metadata_gguf
+
+    with pytest.raises(ValueError, match="general.architecture"):
+        write_metadata_gguf(glm5next_gguf, tmp_path / "a.gguf", extra_kvs={"general.architecture": "clip"})
+    with pytest.raises(ValueError, match=OUTPUT_WEIGHT_PRESENT_KV):
+        write_metadata_gguf(glm5next_gguf, tmp_path / "b.gguf", extra_kvs={OUTPUT_WEIGHT_PRESENT_KV: True})
+
+
+def test_pack_kv_rejects_bad_arrays(tmp_path):
+    from freetoken.models.gguf.reader import _pack_kv
+
+    with pytest.raises(ValueError, match="heterogeneous"):
+        _pack_kv("ft.mix", [1, 2.0])
+    with pytest.raises(ValueError, match="empty-array"):
+        _pack_kv("ft.empty", [])
+    with pytest.raises(ValueError, match="unsupported KV value type"):
+        _pack_kv("ft.dict", {"a": 1})
+
+
+def test_ftw_carrier_partial_vision_metadata_fails_fast(glm5next_gguf, mmproj_gguf, tmp_path):
+    """A hand-trimmed carrier (tower flag present, fields missing) fails fast instead
+    of silently building a half-configured tower."""
+    from freetoken.models.gguf.reader import load_gguf_metadata
+    from freetoken.utils import cached_load_hf_config
+
+    mm_meta = load_gguf_metadata(mmproj_gguf)
+    partial = {k: v for k, v in mm_meta.items() if k.startswith("clip.") and k != "clip.vision.patch_size"}
+    p = _merged_carrier(tmp_path / "partial.gguf", glm5next_gguf, partial)
+    with pytest.raises(ValueError, match="clip.vision.patch_size"):
+        cached_load_hf_config(p)
+
+
+def test_raw_gguf_with_tower_metadata_fails_fast(glm5next_gguf, tmp_path):
+    """clip.* KVs on a checkpoint GGUF whose tensor table is the LLM (not a metadata
+    carrier) mean the tower file is missing: demand --mmproj, never serve silently."""
+    from freetoken.utils import cached_load_hf_config
+
+    meta = {**_GLM5NEXT_METADATA, **_TOKENIZER_METADATA, **_CLIP_METADATA}
+    p = _write_gguf(tmp_path / "towelkeys.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="--mmproj"):
+        cached_load_hf_config(p)
+
+
+def test_ftw_text_only_carrier_unchanged(glm5next_gguf, tmp_path):
+    """No clip.* KVs in the carrier: the pre-phase-4 text-only boot path, byte for
+    byte (old FTWs converted before this campaign must not change shape)."""
+    from freetoken.utils import cached_load_hf_config
+
+    p = _merged_carrier(tmp_path / "textonly.gguf", glm5next_gguf, None)
+    shim = cached_load_hf_config(p)
+    assert shim.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert shim.mmproj_path is None
+    assert shim.vision_config is None
+    assert shim.image_token_id is None
+    assert shim.image_processor_kwargs is None

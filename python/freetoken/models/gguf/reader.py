@@ -57,10 +57,15 @@ def gguf_config_source(model_path: str) -> str | None:
     return None
 
 
-def write_metadata_gguf(source_gguf: str, dest_path: str) -> None:
+def write_metadata_gguf(source_gguf: str, dest_path: str, extra_kvs: dict | None = None) -> None:
     """Write a metadata-only GGUF: the source's header + KV section byte-for-byte, with
     ``tensor_count`` patched to 0 (no tensor infos, no weight data). Reading only the
     header+KV is cheap; the multi-GB tensor data is never touched.
+
+    ``extra_kvs`` appends further KVs into the copied KV section (used by the converter
+    to carry the mmproj clip.* tower facts into an FTW dir). Values pack as bool /
+    int32 / float32 / string / flat arrays of those - exactly what the config hooks
+    read back; anything else is a caller bug and fails the re-parse check below.
 
     Validates by re-parsing: the copy must list zero tensors and expose the identical KV
     key set (the KV *bytes* are copied verbatim, so identical keys imply identical values).
@@ -69,6 +74,18 @@ def write_metadata_gguf(source_gguf: str, dest_path: str) -> None:
 
     reader = gguf.GGUFReader(source_gguf)
     assert reader.tensors, f"{source_gguf}: no tensors to bound the KV section"
+    src_keys = {k for k in reader.fields if not k.startswith("GGUF.")}
+    extra = extra_kvs or {}
+    present = any(t.name == "output.weight" for t in reader.tensors)
+    # an extra KV clashing with a source KV would write a duplicate record the re-parse
+    # silently dedupes; clashing with the reserved fact would silently REPLACE it
+    collision = set(extra) & (src_keys | {OUTPUT_WEIGHT_PRESENT_KV})
+    if collision:
+        raise ValueError(
+            f"{source_gguf}: extra KV keys collide with the source's own KV section: "
+            f"{sorted(collision)}"
+        )
+    appends = {OUTPUT_WEIGHT_PRESENT_KV: present, **extra}
     # The first tensor-info record starts exactly where the KV section ends (GGUF places no
     # padding between KV and tensor infos; padding is only before the tensor *data*).
     kv_end = int(reader.tensors[0].field.offset)
@@ -78,24 +95,60 @@ def write_metadata_gguf(source_gguf: str, dest_path: str) -> None:
     # untied output head shows up only as an "output.weight" tensor). Append it as an
     # extra KV and bump kv_count (u64 at byte 16). Little-endian only -- the re-parse
     # below fails loudly on a big-endian source.
-    key = OUTPUT_WEIGHT_PRESENT_KV.encode()
-    present = any(t.name == "output.weight" for t in reader.tensors)
-    buf += struct.pack("<Q", len(key)) + key
-    buf += struct.pack("<I", int(gguf.GGUFValueType.BOOL)) + bytes([1 if present else 0])
-    struct.pack_into("<Q", buf, 16, struct.unpack_from("<Q", buf, 16)[0] + 1)
-    tmp = dest_path + ".tmp"
+    buf += b"".join(_pack_kv(k, v) for k, v in sorted(appends.items()))
+    struct.pack_into("<Q", buf, 16, struct.unpack_from("<Q", buf, 16)[0] + len(appends))
+    tmp = f"{dest_path}.tmp"
     with open(tmp, "wb") as f:
         f.write(buf)
     os.replace(tmp, dest_path)
 
     check = gguf.GGUFReader(dest_path)
     assert not check.tensors, "metadata gguf still lists tensors after patch"
-    src_keys = {k for k in reader.fields if not k.startswith("GGUF.")}
     dst_keys = {k for k in check.fields if not k.startswith("GGUF.")}
-    assert dst_keys == src_keys | {OUTPUT_WEIGHT_PRESENT_KV}, (
+    assert dst_keys == src_keys | set(appends), (
         f"metadata gguf KV keys differ from source: "
-        f"missing {sorted(src_keys - dst_keys)}, extra {sorted(dst_keys - src_keys - {OUTPUT_WEIGHT_PRESENT_KV})}"
+        f"missing {sorted(src_keys - dst_keys)}, extra {sorted(dst_keys - src_keys - set(appends))}"
     )
+
+
+def _pack_kv(key: str, value) -> bytes:
+    """One GGUF KV record: u64 key length + key + u32 value type + payload."""
+    import gguf
+
+    VT = gguf.GGUFValueType
+    key_bytes = key.encode()
+    out = struct.pack("<Q", len(key_bytes)) + key_bytes
+    if isinstance(value, bool):
+        vtype, payload = VT.BOOL, struct.pack("<?", value)
+    elif isinstance(value, int):
+        vtype, payload = VT.INT32, struct.pack("<i", value)
+    elif isinstance(value, float):
+        vtype, payload = VT.FLOAT32, struct.pack("<f", value)
+    elif isinstance(value, str):
+        vtype = VT.STRING
+        payload = struct.pack("<Q", len(value)) + value.encode()
+    elif isinstance(value, (list, tuple)):
+        if not value:
+            raise ValueError(f"{key}: empty-array KV packing is not supported")
+        elem = value[0]
+        # GGUF arrays are single-typed; [1, 2.0] packed by the first element's type
+        # would silently truncate the rest, so name the mix instead
+        kinds = sorted({type(v).__name__ for v in value})
+        if len(kinds) > 1:
+            raise ValueError(f"{key}: heterogeneous array KV ({', '.join(kinds)})")
+        if isinstance(elem, bool):
+            etype, pack_one = VT.BOOL, lambda v: struct.pack("<?", v)
+        elif isinstance(elem, int):
+            etype, pack_one = VT.INT32, lambda v: struct.pack("<i", v)
+        elif isinstance(elem, float):
+            etype, pack_one = VT.FLOAT32, lambda v: struct.pack("<f", v)
+        else:
+            raise ValueError(f"{key}: unsupported array element type {type(elem).__name__}")
+        vtype = VT.ARRAY
+        payload = struct.pack("<I", etype) + struct.pack("<Q", len(value)) + b"".join(pack_one(v) for v in value)
+    else:
+        raise ValueError(f"{key}: unsupported KV value type {type(value).__name__}")
+    return out + struct.pack("<I", int(vtype)) + payload
 
 
 @dataclass(frozen=True)

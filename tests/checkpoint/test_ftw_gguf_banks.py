@@ -34,7 +34,14 @@ from test_gguf_expert_banks import (  # noqa: E402
     _TRIPLE_SIGS,
     _gate_engine_and_config,
 )
-from test_glm5_next_gguf import _ITER_METADATA, _write_iter_gguf  # noqa: E402
+from test_glm5_next_gguf import (  # noqa: E402
+    _CLIP_METADATA,
+    _ITER_METADATA,
+    _TOKENIZER_METADATA,
+    _full_vision_fixture_data,
+    _write_iter_gguf,
+    _write_vision_mmproj,
+)
 
 _FT_BLOCK_COUNT = 9  # 8 trunk layers (all MoE) + blk.8 as the skipped MTP block
 _FT_H = 512  # embedding_length: gate/up pack 512 input cols
@@ -42,6 +49,7 @@ _FT_I = 256  # expert_feed_forward_length: down packs 256 input cols
 _FT_E = 4
 _FT_METADATA = {
     **_ITER_METADATA,
+    **_TOKENIZER_METADATA,  # image-serving facts ride the main gguf metadata (phase 3)
     "glm5next.block_count": _FT_BLOCK_COUNT,
     "glm5next.embedding_length": _FT_H,
     # DSA ids (3, 7) fall out of the parser's i % 4 == 3 rule; i == 8 is the MTP block
@@ -268,3 +276,122 @@ def test_ftw_persisted_types_feed_capability_gates(ftw_gguf_ckpt):
     assert types == {i: tuple(s) for i, s in enumerate(_TRIPLE_SIGS)}
     # and the FTW floor-gate scan stays silent over the same index-less formats
     assert gguf_expert_bank_types("/nonexistent-dir", SimpleNamespace(num_moe_layers=8)) is None
+
+
+# ------------------------------------------------------------------------------
+# Phase 4: the converter packs the vision tower into the FTW (USER DECISION 4)
+# ------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def ftw_gguf_vision_ckpt(tmp_path_factory):
+    """A converted GGUF FTW built WITH --mmproj: tower tensors + merged metadata."""
+    import freetoken.engine.engine as engine_mod
+    from freetoken.checkpoint.convert import convert_checkpoint
+
+    src = _write_ftw_source_gguf(tmp_path_factory.mktemp("ftw-gguf-vision-src") / "banks.gguf")
+    mmproj = _write_vision_mmproj(
+        tmp_path_factory.mktemp("ftw-gguf-vision-mmproj") / "mmproj.gguf",
+        metadata=dict(_CLIP_METADATA),
+        tensors=_full_vision_fixture_data(),
+    )
+    out = tmp_path_factory.mktemp("ftw-gguf-vision-out") / "ckpt"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(engine_mod, "offload_expert_method", lambda config: None)
+        # CPU conversion: the tower tensors stream through the same load_weight path
+        # as a GPU conversion; no CUDA context needed for the toy geometry
+        convert_checkpoint(src, str(out), device="cpu", mmproj_path=mmproj)
+    return mmproj, str(out)
+
+
+def test_ftw_gguf_vision_tensors_roundtrip(ftw_gguf_vision_ckpt):
+    """Every tower tensor the mmproj reader yields lands in the FTW under its
+    FreeToken visual.* name with the reader's exact shape - the packing is the
+    load_weight stream, so a drift shows up as a missing/renamed tensor."""
+    import json
+
+    from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
+
+    mmproj, out = ftw_gguf_vision_ckpt
+    expect = dict(iter_gguf_vision_weights(mmproj))
+    index = json.load(open(os.path.join(out, "freetoken_weight.json")))
+    got = {
+        t["name"]: tuple(t["shape"])
+        for t in index["tensors"]
+        if t["name"].startswith("visual.")
+    }
+    assert set(got) == set(expect)
+    for name, tensor in expect.items():
+        assert got[name] == tuple(tensor.shape), name
+
+
+def test_ftw_gguf_vision_metadata_carrier(ftw_gguf_vision_ckpt):
+    """The metadata-only carrier merges the mmproj's clip.* KVs and keeps the main
+    GGUF's tokenizer facts (chat template + vocab) byte-verbatim alongside."""
+    import math
+
+    from freetoken.models.gguf.reader import FTW_METADATA_GGUF, load_gguf_metadata
+    from freetoken.models.glm5_next.gguf import _IMAGE_TOKEN
+
+    mmproj, out = ftw_gguf_vision_ckpt
+    carrier = load_gguf_metadata(os.path.join(out, FTW_METADATA_GGUF))
+    mm_meta = load_gguf_metadata(mmproj)
+    clip_keys = [k for k in carrier if k.startswith("clip.")]
+    assert sorted(clip_keys) == sorted(k for k in mm_meta if k.startswith("clip."))
+    assert carrier["clip.has_vision_encoder"] is True
+    assert math.isclose(carrier["clip.vision.swiglu_limit"], mm_meta["clip.vision.swiglu_limit"], rel_tol=1e-6)
+    assert carrier["clip.vision.image_mean"] == pytest.approx(mm_meta["clip.vision.image_mean"], abs=1e-6)
+    # the image-serving facts come from the main GGUF KVs, already in the carrier
+    assert "tokenizer.chat_template" in carrier
+    assert carrier["tokenizer.ggml.tokens"][154854] == _IMAGE_TOKEN
+
+
+def test_ftw_gguf_vision_boot_without_mmproj(ftw_gguf_vision_ckpt):
+    """The converted FTW boots multimodal with NO --mmproj: config path resolves the
+    vision spec from the merged carrier, and the mm-processor builds its fallback
+    image processor from the baked-in kwargs - the source .gguf is never opened."""
+    from freetoken.mm.processor import get_mm_processor
+    from freetoken.models.weight import ftw_lacks_vision
+    from freetoken.utils import cached_load_hf_config
+
+    _, out = ftw_gguf_vision_ckpt
+    shim = cached_load_hf_config(out)
+    assert shim.architectures == ["Glm5NextGGUFForConditionalGeneration"]
+    assert shim.mmproj_path is None
+    assert shim.vision_config.depth == 24
+    assert shim.vision_config.patch_size == 14
+    assert shim.image_token_id == 154854
+    assert shim.image_processor_kwargs["patch_size"] == 14
+    assert shim.image_processor_kwargs["min_image_tokens"] == 16
+    assert ftw_lacks_vision(out) is False
+    proc = get_mm_processor(out)
+    assert proc is not None
+    assert proc.placeholder == [154854]
+    assert proc._image_processor().patch_size == 14
+
+
+def test_ftw_gguf_text_only_boot_unchanged(ftw_gguf_ckpt):
+    """A checkpoint converted WITHOUT --mmproj keeps the pre-phase-4 shape: text-only
+    spec, no tower tensors, ftw_lacks_vision still flags it."""
+    from freetoken.models.weight import ftw_lacks_vision
+    from freetoken.utils import cached_load_hf_config
+
+    _, out = ftw_gguf_ckpt
+    shim = cached_load_hf_config(out)
+    assert shim.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert getattr(shim, "vision_config", None) is None
+    assert getattr(shim, "image_token_id", None) is None
+    assert ftw_lacks_vision(out) is True
+
+
+def test_convert_mmproj_non_clip_fails_fast(tmp_path):
+    import freetoken.engine.engine as engine_mod
+    from test_glm5_next_gguf import _write_mmproj_gguf
+    from freetoken.checkpoint.convert import convert_checkpoint
+
+    src = _write_ftw_source_gguf(tmp_path / "banks.gguf")
+    bad = _write_mmproj_gguf(tmp_path / "wrong.gguf", arch="glm5next")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(engine_mod, "offload_expert_method", lambda config: None)
+        with pytest.raises(ValueError, match="!= 'clip'"):
+            convert_checkpoint(src, str(tmp_path / "ckpt"), device="cpu", mmproj_path=bad)

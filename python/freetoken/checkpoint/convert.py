@@ -66,7 +66,7 @@ _SKIP_NAMES = ("model.safetensors.index.json",)  # indexes shards the FTW replac
 _SKIP_DIRS = (".git", ".cache", ".freetoken_expert_cache")
 
 
-def _copy_metadata(model_path: str, out_dir: str) -> list[str]:
+def _copy_metadata(model_path: str, out_dir: str, *, extra_kvs: dict | None = None) -> list[str]:
     """Copy all non-weight files (config, tokenizer, remote-code, nested model configs)
     preserving directory structure, so the FTW dir is a self-contained checkpoint."""
     if os.path.isfile(model_path):
@@ -82,7 +82,7 @@ def _copy_metadata(model_path: str, out_dir: str) -> list[str]:
 
         if is_gguf_path(model_path):
             os.makedirs(out_dir, exist_ok=True)
-            write_metadata_gguf(model_path, os.path.join(out_dir, FTW_METADATA_GGUF))
+            write_metadata_gguf(model_path, os.path.join(out_dir, FTW_METADATA_GGUF), extra_kvs=extra_kvs)
             return [FTW_METADATA_GGUF]
         return []
 
@@ -171,6 +171,7 @@ def convert_checkpoint(
     quant_backend: str | None = None,
     shard_limit: int = DEFAULT_SHARD_LIMIT,
     device: str | None = None,
+    mmproj_path: str | None = None,
 ) -> dict:
     """Write ``model_path`` as an FTW checkpoint at ``out_dir``. Returns the index dict.
 
@@ -194,11 +195,17 @@ def convert_checkpoint(
             f"but TP is already set to size={tp.size}"
         )
     dev = torch.device(device or "cuda:0")
-    torch.cuda.set_device(dev)
-    torch.zeros(1, device=dev)  # init CUDA context (needed by nvfp4 backend pick / pinning)
+    if dev.type == "cpu":
+        # CPU conversion exists for the test fixtures only; production always
+        # converts on GPU (nvfp4 backend pick / pinned host staging)
+        pass
+    else:
+        torch.cuda.set_device(dev)
+        torch.zeros(1, device=dev)  # init CUDA context (needed by nvfp4 backend pick / pinning)
 
     cfg = EngineConfig(model_path=model_path, tp_info=DistributedInfo(tp.rank, tp.size),
-                       dtype=dtype, moe_strategy=moe_backend, quant_backend=quant_backend)
+                       dtype=dtype, moe_strategy=moe_backend, quant_backend=quant_backend,
+                       mmproj_path=mmproj_path)
     mc = cfg.model_config
     # every MoE strategy reads the routed experts from the banks, fused included
     offload = getattr(mc, "is_moe", False)
@@ -221,7 +228,8 @@ def convert_checkpoint(
     _progress("dense", 0, 0)  # phase start; per-tensor cumulative bytes follow (total unknown)
     dense_bytes = 0
     for name, tensor in count_bar(load_weight(model_path, torch.device("cpu"),
-                                              include_moe_experts=include_moe_experts),
+                                              include_moe_experts=include_moe_experts,
+                                              mmproj_path=mmproj_path),
                                   "Converting dense weights"):
         writer.add_tensor(name, tensor, kind="weight")
         n_weight += 1
@@ -299,7 +307,17 @@ def convert_checkpoint(
             bar.close()
 
     _progress("finalize")  # writing shard index + copying config/tokenizer
-    copied = _copy_metadata(model_path, out_dir)
+    # A raw-GGUF source with --mmproj: merge the mmproj's clip.* tower facts into the
+    # metadata-only carrier, so the FTW boot rebuilds tower config + image processor
+    # with no --mmproj and never opens the source .gguf (USER DECISION 4).
+    extra_kvs = None
+    if mmproj_path is not None:
+        from freetoken.models.gguf.reader import load_gguf_metadata
+
+        extra_kvs = {
+            k: v for k, v in load_gguf_metadata(mmproj_path).items() if k.startswith("clip.")
+        }
+    copied = _copy_metadata(model_path, out_dir, extra_kvs=extra_kvs)
 
     try:
         fingerprint = _source_fingerprint(model_path, mc, device=dev)

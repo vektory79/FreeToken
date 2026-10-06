@@ -125,34 +125,31 @@ def resolve_gguf_image_serving(model_path: str, metadata: dict) -> int:
     return token_id
 
 
-def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
-    """VisionConfig for the glm5next tower from a clip-architecture mmproj GGUF.
+def vision_config_from_tower_metadata(m: dict, shapes: dict, *, source: str) -> "VisionConfig":
+    """VisionConfig for the glm5next tower from clip.* tower metadata.
 
-    Nine fields map from clip.* metadata; the four the metadata does not carry
-    (temporal_patch_size, in_channels, projection_intermediate_size, attention_bias)
-    come from the pinned GLM-5.3-Flash reference and are verified against tensor
-    shapes whenever the mmproj tensor table exposes them.
+    `source` names the carrier for error messages (the mmproj file, or an FTW's
+    merged source_metadata.gguf). `shapes` maps tower tensor names to ggml-order
+    shapes for the header-only cross checks; empty for a metadata-only carrier,
+    which has no tensor table to check against.
     """
-    from freetoken.models.gguf.reader import _reader, load_gguf_metadata
     from freetoken.models.glm5_next.config import VisionConfig
-
-    m = load_gguf_metadata(mmproj_path)
 
     def c(key: str):
         val = m.get(f"clip.{key}")
         if val is None:
-            raise ValueError(f"mmproj {mmproj_path}: missing required metadata key clip.{key}")
+            raise ValueError(f"mmproj {source}: missing required metadata key clip.{key}")
         return val
 
     if not m.get("clip.has_vision_encoder"):
         raise ValueError(
-            f"mmproj {mmproj_path}: clip.has_vision_encoder is not True; the file does "
+            f"mmproj {source}: clip.has_vision_encoder is not True; the file does "
             "not carry a vision tower"
         )
     projector = c("projector_type")
     if str(projector) != "glm5next":
         raise ValueError(
-            f"mmproj {mmproj_path}: clip.projector_type {projector!r} != 'glm5next'; "
+            f"mmproj {source}: clip.projector_type {projector!r} != 'glm5next'; "
             "FreeToken implements only the glm5next projector"
         )
 
@@ -161,7 +158,7 @@ def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
         expected = _MMPROJ_PINNED[field]
         if val != expected:
             raise ValueError(
-                f"mmproj {mmproj_path}: clip.{key} {val} != the GLM-5.3-Flash vision "
+                f"mmproj {source}: clip.{key} {val} != the GLM-5.3-Flash vision "
                 f"reference {expected} ({field})"
             )
         return val
@@ -176,13 +173,13 @@ def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
     eps = float(c("vision.attention.layer_norm_epsilon"))
     if not math.isclose(eps, _MMPROJ_PINNED["rms_norm_eps"], rel_tol=1e-5):
         raise ValueError(
-            f"mmproj {mmproj_path}: clip.vision.attention.layer_norm_epsilon {eps} != "
+            f"mmproj {source}: clip.vision.attention.layer_norm_epsilon {eps} != "
             f"the GLM-5.3-Flash vision reference {_MMPROJ_PINNED['rms_norm_eps']}"
         )
     swiglu = float(c("vision.swiglu_limit"))
     if not math.isclose(swiglu, _MMPROJ_PINNED["swiglu_limit"], rel_tol=1e-6):
         raise ValueError(
-            f"mmproj {mmproj_path}: clip.vision.swiglu_limit {swiglu} != the "
+            f"mmproj {source}: clip.vision.swiglu_limit {swiglu} != the "
             f"GLM-5.3-Flash vision reference {_MMPROJ_PINNED['swiglu_limit']}"
         )
 
@@ -190,10 +187,6 @@ def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
     temporal = _MMPROJ_PINNED["temporal_patch_size"]
     in_channels = _MMPROJ_PINNED["in_channels"]
     proj_inter = _MMPROJ_PINNED["projection_intermediate_size"]
-    shapes = {
-        t.name: tuple(reversed([int(d) for d in t.shape]))
-        for t in _reader(mmproj_path).tensors
-    }
     patch_slices = [
         n for n in shapes if n == "v.patch_embd.weight" or n.startswith("v.patch_embd.weight.")
     ]
@@ -202,29 +195,30 @@ def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
         # tensor must be present, it is the slice the input channels are read from
         if "v.patch_embd.weight" not in shapes:
             raise ValueError(
-                f"mmproj {mmproj_path}: v.patch_embd.weight.N slices without the base "
+                f"mmproj {source}: v.patch_embd.weight.N slices without the base "
                 "v.patch_embd.weight tensor"
             )
         if len(patch_slices) != temporal:
             raise ValueError(
-                f"mmproj {mmproj_path}: {len(patch_slices)} v.patch_embd.weight slices "
+                f"mmproj {source}: {len(patch_slices)} v.patch_embd.weight slices "
                 f"!= temporal_patch_size {temporal}"
             )
         found_in = shapes["v.patch_embd.weight"][1]
         if found_in != in_channels:
             raise ValueError(
-                f"mmproj {mmproj_path}: v.patch_embd.weight has {found_in} input "
+                f"mmproj {source}: v.patch_embd.weight has {found_in} input "
                 f"channels != the GLM-5.3-Flash vision reference {in_channels}"
             )
     gate = shapes.get("mm.gate.weight")
     if gate is not None and gate[0] != proj_inter:
         raise ValueError(
-            f"mmproj {mmproj_path}: mm.gate.weight output width {gate[0]} != the "
+            f"mmproj {source}: mm.gate.weight output width {gate[0]} != the "
             f"GLM-5.3-Flash vision reference {proj_inter} (projection_intermediate_size)"
         )
-    if _MMPROJ_PINNED["attention_bias"] and "v.blk.0.attn_qkv.bias" not in shapes:
+    # a metadata-only FTW carrier has no tensor table: the numeric control is the phase verification reports
+    if shapes and _MMPROJ_PINNED["attention_bias"] and "v.blk.0.attn_qkv.bias" not in shapes:
         raise ValueError(
-            f"mmproj {mmproj_path}: no v.blk.*.attn_qkv.bias tensors; the GLM-5.3-Flash "
+            f"mmproj {source}: no v.blk.*.attn_qkv.bias tensors; the GLM-5.3-Flash "
             "vision reference is attention_bias=True"
         )
 
@@ -245,24 +239,17 @@ def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
     )
 
 
-def parse_mmproj_image_processor_config(mmproj_path: str) -> dict:
-    """Glm5NextImageProcessor kwargs from a clip-architecture mmproj GGUF.
+def image_processor_config_from_tower_metadata(m: dict, shapes: dict, *, source: str) -> dict:
+    """Glm5NextImageProcessor kwargs from clip.* tower metadata.
 
-    patch/merge sizes and the CLIP normalization come from clip.* metadata;
-    temporal_patch_size is pinned (the metadata does not carry it) and verified
-    against the patch-embedding slice count when the tensor table exposes it;
-    the token budget is the NVFP4 reference pin. image_size is read for the
-    patch-grid sanity check only - the reference image processor resizes
-    dynamically and carries no image_size field.
+    Same carrier contract as vision_config_from_tower_metadata: `shapes` feeds the
+    temporal-slice check and stays empty for a metadata-only FTW carrier.
     """
-    from freetoken.models.gguf.reader import _reader, load_gguf_metadata
-
-    m = load_gguf_metadata(mmproj_path)
 
     def c(key: str):
         val = m.get(f"clip.{key}")
         if val is None:
-            raise ValueError(f"mmproj {mmproj_path}: missing required metadata key clip.{key}")
+            raise ValueError(f"mmproj {source}: missing required metadata key clip.{key}")
         return val
 
     patch = int(c("vision.patch_size"))
@@ -270,25 +257,25 @@ def parse_mmproj_image_processor_config(mmproj_path: str) -> dict:
     merge = int(c("vision.spatial_merge_size"))
     if image_size % patch != 0:
         raise ValueError(
-            f"mmproj {mmproj_path}: clip.vision.image_size {image_size} is not a "
+            f"mmproj {source}: clip.vision.image_size {image_size} is not a "
             f"multiple of clip.vision.patch_size {patch}"
         )
     mean = [float(x) for x in c("vision.image_mean")]
     std = [float(x) for x in c("vision.image_std")]
     if len(mean) != 3 or len(std) != 3:
         raise ValueError(
-            f"mmproj {mmproj_path}: clip.vision.image_mean/std must carry one entry "
+            f"mmproj {source}: clip.vision.image_mean/std must carry one entry "
             f"per RGB channel, got {len(mean)}/{len(std)}"
         )
     temporal = _MMPROJ_PINNED["temporal_patch_size"]
     slices = [
         n
-        for n, _ in ((t.name, t) for t in _reader(mmproj_path).tensors)
+        for n in shapes
         if n == "v.patch_embd.weight" or n.startswith("v.patch_embd.weight.")
     ]
     if slices and len(slices) != temporal:
         raise ValueError(
-            f"mmproj {mmproj_path}: {len(slices)} v.patch_embd.weight slices != "
+            f"mmproj {source}: {len(slices)} v.patch_embd.weight slices != "
             f"temporal_patch_size {temporal}"
         )
     return {
@@ -299,6 +286,28 @@ def parse_mmproj_image_processor_config(mmproj_path: str) -> dict:
         "image_std": std,
         **_IMAGE_PROCESSOR_PINNED,
     }
+
+
+def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
+    """VisionConfig from a clip-architecture mmproj GGUF file (the --mmproj boot path)."""
+    from freetoken.models.gguf.reader import _reader, load_gguf_metadata
+
+    return vision_config_from_tower_metadata(
+        load_gguf_metadata(mmproj_path),
+        {t.name: tuple(reversed([int(d) for d in t.shape])) for t in _reader(mmproj_path).tensors},
+        source=mmproj_path,
+    )
+
+
+def parse_mmproj_image_processor_config(mmproj_path: str) -> dict:
+    """Image-processor kwargs from a clip-architecture mmproj GGUF file."""
+    from freetoken.models.gguf.reader import _reader, load_gguf_metadata
+
+    return image_processor_config_from_tower_metadata(
+        load_gguf_metadata(mmproj_path),
+        {t.name: tuple(reversed([int(d) for d in t.shape])) for t in _reader(mmproj_path).tensors},
+        source=mmproj_path,
+    )
 
 
 # mmproj block tensors -> the tail of the visual.blocks.N.<rel> param (everything
