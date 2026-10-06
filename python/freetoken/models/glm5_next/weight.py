@@ -238,8 +238,26 @@ def iter_weights(
         reader.close()
 
 
-def iter_vision_weights(model_path: str, device: torch.device) -> Iterator[tuple[str, torch.Tensor]]:
-    """The vision tower alone, named as iter_weights names it."""
+def iter_vision_weights(
+    model_path: str, device: torch.device, *, mmproj_path: str | None = None
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """The vision tower alone, named as iter_weights names it.
+
+    Format dispatcher: a GGUF checkpoint with an --mmproj file reads the tower from
+    that file, everything else takes the HF safetensors reader. load_vision_weight
+    calls this with (model_path, device) only; the mmproj path travels from the
+    engine config once the GGUF reader lands (phase 2 wires the call site).
+    """
+    from freetoken.models.gguf.reader import gguf_config_source
+
+    if mmproj_path is not None and gguf_config_source(model_path) is None:
+        raise ValueError(
+            f"--mmproj applies to a raw .gguf checkpoint; {model_path} is not a GGUF path"
+        )
+    if mmproj_path is not None:
+        # TODO(phase 2): implement the mmproj tensor reader here (tensor mapping in
+        # kb/cases/gguf-glm5next-vision/TASK.md); this stub must be gone by then.
+        raise NotImplementedError("glm5next GGUF vision reader lands in phase 2")
     folder = download_hf_weight(model_path)
     with open(os.path.join(folder, "model.safetensors.index.json")) as f:
         weight_map = json.load(f)["weight_map"]

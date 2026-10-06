@@ -70,3 +70,15 @@ def test_linear_state_cache_ratio_rejects_non_positive():
         )
         with pytest.raises(ValueError, match="linear_state_cache_ratio must be > 0"):
             _adjust_config(config)
+
+
+def test_mmproj_default_is_none_and_no_flag_keeps_field_unset():
+    assert _parse([]).mmproj_path is None
+
+
+def test_mmproj_flag_lands_on_engine_field(tmp_path):
+    # validation (exists + arch clip) is deferred to the config-shim build
+    # (build_gguf_shim), so argparse accepts a not-yet-existing path untouched
+    assert _parse(["--mmproj", str(tmp_path / "absent.gguf")]).mmproj_path == str(
+        tmp_path / "absent.gguf"
+    )

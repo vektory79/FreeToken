@@ -246,7 +246,9 @@ def _with_overrides(config: Any, data: dict, overrides: Mapping[str, Any]) -> di
 
 
 def cached_load_hf_config(
-    model_path: str, overrides: Mapping[str, Any] | None = None
+    model_path: str,
+    overrides: Mapping[str, Any] | None = None,
+    mmproj_path: str | None = None,
 ) -> PretrainedConfig:
     """A fresh copy of the checkpoint's config with ``overrides`` applied as vLLM's --hf-overrides
     does: nested config sections update key by key, every other value is replaced whole."""
@@ -260,7 +262,13 @@ def cached_load_hf_config(
             raise ValueError("--hf-overrides applies to a HF config.json; a GGUF carries its own metadata")
         from freetoken.models.gguf.config import build_gguf_shim
 
-        return build_gguf_shim(gguf_src)
+        return build_gguf_shim(gguf_src, mmproj_path=mmproj_path)
+    if mmproj_path is not None:
+        # fail fast here rather than deep in the model build: --mmproj has no meaning
+        # for an HF checkpoint dir, which packs the tower into its own weight files
+        raise ValueError(
+            f"--mmproj applies to a raw .gguf checkpoint; {model_path} is not a GGUF path"
+        )
     config = _load_hf_config(model_path)
     data = config.to_dict()
     if overrides:

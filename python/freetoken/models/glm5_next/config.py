@@ -59,6 +59,10 @@ def parse_vision_config(hf_config: Any) -> VisionConfig | None:
     vc = getattr(hf_config, "vision_config", None)
     if vc is None:
         return None
+    if isinstance(vc, VisionConfig):
+        # the GGUF path builds the tower config straight from the mmproj metadata
+        # (parse_mmproj_vision_config); there is no HF vision section to re-map
+        return vc
     if vc.hidden_act != "silu":
         raise NotImplementedError(f"glm5_next vision tower activation {vc.hidden_act!r}; only silu is implemented")
     return VisionConfig(

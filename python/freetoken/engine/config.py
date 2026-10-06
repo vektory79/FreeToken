@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, replace, FrozenInstanceError
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, List, Mapping
 
@@ -101,6 +101,10 @@ class EngineConfig:
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
     # is final. Mutually exclusive with num_page_override.
     num_token_override: int | None = None
+    # Raw-GGUF vision boot: path to a clip-architecture mmproj GGUF carrying the vision
+    # tower + projector. Unset serves a GGUF checkpoint text-only. Validated where the
+    # config shim is built (build_gguf_shim), not at argparse time.
+    mmproj_path: str | None = None
     # Runtime knobs of the multimodal path; the architecture side (vision_config, mrope) lives in ModelConfig.
     mm: MultimodalConfig = field(default_factory=MultimodalConfig)
 
@@ -115,11 +119,20 @@ class EngineConfig:
 
     @cached_property
     def hf_config(self):
-        return cached_load_hf_config(self.model_path, self.hf_overrides)
+        return cached_load_hf_config(
+            self.model_path, self.hf_overrides, mmproj_path=self.mmproj_path
+        )
 
     @cached_property
     def model_spec(self) -> ModelSpec:
-        return get_model_spec(self.hf_config.architectures[0])
+        spec = get_model_spec(self.hf_config.architectures[0])
+        if self.mmproj_path is not None and "vision" not in self.mm.disabled_encoders:
+            # phase-1 gate: the flag selects the GGUF vision spec, but the boot path
+            # cannot load the tower from the mmproj file yet (visual.* would stay on
+            # meta and image requests would fail at runtime); the phase-2 reader
+            # lifts this. --mm-disable vision keeps the text-only boot.
+            raise NotImplementedError("GGUF vision reader lands in phase 2")
+        return spec
 
     @cached_property
     def active_encoders(self) -> tuple[EncoderSpec, ...]:
@@ -142,11 +155,13 @@ class EngineConfig:
         hf_config = copy.copy(self.hf_config)
         built = {e.config_key for e in self.active_encoders}
         for key in set(ENCODER_SECTIONS) | {e.config_key for e in self.model_spec.encoders}:
-            # GGUF's frozen GgufConfigShim carries no encoder sections and raises
-            # FrozenInstanceError on any setattr; sections the config never had
-            # already read as None through getattr's default downstream.
             if key not in built and hasattr(hf_config, key):
-                setattr(hf_config, key, None)
+                try:
+                    setattr(hf_config, key, None)
+                except FrozenInstanceError:
+                    # the --mmproj GgufConfigShim carries vision_config as a real field;
+                    # rebuild the frozen shim without the section this process skips
+                    hf_config = replace(hf_config, **{key: None})
         spec = self.model_spec
         quant = checkpoint_quant_config(self.model_path, hf_config, spec)
         set_quant_config(quant)

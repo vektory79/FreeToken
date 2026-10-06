@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
     from freetoken.models.gguf.config import GgufConfigShim
     from freetoken.models.gguf.reader import GgufTensor
+    from freetoken.models.glm5_next.config import VisionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,146 @@ def _scalar(val, key: str):
             )
         return val[0]
     return val
+
+
+# GLM-5.3-Flash vision reference (the NVFP4 checkpoint's vision_config): every field
+# the mmproj metadata does not carry is pinned to these values, and a mismatch with
+# the file fails fast instead of silently mis-serving the tower.
+_MMPROJ_PINNED = {
+    "depth": 24,
+    "hidden_size": 1024,
+    "num_heads": 16,
+    "intermediate_size": 4096,
+    "out_hidden_size": 4096,
+    "patch_size": 14,
+    "spatial_merge_size": 2,
+    "rms_norm_eps": 1e-5,
+    "swiglu_limit": 10.0,
+    "temporal_patch_size": 2,
+    "in_channels": 3,
+    "projection_intermediate_size": 10240,
+    "attention_bias": True,
+}
+
+
+def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
+    """VisionConfig for the glm5next tower from a clip-architecture mmproj GGUF.
+
+    Nine fields map from clip.* metadata; the four the metadata does not carry
+    (temporal_patch_size, in_channels, projection_intermediate_size, attention_bias)
+    come from the pinned GLM-5.3-Flash reference and are verified against tensor
+    shapes whenever the mmproj tensor table exposes them.
+    """
+    from freetoken.models.gguf.reader import _reader, load_gguf_metadata
+    from freetoken.models.glm5_next.config import VisionConfig
+
+    m = load_gguf_metadata(mmproj_path)
+
+    def c(key: str):
+        val = m.get(f"clip.{key}")
+        if val is None:
+            raise ValueError(f"mmproj {mmproj_path}: missing required metadata key clip.{key}")
+        return val
+
+    if not m.get("clip.has_vision_encoder"):
+        raise ValueError(
+            f"mmproj {mmproj_path}: clip.has_vision_encoder is not True; the file does "
+            "not carry a vision tower"
+        )
+    projector = c("projector_type")
+    if str(projector) != "glm5next":
+        raise ValueError(
+            f"mmproj {mmproj_path}: clip.projector_type {projector!r} != 'glm5next'; "
+            "FreeToken implements only the glm5next projector"
+        )
+
+    def pinned_int(key: str, field: str) -> int:
+        val = int(c(key))
+        expected = _MMPROJ_PINNED[field]
+        if val != expected:
+            raise ValueError(
+                f"mmproj {mmproj_path}: clip.{key} {val} != the GLM-5.3-Flash vision "
+                f"reference {expected} ({field})"
+            )
+        return val
+
+    depth = pinned_int("vision.block_count", "depth")
+    hidden = pinned_int("vision.embedding_length", "hidden_size")
+    heads = pinned_int("vision.attention.head_count", "num_heads")
+    inter = pinned_int("vision.feed_forward_length", "intermediate_size")
+    out_hidden = pinned_int("vision.projection_dim", "out_hidden_size")
+    patch = pinned_int("vision.patch_size", "patch_size")
+    merge = pinned_int("vision.spatial_merge_size", "spatial_merge_size")
+    eps = float(c("vision.attention.layer_norm_epsilon"))
+    if not math.isclose(eps, _MMPROJ_PINNED["rms_norm_eps"], rel_tol=1e-5):
+        raise ValueError(
+            f"mmproj {mmproj_path}: clip.vision.attention.layer_norm_epsilon {eps} != "
+            f"the GLM-5.3-Flash vision reference {_MMPROJ_PINNED['rms_norm_eps']}"
+        )
+    swiglu = float(c("vision.swiglu_limit"))
+    if not math.isclose(swiglu, _MMPROJ_PINNED["swiglu_limit"], rel_tol=1e-6):
+        raise ValueError(
+            f"mmproj {mmproj_path}: clip.vision.swiglu_limit {swiglu} != the "
+            f"GLM-5.3-Flash vision reference {_MMPROJ_PINNED['swiglu_limit']}"
+        )
+
+    # tensor-table cross checks: header shapes only, the weight data is never read
+    temporal = _MMPROJ_PINNED["temporal_patch_size"]
+    in_channels = _MMPROJ_PINNED["in_channels"]
+    proj_inter = _MMPROJ_PINNED["projection_intermediate_size"]
+    shapes = {
+        t.name: tuple(reversed([int(d) for d in t.shape]))
+        for t in _reader(mmproj_path).tensors
+    }
+    patch_slices = [
+        n for n in shapes if n == "v.patch_embd.weight" or n.startswith("v.patch_embd.weight.")
+    ]
+    if patch_slices:
+        # the Conv3d patch embedding ships one slice per temporal frame; the base
+        # tensor must be present, it is the slice the input channels are read from
+        if "v.patch_embd.weight" not in shapes:
+            raise ValueError(
+                f"mmproj {mmproj_path}: v.patch_embd.weight.N slices without the base "
+                "v.patch_embd.weight tensor"
+            )
+        if len(patch_slices) != temporal:
+            raise ValueError(
+                f"mmproj {mmproj_path}: {len(patch_slices)} v.patch_embd.weight slices "
+                f"!= temporal_patch_size {temporal}"
+            )
+        found_in = shapes["v.patch_embd.weight"][1]
+        if found_in != in_channels:
+            raise ValueError(
+                f"mmproj {mmproj_path}: v.patch_embd.weight has {found_in} input "
+                f"channels != the GLM-5.3-Flash vision reference {in_channels}"
+            )
+    gate = shapes.get("mm.gate.weight")
+    if gate is not None and gate[0] != proj_inter:
+        raise ValueError(
+            f"mmproj {mmproj_path}: mm.gate.weight output width {gate[0]} != the "
+            f"GLM-5.3-Flash vision reference {proj_inter} (projection_intermediate_size)"
+        )
+    if _MMPROJ_PINNED["attention_bias"] and "v.blk.0.attn_qkv.bias" not in shapes:
+        raise ValueError(
+            f"mmproj {mmproj_path}: no v.blk.*.attn_qkv.bias tensors; the GLM-5.3-Flash "
+            "vision reference is attention_bias=True"
+        )
+
+    return VisionConfig(
+        hidden_size=hidden,
+        depth=depth,
+        num_heads=heads,
+        intermediate_size=inter,
+        projection_intermediate_size=proj_inter,
+        out_hidden_size=out_hidden,
+        in_channels=in_channels,
+        patch_size=patch,
+        temporal_patch_size=temporal,
+        spatial_merge_size=merge,
+        rms_norm_eps=eps,
+        swiglu_limit=swiglu,
+        attention_bias=_MMPROJ_PINNED["attention_bias"],
+    )
 
 
 def parse_gguf_config(shim: "GgufConfigShim") -> "ModelConfig":
@@ -247,6 +388,9 @@ def parse_gguf_config(shim: "GgufConfigShim") -> "ModelConfig":
                 text_config=text,
                 architectures=list(shim.architectures),
                 model_type=shim.model_type,
+                # the --mmproj shim carries the tower config built from the mmproj
+                # metadata; text-only shims read as None through getattr's default
+                vision_config=getattr(shim, "vision_config", None),
             )
         ),
         moe_weight_format="gguf",
@@ -416,6 +560,7 @@ def iter_gguf_weights(
     *,
     include_moe_experts: bool,
     include_non_moe: bool,
+    include_vision: bool = True,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield (param_name, tensor) for every non-expert glm5next param.
 
@@ -424,6 +569,11 @@ def iter_gguf_weights(
     maps yield dense casts instead. Fused targets (in_proj, conv1d, kv_b_proj) emit
     once all their pieces are seen; anything without a map entry raises ValueError
     naming the tensor, and blk.45 (MTP/NextN) is skipped entirely.
+
+    include_vision is part of the load_weight contract now that the --mmproj spec
+    registers encoders (models/weight.py passes it whenever spec.encoders is
+    non-empty). The visual.* stream from the mmproj file lands in phase 2; until
+    then no branch of this reader opens the mmproj at all.
     """
     from freetoken.models.gguf.reader import iter_gguf_tensors
     from freetoken.utils import cached_load_hf_config

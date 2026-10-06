@@ -9,6 +9,8 @@ the raw GGUF metadata dict, and a few derived facts that need the tensor table
 
 from __future__ import annotations
 
+import importlib
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +23,19 @@ GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "glm5next": "Glm5NextGGUFForCausalLM",
 }
 
+# Registry key when an mmproj file is supplied (--mmproj): a key here opts the arch
+# into raw-gguf vision boots. Text-only dispatch stays GGUF_ARCH_TO_REGISTRY, so a
+# boot without the flag resolves the exact same spec it always did.
+GGUF_ARCH_TO_REGISTRY_VISION: dict[str, str] = {
+    "glm5next": "Glm5NextGGUFForConditionalGeneration",
+}
+
+# arch -> "module:attr" building the tower config from the mmproj metadata. Called
+# lazily: the model modules import this one, so a top-level import would cycle.
+_GGUF_VISION_CONFIG_HOOK: dict[str, str] = {
+    "glm5next": "freetoken.models.glm5_next.gguf:parse_mmproj_vision_config",
+}
+
 
 @dataclass(frozen=True)
 class GgufConfigShim:
@@ -30,6 +45,10 @@ class GgufConfigShim:
     metadata: dict[str, Any]
     vocab_size: int
     tie_word_embeddings: bool
+    # raw-gguf vision boot facts (--mmproj): the tower file path and the vision config
+    # derived from its clip.* metadata; both None serves the checkpoint text-only
+    mmproj_path: str | None = None
+    vision_config: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal HF-config-like dict for trunk code that introspects the config
@@ -59,14 +78,35 @@ def _vocab_size(model_path: str) -> int:
     raise ValueError(f"GGUF {model_path}: no token_embd.weight to size the vocab")
 
 
-def build_gguf_shim(model_path: str) -> GgufConfigShim:
+def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConfigShim:
     arch = gguf_architecture(model_path)
-    registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
-    if registry_key is None:
-        raise ValueError(
-            f"GGUF architecture {arch!r} is not supported "
-            f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)})"
-        )
+    vision_config = None
+    if mmproj_path is not None:
+        # fail fast before anything else reads the flag: a missing or non-clip file is
+        # an operator error, and the error must name the file
+        if not os.path.isfile(mmproj_path):
+            raise ValueError(f"--mmproj file not found: {mmproj_path}")
+        mmproj_arch = gguf_architecture(mmproj_path)
+        if mmproj_arch != "clip":
+            raise ValueError(
+                f"--mmproj {mmproj_path}: architecture {mmproj_arch!r} != 'clip'; "
+                "an mmproj file carries the vision tower"
+            )
+        registry_key = GGUF_ARCH_TO_REGISTRY_VISION.get(arch)
+        if registry_key is None:
+            raise ValueError(
+                f"--mmproj is only supported for {sorted(GGUF_ARCH_TO_REGISTRY_VISION)} "
+                f"GGUF checkpoints, not {arch!r}"
+            )
+        module_name, _, attr = _GGUF_VISION_CONFIG_HOOK[arch].partition(":")
+        vision_config = getattr(importlib.import_module(module_name), attr)(mmproj_path)
+    else:
+        registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
+        if registry_key is None:
+            raise ValueError(
+                f"GGUF architecture {arch!r} is not supported "
+                f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)})"
+            )
     names = gguf_tensor_names(model_path)
     metadata = load_gguf_metadata(model_path)
     if names:
@@ -91,7 +131,14 @@ def build_gguf_shim(model_path: str) -> GgufConfigShim:
         metadata=metadata,
         vocab_size=_vocab_size(model_path),
         tie_word_embeddings=tie_word_embeddings,
+        mmproj_path=mmproj_path,
+        vision_config=vision_config,
     )
 
 
-__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "build_gguf_shim"]
+__all__ = [
+    "GgufConfigShim",
+    "GGUF_ARCH_TO_REGISTRY",
+    "GGUF_ARCH_TO_REGISTRY_VISION",
+    "build_gguf_shim",
+]

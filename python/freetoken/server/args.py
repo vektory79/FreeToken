@@ -587,6 +587,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--mmproj",
+        dest="mmproj_path",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to a clip-architecture mmproj GGUF holding the vision tower + projector for a "
+        "raw .gguf checkpoint (GLM-5.3-Flash GGUF). Validated when the config shim is built. "
+        "Unset serves the GGUF checkpoint text-only.",
+    )
+
+    parser.add_argument(
         "--allowed-media-domains",
         type=str,
         default=ServerArgs.allowed_media_domains,

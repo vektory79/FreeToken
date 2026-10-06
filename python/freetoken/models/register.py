@@ -310,6 +310,17 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         parse_config="parse_gguf_config",
         iter_weights="iter_gguf_weights",
     ),
+    # GGUF glm5next + --mmproj: the multimodal sibling selected only when the operator
+    # supplies a clip-architecture mmproj file (see build_gguf_shim); the tower and
+    # projector stream from that file, everything else matches the text spec above.
+    "Glm5NextGGUFForConditionalGeneration": ModelSpec(
+        "freetoken.models.glm5_next",
+        "Glm5NextForConditionalGeneration",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+        mm_processor=_GLM5_NEXT_PROCESSOR,
+        encoders=_GLM5_NEXT_ENCODERS,
+    ),
 }
 
 

@@ -13,6 +13,8 @@ import os
 
 import warnings
 
+from typing import TYPE_CHECKING
+
 import gguf
 import numpy as np
 import pytest
@@ -21,6 +23,9 @@ import torch
 from freetoken.attention.base import AttnType
 from freetoken.models.config import FullAttentionGroupConfig, LinearGatedDeltaGroupConfig
 from freetoken.models.glm5_next.args import DSA_LAYER, KDA_LAYER
+
+if TYPE_CHECKING:
+    from freetoken.models.config import ModelConfig
 
 _NUM_LAYERS = 45  # block_count 46 - nextn_predict_layers 1: the trunk
 _DSA_IDS = tuple(range(3, _NUM_LAYERS, 4))  # 3, 7, ..., 43
@@ -257,9 +262,11 @@ def test_engine_model_config_resolves_over_the_frozen_shim(glm5next_gguf):
     )
     model_config = cfg.model_config
     assert model_config.architectures == ["Glm5NextGGUFForCausalLM"]
-    # the shim itself stays untouched: no phantom sections, metadata intact
+    # the shim itself stays untouched: the mmproj facts default to text-only, no
+    # phantom audio section, metadata intact
     shim = cfg.hf_config
-    assert not hasattr(shim, "vision_config") and not hasattr(shim, "audio_config")
+    assert shim.vision_config is None and shim.mmproj_path is None
+    assert not hasattr(shim, "audio_config")
     assert shim.vocab_size == _VOCAB and shim.tie_word_embeddings is True
     assert shim.metadata["glm5next.block_count"] == 46
 
@@ -1450,3 +1457,351 @@ def test_glm5next_gguf_tokenizer_matches_reference(tmp_path):
             stacklevel=1,
         )
     assert tok.decode(tok.encode(s)) == s  # still lossless
+
+
+# ------------------------------------------------------------------------------
+# --mmproj: clip-architecture vision file -> multimodal GGUF spec + VisionConfig
+# ------------------------------------------------------------------------------
+
+# clip.* KVs mirror the real mmproj-BF16.gguf metadata (the llama.cpp spellings);
+# the fields FreeToken's VisionConfig consumes are exactly the mapped nine.
+_CLIP_METADATA: dict = {
+    "clip.has_vision_encoder": True,
+    "clip.projector_type": "glm5next",
+    "clip.use_silu": True,
+    "clip.vision.attention.head_count": 16,
+    "clip.vision.attention.layer_norm_epsilon": 1e-05,
+    "clip.vision.block_count": 24,
+    "clip.vision.embedding_length": 1024,
+    "clip.vision.feed_forward_length": 4096,
+    "clip.vision.image_size": 448,
+    "clip.vision.patch_size": 14,
+    "clip.vision.projection_dim": 4096,
+    "clip.vision.spatial_merge_size": 2,
+    "clip.vision.swiglu_limit": 10.0,
+    "general.name": "Glm-5.3-Flash",
+    "general.type": "mmproj",
+}
+
+# Header-shape stubs: the config path reads tensor NAMES and SHAPES only, never the
+# weight data, so the derived-field checks run against tiny buffers carrying the
+# load-bearing axes (patch-embed input channels at shape[1], the temporal slice
+# count, the qkv bias presence). Contents are unused.
+_MMPROJ_TENSORS: dict = {
+    # two temporal slices of the Conv3d patch embedding (numpy shape == torch order)
+    "v.patch_embd.weight": (np.zeros((2, 3, 4, 4), dtype=np.float32), gguf.GGMLQuantizationType.F32),
+    "v.patch_embd.weight.1": (np.zeros((2, 3, 4, 4), dtype=np.float32), gguf.GGMLQuantizationType.F32),
+    # attention_bias=True fact: the tower's qkv carries a bias tensor
+    "v.blk.0.attn_qkv.bias": (np.zeros(3072, dtype=np.float32), gguf.GGMLQuantizationType.F32),
+}
+
+
+def _write_mmproj_gguf(path, *, metadata=None, tensors=None, arch="clip") -> str:
+    w = gguf.GGUFWriter(str(path), arch)
+    meta = _CLIP_METADATA if metadata is None else metadata
+    for key, val in sorted(meta.items()):
+        if isinstance(val, bool):
+            w.add_bool(key, val)
+        elif isinstance(val, list):
+            w.add_array(key, val)
+        elif isinstance(val, str):
+            w.add_string(key, val)
+        elif isinstance(val, float):
+            w.add_float32(key, val)
+        else:
+            w.add_int32(key, val)
+    entries = _MMPROJ_TENSORS if tensors is None else tensors
+    for name, (arr, qt) in entries.items():
+        w.add_tensor(name, arr, raw_dtype=qt)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
+
+
+@pytest.fixture(scope="session")
+def mmproj_gguf(tmp_path_factory) -> str:
+    return _write_mmproj_gguf(tmp_path_factory.mktemp("glm5next-mmproj") / "mmproj.gguf")
+
+
+def test_mmproj_builds_multimodal_spec_and_full_vision_config(glm5next_gguf, mmproj_gguf):
+    from freetoken.models.gguf.config import build_gguf_shim
+    from freetoken.utils import cached_load_hf_config
+
+    shim = build_gguf_shim(glm5next_gguf, mmproj_path=mmproj_gguf)
+    assert shim.architectures == ["Glm5NextGGUFForConditionalGeneration"]
+    assert shim.mmproj_path == mmproj_gguf
+    assert shim.vision_config is not None
+    # the flag travels through the same entry point the engine uses
+    assert cached_load_hf_config(
+        glm5next_gguf, mmproj_path=mmproj_gguf
+    ).architectures == ["Glm5NextGGUFForConditionalGeneration"]
+
+    cfg = _parse_shim(shim)
+    vc = cfg.vision_config
+    # all 13 fields, values pinned to the NVFP4 reference vision_config
+    assert (vc.depth, vc.hidden_size, vc.num_heads) == (24, 1024, 16)
+    assert (vc.intermediate_size, vc.out_hidden_size) == (4096, 4096)
+    assert (vc.patch_size, vc.spatial_merge_size) == (14, 2)
+    assert (vc.temporal_patch_size, vc.in_channels) == (2, 3)
+    assert vc.projection_intermediate_size == 10240
+    assert vc.rms_norm_eps == pytest.approx(1e-5, rel=1e-5)
+    assert vc.swiglu_limit == pytest.approx(10.0)
+    assert vc.attention_bias is True
+    assert cfg.is_multimodal
+
+
+def _parse_shim(shim) -> "ModelConfig":
+    from freetoken.models.glm5_next.gguf import parse_gguf_config
+
+    return parse_gguf_config(shim)
+
+
+def test_gguf_without_mmproj_registry_and_config_unchanged(glm5next_gguf):
+    """No flag: the text-only spec, shim fields and config are byte-identical to the pre-mmproj path."""
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    shim = build_gguf_shim(glm5next_gguf)
+    assert shim.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert shim.mmproj_path is None
+    assert shim.vision_config is None
+    cfg = _parse(glm5next_gguf)
+    assert cfg.vision_config is None
+    assert not cfg.is_multimodal
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("clip.vision.block_count", 12),
+        ("clip.vision.embedding_length", 768),
+        ("clip.vision.attention.head_count", 8),
+        ("clip.vision.feed_forward_length", 2048),
+        ("clip.vision.projection_dim", 2048),
+        ("clip.vision.patch_size", 16),
+        ("clip.vision.spatial_merge_size", 1),
+        ("clip.vision.swiglu_limit", 7.0),
+    ],
+)
+def test_mmproj_pinned_reference_mismatch_fails_fast(glm5next_gguf, tmp_path, field, value):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    meta = dict(_CLIP_METADATA, **{field: value})
+    p = _write_mmproj_gguf(tmp_path / "pinned.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="reference"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+def test_mmproj_missing_file_fails_fast(glm5next_gguf, tmp_path):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    with pytest.raises(ValueError, match="not found"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=str(tmp_path / "absent.gguf"))
+
+
+def test_mmproj_non_clip_arch_fails_fast(glm5next_gguf, tmp_path):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    p = _write_mmproj_gguf(tmp_path / "wrong.gguf", arch="glm5next")
+    with pytest.raises(ValueError, match="'clip'"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+def test_mmproj_missing_clip_key_fails_fast(glm5next_gguf, tmp_path):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    meta = {k: v for k, v in _CLIP_METADATA.items() if k != "clip.vision.block_count"}
+    p = _write_mmproj_gguf(tmp_path / "incomplete.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="clip.vision.block_count"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+def test_mmproj_derived_field_gate_shape_mismatch_fails_fast(glm5next_gguf, tmp_path):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    # mm.gate.weight at a wrong output width: the pinned projection_intermediate_size
+    # check reads the tensor header shape even though the metadata never carries it
+    tensors = dict(_MMPROJ_TENSORS)
+    tensors["mm.gate.weight"] = (np.zeros((16, 8), dtype=np.float16), gguf.GGMLQuantizationType.F16)
+    p = _write_mmproj_gguf(tmp_path / "gate.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="projection_intermediate_size"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+def test_mmproj_temporal_slice_count_mismatch_fails_fast(glm5next_gguf, tmp_path):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    # a single patch-embed slice: temporal_patch_size is pinned to 2 (two Conv3d slices)
+    tensors = {
+        "v.patch_embd.weight": (np.zeros((2, 3, 4, 4), dtype=np.float32), gguf.GGMLQuantizationType.F32),
+        "v.blk.0.attn_qkv.bias": (np.zeros(3072, dtype=np.float32), gguf.GGMLQuantizationType.F32),
+    }
+    p = _write_mmproj_gguf(tmp_path / "temporal.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="temporal_patch_size"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+def test_mmproj_missing_qkv_bias_fails_fast(glm5next_gguf, tmp_path):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    tensors = {
+        k: v for k, v in _MMPROJ_TENSORS.items() if k != "v.blk.0.attn_qkv.bias"
+    }
+    p = _write_mmproj_gguf(tmp_path / "nobias.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="attention_bias"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("clip.has_vision_encoder", False, "has_vision_encoder"),
+        ("clip.projector_type", "glm4v", "projector_type"),
+    ],
+)
+def test_mmproj_tower_facts_mismatch_fails_fast(glm5next_gguf, tmp_path, field, value, match):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    meta = dict(_CLIP_METADATA, **{field: value})
+    p = _write_mmproj_gguf(tmp_path / "facts.gguf", metadata=meta)
+    with pytest.raises(ValueError, match=match):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+@pytest.mark.parametrize("field", ["clip.has_vision_encoder", "clip.projector_type"])
+def test_mmproj_missing_tower_fact_fails_fast(glm5next_gguf, tmp_path, field):
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    meta = {k: v for k, v in _CLIP_METADATA.items() if k != field}
+    p = _write_mmproj_gguf(tmp_path / "nofact.gguf", metadata=meta)
+    with pytest.raises(ValueError, match=field.split(".")[1]):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+def test_mmproj_patch_slices_without_base_tensor_fails_fast(glm5next_gguf, tmp_path):
+    """Slices .N present but the base v.patch_embd.weight absent: a named error, not a KeyError."""
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    tensors = {
+        "v.patch_embd.weight.1": (np.zeros((2, 3, 4, 4), dtype=np.float32), gguf.GGMLQuantizationType.F32),
+        "v.blk.0.attn_qkv.bias": (np.zeros(3072, dtype=np.float32), gguf.GGMLQuantizationType.F32),
+    }
+    p = _write_mmproj_gguf(tmp_path / "noslice.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="base"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
+def test_engine_config_mmproj_boot_fails_fast_until_phase2(glm5next_gguf, mmproj_gguf):
+    """MAJOR-1 gate: an mmproj boot builds the tower on meta tensors (the phase-2 reader
+    is not wired into the boot path), so spec resolution fails fast instead of serving a
+    half-working server. --mm-disable vision keeps the text-only boot (see below)."""
+    from freetoken.distributed import DistributedInfo
+    from freetoken.engine.config import EngineConfig
+
+    cfg = EngineConfig(
+        model_path=glm5next_gguf,
+        tp_info=DistributedInfo(0, 1),
+        dtype=torch.bfloat16,
+        mmproj_path=mmproj_gguf,
+    )
+    assert cfg.hf_config.architectures == ["Glm5NextGGUFForConditionalGeneration"]
+    with pytest.raises(NotImplementedError, match="phase 2"):
+        cfg.model_spec
+
+
+def test_engine_config_threads_mmproj_into_hf_config(glm5next_gguf, mmproj_gguf):
+    from freetoken.distributed import DistributedInfo
+    from freetoken.engine.config import EngineConfig
+    from freetoken.models.register import get_model_spec
+
+    cfg = EngineConfig(
+        model_path=glm5next_gguf,
+        tp_info=DistributedInfo(0, 1),
+        dtype=torch.bfloat16,
+        mmproj_path=mmproj_gguf,
+    )
+    assert cfg.hf_config.architectures == ["Glm5NextGGUFForConditionalGeneration"]
+    assert get_model_spec("Glm5NextGGUFForConditionalGeneration").encoders
+
+
+def test_engine_config_disabled_vision_drops_mmproj_section(glm5next_gguf, mmproj_gguf):
+    """--mm-disable vision on an mmproj boot: the frozen shim's vision_config section is
+    dropped (dataclasses.replace), so the config serves text-only."""
+    from freetoken.distributed import DistributedInfo
+    from freetoken.engine.config import EngineConfig
+    from freetoken.mm.config import MultimodalConfig
+
+    cfg = EngineConfig(
+        model_path=glm5next_gguf,
+        tp_info=DistributedInfo(0, 1),
+        dtype=torch.bfloat16,
+        mmproj_path=mmproj_gguf,
+        mm=MultimodalConfig(disabled_encoders=frozenset({"vision"})),
+    )
+    assert cfg.active_encoders == ()
+    assert cfg.model_config.vision_config is None
+
+
+def test_iter_gguf_weights_include_vision_contract(glm5next_iter_gguf, mmproj_gguf, monkeypatch):
+    """load_weight passes include_vision once spec.encoders is non-empty (weight.py);
+    the reader must accept it, and include_vision=False must never open the mmproj."""
+    import inspect
+
+    import freetoken.models.gguf.reader as reader_mod
+    from freetoken.models.glm5_next import iter_gguf_weights
+    from freetoken.models.register import _load_attr, get_model_spec
+
+    spec = get_model_spec("Glm5NextGGUFForConditionalGeneration")
+    assert spec.encoders
+    assert "include_vision" in inspect.signature(iter_gguf_weights).parameters
+
+    # spy on the raw gguf reader (every metadata/tensor access funnels through it)
+    real_reader = reader_mod._reader.__wrapped__
+    opened: list[str] = []
+
+    def spy_reader(path):
+        opened.append(str(path))
+        return real_reader(path)
+
+    monkeypatch.setattr(reader_mod, "_reader", spy_reader)
+
+    reader = _load_attr(spec.module, spec.iter_weights)
+    out = dict(
+        reader(
+            glm5next_iter_gguf,
+            None,
+            include_moe_experts=False,
+            include_non_moe=True,
+            include_vision=False,
+        )
+    )
+    assert out and not any(name.startswith("visual.") for name in out)
+    assert mmproj_gguf not in opened  # the mmproj file was never even mmap'd
+
+
+def test_iter_vision_weights_gguf_mmproj_stub(glm5next_gguf, mmproj_gguf):
+    from freetoken.models.glm5_next import iter_vision_weights
+
+    with pytest.raises(NotImplementedError, match="phase 2"):
+        list(iter_vision_weights(glm5next_gguf, None, mmproj_path=mmproj_gguf))
+
+
+def test_iter_vision_weights_mmproj_requires_gguf(tmp_path):
+    from freetoken.models.glm5_next import iter_vision_weights
+
+    with pytest.raises(ValueError, match="raw .gguf"):
+        list(iter_vision_weights(str(tmp_path), None, mmproj_path="mmproj.gguf"))
+
+
+def test_iter_vision_weights_without_mmproj_keeps_hf_reader(glm5next_gguf, monkeypatch):
+    """No mmproj: the dispatcher falls through to the HF safetensors reader exactly as before."""
+    import freetoken.models.glm5_next.weight as weight_mod
+    from freetoken.models.glm5_next import iter_vision_weights
+
+    def _hf_reader(path):
+        raise RuntimeError("HF reader reached")
+
+    monkeypatch.setattr(weight_mod, "download_hf_weight", _hf_reader)
+    with pytest.raises(RuntimeError, match="HF reader"):
+        list(iter_vision_weights(glm5next_gguf, None))
