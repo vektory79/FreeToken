@@ -713,6 +713,7 @@ class Engine:
                 self.device,
                 include_moe_experts=not getattr(config.model_config, "is_moe", False),
                 include_vision=bool(config.active_encoders),
+                mmproj_path=config.mmproj_path,
             ),
             device=self.device,
         )

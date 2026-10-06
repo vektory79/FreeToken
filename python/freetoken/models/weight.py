@@ -191,8 +191,10 @@ def experts_scattered(model_path: str) -> bool:
         return False
 
 
-def _spec_for_model_path(model_path: str):
-    hf_config = cached_load_hf_config(model_path)
+def _spec_for_model_path(model_path: str, *, mmproj_path: str | None = None):
+    # the mmproj fact selects the GGUF vision spec exactly like at boot config build;
+    # without it a raw .gguf resolves to the text-only spec and never loads a tower
+    hf_config = cached_load_hf_config(model_path, mmproj_path=mmproj_path)
     spec = get_model_spec(hf_config.architectures[0])
     parse_config = _load_attr(spec.module, spec.parse_config)
     return parse_config(hf_config), spec
@@ -212,6 +214,7 @@ def load_weight(
     *,
     include_moe_experts: bool = True,
     include_vision: bool = True,
+    mmproj_path: str | None = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     # FTW checkpoint: dense weights are stored post-iter_weights, so we replay them
     # model-agnostically instead of re-running the per-model reader. Which tensors exist is
@@ -226,10 +229,14 @@ def load_weight(
     if is_ftw_checkpoint(model_path):
         weights = iter_ftw_weights(model_path, keep=keep)
     else:
-        _config, spec = _spec_for_model_path(model_path)
+        _config, spec = _spec_for_model_path(model_path, mmproj_path=mmproj_path)
         iter_weights = _load_attr(spec.module, spec.iter_weights)
         # only a family that registers an encoder is asked about the tower; the others never load one
         kwargs = {"include_vision": include_vision} if spec.encoders else {}
+        # the raw-GGUF tower streams from the operator-supplied mmproj file; a HF boot
+        # never carries one (cached_load_hf_config rejects the flag on a HF config path)
+        if mmproj_path is not None:
+            kwargs["mmproj_path"] = mmproj_path
         weights = iter_weights(
             model_path,
             device,
@@ -243,13 +250,18 @@ def load_weight(
         yield name, tensor
 
 
-def load_vision_weight(model_path: str, device: torch.device) -> Iterator[Tuple[str, torch.Tensor]]:
+def load_vision_weight(
+    model_path: str, device: torch.device, *, mmproj_path: str | None = None
+) -> Iterator[Tuple[str, torch.Tensor]]:
     """The vision encoder tensors alone, named as load_weight names them, read by the family's encoder-only reader."""
-    _config, spec = _spec_for_model_path(model_path)
+    _config, spec = _spec_for_model_path(model_path, mmproj_path=mmproj_path)
     reader = _model_override(spec, "iter_vision_weights")
     if reader is None:
         raise ValueError(f"{spec.module} has no encoder-only weight reader")
-    return reader(model_path, device)
+    # only the family dispatchers that know the mmproj fact accept the kwarg; the
+    # other families' encoder-only readers keep their two-arg signature
+    kwargs = {"mmproj_path": mmproj_path} if mmproj_path is not None else {}
+    return reader(model_path, device, **kwargs)
 
 
 def ftw_lacks_vision(model_path: str) -> bool:

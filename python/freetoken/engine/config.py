@@ -125,14 +125,7 @@ class EngineConfig:
 
     @cached_property
     def model_spec(self) -> ModelSpec:
-        spec = get_model_spec(self.hf_config.architectures[0])
-        if self.mmproj_path is not None and "vision" not in self.mm.disabled_encoders:
-            # phase-1 gate: the flag selects the GGUF vision spec, but the boot path
-            # cannot load the tower from the mmproj file yet (visual.* would stay on
-            # meta and image requests would fail at runtime); the phase-2 reader
-            # lifts this. --mm-disable vision keeps the text-only boot.
-            raise NotImplementedError("GGUF vision reader lands in phase 2")
-        return spec
+        return get_model_spec(self.hf_config.architectures[0])
 
     @cached_property
     def active_encoders(self) -> tuple[EncoderSpec, ...]:

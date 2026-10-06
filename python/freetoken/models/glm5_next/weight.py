@@ -243,21 +243,29 @@ def iter_vision_weights(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """The vision tower alone, named as iter_weights names it.
 
-    Format dispatcher: a GGUF checkpoint with an --mmproj file reads the tower from
-    that file, everything else takes the HF safetensors reader. load_vision_weight
-    calls this with (model_path, device) only; the mmproj path travels from the
-    engine config once the GGUF reader lands (phase 2 wires the call site).
+    Format dispatcher: a GGUF-sourced checkpoint reads the tower from the
+    operator-supplied --mmproj file (a bare .gguf carries no vision tensors),
+    everything else takes the HF safetensors reader.
     """
     from freetoken.models.gguf.reader import gguf_config_source
 
-    if mmproj_path is not None and gguf_config_source(model_path) is None:
+    is_gguf = gguf_config_source(model_path) is not None
+    if mmproj_path is not None and not is_gguf:
         raise ValueError(
-            f"--mmproj applies to a raw .gguf checkpoint; {model_path} is not a GGUF path"
+            f"--mmproj applies to a GGUF checkpoint; {model_path} is not a GGUF path"
         )
-    if mmproj_path is not None:
-        # TODO(phase 2): implement the mmproj tensor reader here (tensor mapping in
-        # kb/cases/gguf-glm5next-vision/TASK.md); this stub must be gone by then.
-        raise NotImplementedError("glm5next GGUF vision reader lands in phase 2")
+    if is_gguf:
+        if mmproj_path is None:
+            raise ValueError(
+                f"{model_path}: a GGUF checkpoint carries no vision tensors; the tower "
+                "reads from the --mmproj file"
+            )
+        from .gguf import iter_gguf_vision_weights
+
+        # yield from, not return: this function is a generator (the HF branch below
+        # yields), so a plain return would end the stream with zero tensors
+        yield from iter_gguf_vision_weights(mmproj_path, device)
+        return
     folder = download_hf_weight(model_path)
     with open(os.path.join(folder, "model.safetensors.index.json")) as f:
         weight_map = json.load(f)["weight_map"]

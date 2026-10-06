@@ -1692,12 +1692,13 @@ def test_mmproj_patch_slices_without_base_tensor_fails_fast(glm5next_gguf, tmp_p
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-def test_engine_config_mmproj_boot_fails_fast_until_phase2(glm5next_gguf, mmproj_gguf):
-    """MAJOR-1 gate: an mmproj boot builds the tower on meta tensors (the phase-2 reader
-    is not wired into the boot path), so spec resolution fails fast instead of serving a
-    half-working server. --mm-disable vision keeps the text-only boot (see below)."""
+def test_engine_config_mmproj_spec_resolves_and_config_builds(glm5next_gguf, mmproj_gguf):
+    """Phase 2 lifted the boot gate: the mmproj boot resolves the vision spec and the
+    config path builds the multimodal ModelConfig (the tower itself streams from the
+    mmproj file through load_weight during boot)."""
     from freetoken.distributed import DistributedInfo
     from freetoken.engine.config import EngineConfig
+    from freetoken.models.register import get_model_spec
 
     cfg = EngineConfig(
         model_path=glm5next_gguf,
@@ -1706,8 +1707,10 @@ def test_engine_config_mmproj_boot_fails_fast_until_phase2(glm5next_gguf, mmproj
         mmproj_path=mmproj_gguf,
     )
     assert cfg.hf_config.architectures == ["Glm5NextGGUFForConditionalGeneration"]
-    with pytest.raises(NotImplementedError, match="phase 2"):
-        cfg.model_spec
+    assert cfg.model_spec is get_model_spec("Glm5NextGGUFForConditionalGeneration")
+    assert cfg.model_spec.encoders
+    assert cfg.model_config.is_multimodal
+    assert cfg.model_config.vision_config is not None
 
 
 def test_engine_config_threads_mmproj_into_hf_config(glm5next_gguf, mmproj_gguf):
@@ -1780,22 +1783,34 @@ def test_iter_gguf_weights_include_vision_contract(glm5next_iter_gguf, mmproj_gg
     assert mmproj_gguf not in opened  # the mmproj file was never even mmap'd
 
 
-def test_iter_vision_weights_gguf_mmproj_stub(glm5next_gguf, mmproj_gguf):
+def test_iter_vision_weights_gguf_branch_reads_mmproj(glm5next_gguf, vision_mmproj_gguf):
+    """Phase 2: the dispatcher routes a GGUF checkpoint with an mmproj file to the
+    GGUF vision reader (the phase-1 NotImplementedError stub is gone)."""
     from freetoken.models.glm5_next import iter_vision_weights
 
-    with pytest.raises(NotImplementedError, match="phase 2"):
-        list(iter_vision_weights(glm5next_gguf, None, mmproj_path=mmproj_gguf))
+    out = dict(iter_vision_weights(glm5next_gguf, None, mmproj_path=vision_mmproj_gguf))
+    assert out and all(name.startswith("visual.") for name in out)
+    assert "visual.blocks.0.attn.qkv.weight" in out
 
 
 def test_iter_vision_weights_mmproj_requires_gguf(tmp_path):
     from freetoken.models.glm5_next import iter_vision_weights
 
-    with pytest.raises(ValueError, match="raw .gguf"):
+    with pytest.raises(ValueError, match="GGUF checkpoint"):
         list(iter_vision_weights(str(tmp_path), None, mmproj_path="mmproj.gguf"))
 
 
-def test_iter_vision_weights_without_mmproj_keeps_hf_reader(glm5next_gguf, monkeypatch):
-    """No mmproj: the dispatcher falls through to the HF safetensors reader exactly as before."""
+def test_iter_vision_weights_gguf_without_mmproj_fails_fast(glm5next_gguf):
+    from freetoken.models.glm5_next import iter_vision_weights
+
+    with pytest.raises(ValueError, match="--mmproj"):
+        list(iter_vision_weights(glm5next_gguf, None))
+
+
+def test_iter_vision_weights_without_mmproj_keeps_hf_reader(tmp_path, monkeypatch):
+    """No mmproj on a HF checkpoint dir: the dispatcher falls through to the HF
+    safetensors reader exactly as before. A GGUF path instead fails fast (a bare
+    .gguf carries no tower), see test_iter_vision_weights_gguf_without_mmproj_fails_fast."""
     import freetoken.models.glm5_next.weight as weight_mod
     from freetoken.models.glm5_next import iter_vision_weights
 
@@ -1804,4 +1819,321 @@ def test_iter_vision_weights_without_mmproj_keeps_hf_reader(glm5next_gguf, monke
 
     monkeypatch.setattr(weight_mod, "download_hf_weight", _hf_reader)
     with pytest.raises(RuntimeError, match="HF reader"):
-        list(iter_vision_weights(glm5next_gguf, None))
+        list(iter_vision_weights(str(tmp_path / "hf-model"), None))
+
+
+# ------------------------------------------------------------------------------
+# iter_gguf_vision_weights: mmproj tensor mapping (phase 2)
+# ------------------------------------------------------------------------------
+
+# reader-fixture dims: hidden, ffn, out_hidden (downsample/merger width),
+# projection_intermediate (merger MLP width), patch spatial. Deliberately small
+# and NON-square across the three width signatures (hidden / ffn / merger) so a
+# transposed or axis-swapped read cannot alias (kb fixture-crafting lesson).
+_VH, _VF, _VO, _VP, _VKH, _VKW = 8, 16, 12, 20, 2, 2
+
+
+def _vision_fixture_data() -> dict[str, tuple[np.ndarray, bool]]:
+    """name -> (torch-order float32 values, stored as BF16). Weights are BF16-stored
+    exactly like the real mmproj (biases/norms/patch-embedding are F32 there); the
+    analytic values distinguish segments, axes and temporal slices."""
+    data: dict[str, tuple[np.ndarray, bool]] = {}
+
+    def add(name: str, arr: np.ndarray, bf16: bool) -> None:
+        data[name] = (arr, bf16)
+
+    # block 0, all 14 tensors: the fused qkv carries 1/2/3 per q|k|v segment on the
+    # OUTPUT axis (rows) and 10/20/30 on the bias - pins the no-transpose read
+    qkv = np.zeros((3 * _VH, _VH), dtype=np.float32)
+    qkv[:_VH] = 1.0
+    qkv[_VH : 2 * _VH] = 2.0
+    qkv[2 * _VH :] = 3.0
+    add("v.blk.0.attn_qkv.weight", qkv, True)
+    qkvb = np.zeros(3 * _VH, dtype=np.float32)
+    qkvb[:_VH] = 10.0
+    qkvb[_VH : 2 * _VH] = 20.0
+    qkvb[2 * _VH :] = 30.0
+    add("v.blk.0.attn_qkv.bias", qkvb, False)
+    add("v.blk.0.attn_out.weight", np.arange(_VH * _VH, dtype=np.float32).reshape(_VH, _VH), True)
+    add("v.blk.0.attn_out.bias", np.arange(_VH, dtype=np.float32), False)
+    add("v.blk.0.attn_q_norm.weight", np.arange(4, dtype=np.float32), False)
+    add("v.blk.0.attn_k_norm.weight", np.arange(4, dtype=np.float32) + 1, False)
+    add("v.blk.0.ln1.weight", np.arange(_VH, dtype=np.float32) + 0.5, False)
+    add("v.blk.0.ln2.weight", np.arange(_VH, dtype=np.float32) + 1.5, False)
+    add("v.blk.0.ffn_gate.weight", np.arange(_VF * _VH, dtype=np.float32).reshape(_VF, _VH), True)
+    add("v.blk.0.ffn_gate.bias", np.arange(_VF, dtype=np.float32) + 1, False)
+    add("v.blk.0.ffn_up.weight", np.arange(_VF * _VH, dtype=np.float32).reshape(_VF, _VH) + 100, True)
+    add("v.blk.0.ffn_up.bias", np.arange(_VF, dtype=np.float32) + 2, False)
+    add("v.blk.0.ffn_down.weight", np.arange(_VH * _VF, dtype=np.float32).reshape(_VH, _VF), True)
+    add("v.blk.0.ffn_down.bias", np.arange(_VH, dtype=np.float32) + 3, False)
+
+    # patch embedding: two temporal slices with distinct fillers (1.0 / 2.0)
+    add("v.patch_embd.weight", np.full((_VH, 3, _VKH, _VKW), 1.0, dtype=np.float32), False)
+    add("v.patch_embd.weight.1", np.full((_VH, 3, _VKH, _VKW), 2.0, dtype=np.float32), False)
+    add("v.patch_embd.bias", np.arange(_VH, dtype=np.float32) + 4, False)
+    add("v.post_ln.weight", np.arange(_VH, dtype=np.float32) + 5, False)
+
+    add(
+        "mm.patch_merger.weight",
+        np.arange(_VO * _VH * _VKH * _VKW, dtype=np.float32).reshape(_VO, _VH, _VKH, _VKW),
+        False,
+    )
+    add("mm.patch_merger.bias", np.arange(_VO, dtype=np.float32) + 6, False)
+    add("mm.model.fc.weight", np.arange(_VO * _VO, dtype=np.float32).reshape(_VO, _VO), True)
+    add("mm.gate.weight", np.arange(_VP * _VO, dtype=np.float32).reshape(_VP, _VO), True)
+    add("mm.up.weight", np.arange(_VP * _VO, dtype=np.float32).reshape(_VP, _VO) + 50, True)
+    add("mm.down.weight", np.arange(_VO * _VP, dtype=np.float32).reshape(_VO, _VP), True)
+    add("mm.post_norm.weight", np.arange(_VO, dtype=np.float32) + 7, False)
+    add("mm.post_norm.bias", np.arange(_VO, dtype=np.float32) + 8, False)
+    return data
+
+
+def _bf16_raw(arr: np.ndarray) -> np.ndarray:
+    """torch-order float32 values -> flat uint8 bf16 bytes in ggml ne0-fastest order
+    (a C-flatten of the torch-order array already runs ne0 fastest). Truncation to
+    bf16 is exact only for values < 256 (bf16 carries 8 mantissa bits); every value
+    an assert compares numerically sits below that bound, while the >=256 aranges
+    (patch merger, full-fixture merger MLP) are asserted by name/shape only - the
+    numeric cross-check in scripts/verify_mmproj_tensors.py compares bf16 on both
+    sides, so the rounding cancels."""
+    u32 = np.ascontiguousarray(arr, dtype=np.float32).view(np.uint32)
+    bf = (u32 >> 16).astype("<u2")
+    return np.ascontiguousarray(bf.reshape(-1)).view(np.uint8)
+
+
+def _write_vision_mmproj(path, *, metadata=None, tensors=None) -> str:
+    """Full one-block mmproj with analytic values; block_count 1 matches the single block."""
+    w = gguf.GGUFWriter(str(path), "clip")
+    meta = dict(_CLIP_METADATA, **{"clip.vision.block_count": 1}) if metadata is None else metadata
+    for key, val in sorted(meta.items()):
+        if isinstance(val, bool):
+            w.add_bool(key, val)
+        elif isinstance(val, list):
+            w.add_array(key, val)
+        elif isinstance(val, str):
+            w.add_string(key, val)
+        elif isinstance(val, float):
+            w.add_float32(key, val)
+        else:
+            w.add_int32(key, val)
+    for name, (arr, bf16) in (tensors if tensors is not None else _vision_fixture_data()).items():
+        if bf16:
+            # gguf-py takes a torch-order shape and writes the dims reversed; with a
+            # uint8 payload the last dim is a BYTE count, divided by the type size
+            # before the reversal, so it must carry the input width * 2 bytes
+            byte_shape = arr.shape[:-1] + (arr.shape[-1] * 2,)
+            w.add_tensor(name, _bf16_raw(arr), raw_shape=byte_shape, raw_dtype=gguf.GGMLQuantizationType.BF16)
+        else:
+            w.add_tensor(name, arr)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
+
+
+@pytest.fixture(scope="session")
+def vision_mmproj_gguf(tmp_path_factory) -> str:
+    return _write_vision_mmproj(tmp_path_factory.mktemp("glm5next-vision") / "mmproj-vision.gguf")
+
+
+def _full_vision_fixture_data() -> dict[str, tuple[np.ndarray, bool]]:
+    """The tiny analytic tower replicated across all 24 pinned blocks, with the merger
+    MLP widened to the pinned projection_intermediate_size: the only mmproj that both
+    the config parser (pinned metadata + gate-width cross-check) and the reader
+    (every block present) accept, so the load_weight boot path can consume it."""
+    data: dict[str, tuple[np.ndarray, bool]] = {}
+    for layer in range(_MMPROJ_PINNED_DEPTH := 24):
+        for name, spec in _vision_fixture_data().items():
+            if name.startswith("v.blk."):
+                data[name.replace("v.blk.0.", f"v.blk.{layer}.")] = spec
+    for name, spec in _vision_fixture_data().items():
+        if not name.startswith("v.blk."):
+            data[name] = spec
+    proj_inter = 10240
+    data["mm.gate.weight"] = (np.arange(proj_inter * _VO, dtype=np.float32).reshape(proj_inter, _VO), True)
+    data["mm.up.weight"] = (np.arange(proj_inter * _VO, dtype=np.float32).reshape(proj_inter, _VO) + 50, True)
+    data["mm.down.weight"] = (np.arange(_VO * proj_inter, dtype=np.float32).reshape(_VO, proj_inter), True)
+    return data
+
+
+@pytest.fixture(scope="session")
+def full_vision_mmproj_gguf(tmp_path_factory) -> str:
+    return _write_vision_mmproj(
+        tmp_path_factory.mktemp("glm5next-vision-full") / "mmproj-vision-full.gguf",
+        metadata=dict(_CLIP_METADATA),
+        tensors=_full_vision_fixture_data(),
+    )
+
+
+def _vision_params(mmproj) -> dict:
+    from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
+
+    return dict(iter_gguf_vision_weights(mmproj))
+
+
+def test_gguf_vision_reader_full_name_map(vision_mmproj_gguf):
+    from freetoken.models.glm5_next.gguf import _VISION_BLOCK_MAP
+
+    out = _vision_params(vision_mmproj_gguf)
+    expected = {
+        "visual.patch_embed.proj.weight",
+        "visual.patch_embed.proj.bias",
+        "visual.post_layernorm.weight",
+        "visual.downsample.weight",
+        "visual.downsample.bias",
+        "visual.merger.proj.weight",
+        "visual.merger.post_projection_norm.weight",
+        "visual.merger.post_projection_norm.bias",
+        "visual.merger.gate_proj.weight",
+        "visual.merger.up_proj.weight",
+        "visual.merger.down_proj.weight",
+    }
+    expected |= {f"visual.blocks.0.{sfx}" for sfx in _VISION_BLOCK_MAP.values()}
+    assert set(out) == expected
+    assert len(out) == 25  # 14 block tensors + 11 tower-level params
+    assert all(t.dtype == torch.bfloat16 for t in out.values())
+
+
+def test_gguf_vision_reader_axis_orders_and_temporal_stack(vision_mmproj_gguf):
+    out = _vision_params(vision_mmproj_gguf)
+    # every linear lands (out, in) with the three width signatures distinguishable
+    assert out["visual.blocks.0.mlp.gate_proj.weight"].shape == (_VF, _VH)
+    assert out["visual.blocks.0.mlp.down_proj.weight"].shape == (_VH, _VF)
+    assert out["visual.merger.gate_proj.weight"].shape == (_VP, _VO)
+    assert out["visual.merger.down_proj.weight"].shape == (_VO, _VP)
+    # Conv2d downsample keeps (out, in, kh, kw)
+    assert out["visual.downsample.weight"].shape == (_VO, _VH, _VKH, _VKW)
+    # Conv3d patch embedding: the temporal axis is STACKED IN at dim 2, not cat-stretched
+    w = out["visual.patch_embed.proj.weight"]
+    assert w.shape == (_VH, 3, 2, _VKH, _VKW)
+    assert (w[:, :, 0] == 1.0).all() and (w[:, :, 1] == 2.0).all()
+    # the brief's mm.post_norm candidate was wrong: the wide biasful LayerNorm
+    # is the merger's post_projection_norm; the tower RMSNorm comes from v.post_ln
+    assert out["visual.merger.post_projection_norm.weight"].shape == (_VO,)
+    assert out["visual.merger.post_projection_norm.bias"].shape == (_VO,)
+    assert out["visual.post_layernorm.weight"].shape == (_VH,)
+
+
+def test_gguf_vision_reader_qkv_row_order(vision_mmproj_gguf):
+    """llama.cpp stores attn_qkv with q|k|v on the output axis; the reader must not
+    transpose: vision.py unbinds (S, 3, H*D) over dim 1 == row-major q|k|v."""
+    out = _vision_params(vision_mmproj_gguf)
+    w = out["visual.blocks.0.attn.qkv.weight"].float()
+    assert (w[:_VH] == 1.0).all() and (w[_VH : 2 * _VH] == 2.0).all() and (w[2 * _VH :] == 3.0).all()
+    b = out["visual.blocks.0.attn.qkv.bias"].float()
+    assert (b[:_VH] == 10.0).all() and (b[_VH : 2 * _VH] == 20.0).all() and (b[2 * _VH :] == 30.0).all()
+
+
+def test_gguf_vision_reader_casts_follow_the_reference(vision_mmproj_gguf):
+    """BF16 weights keep their bf16 bits; F32 norms/biases cast to bf16 exactly like
+    the reference _iter_vision (which casts every visual.* tensor to bf16)."""
+    out = _vision_params(vision_mmproj_gguf)
+    gate = out["visual.blocks.0.mlp.gate_proj.weight"]
+    assert gate.dtype == torch.bfloat16
+    assert gate.float()[0, 0].item() == 0.0 and gate.float()[-1, -1].item() == float(_VF * _VH - 1)
+    up = out["visual.blocks.0.mlp.up_proj.weight"]
+    assert up.float()[0, 0].item() == 100.0
+    assert out["visual.blocks.0.norm1.weight"].dtype == torch.bfloat16
+
+
+def test_gguf_vision_reader_rejects_unknown_tensor(tmp_path):
+    tensors = dict(_vision_fixture_data())
+    tensors["v.blk.0.weird.weight"] = (np.ones(4, dtype=np.float32), False)
+    p = _write_vision_mmproj(tmp_path / "weird.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="unmapped mmproj tensor: v.blk.0.weird.weight"):
+        _vision_params(p)
+
+
+def test_gguf_vision_reader_requires_every_block(tmp_path):
+    meta = dict(_CLIP_METADATA, **{"clip.vision.block_count": 2})
+    p = _write_vision_mmproj(tmp_path / "gap.gguf", metadata=meta)
+    with pytest.raises(ValueError, match=r"vision blocks \[1\]"):
+        _vision_params(p)
+
+
+def test_gguf_vision_reader_requires_complete_patch_slices(tmp_path):
+    tensors = {
+        name: spec
+        for name, spec in _vision_fixture_data().items()
+        if name not in ("v.patch_embd.weight", "v.patch_embd.weight.1")
+    }
+    tensors["v.patch_embd.weight.1"] = (np.full((_VH, 3, _VKH, _VKW), 2.0, dtype=np.float32), False)
+    p = _write_vision_mmproj(tmp_path / "noslice.gguf", tensors=tensors)
+    with pytest.raises(ValueError, match="temporal frames"):
+        _vision_params(p)
+
+
+def test_iter_gguf_weights_streams_vision_after_trunk(glm5next_iter_gguf, vision_mmproj_gguf):
+    from freetoken.models.glm5_next import iter_gguf_weights
+
+    names = [
+        name
+        for name, _ in iter_gguf_weights(
+            glm5next_iter_gguf,
+            None,
+            include_moe_experts=False,
+            include_non_moe=True,
+            include_vision=True,
+            mmproj_path=vision_mmproj_gguf,
+        )
+    ]
+    assert any(name.startswith("visual.") for name in names)
+    # the stacked patch weight closes the stream: text trunk flushes its buffers first
+    assert names[-1] == "visual.patch_embed.proj.weight"
+
+
+def test_iter_gguf_weights_include_vision_requires_mmproj(glm5next_iter_gguf):
+    from freetoken.models.glm5_next import iter_gguf_weights
+
+    with pytest.raises(ValueError, match="--mmproj"):
+        list(
+            iter_gguf_weights(
+                glm5next_iter_gguf, None, include_moe_experts=False, include_non_moe=True, include_vision=True
+            )
+        )
+
+
+def test_load_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_vision_mmproj_gguf):
+    """Boot wiring: load_weight resolves the spec WITH the mmproj fact, so the vision
+    spec is selected and the tower tensors stream from the mmproj file. Needs the
+    full fixture: the boot config path runs parse_mmproj_vision_config, whose pinned
+    metadata and gate-width cross-check reject the one-block tiny tower."""
+    from freetoken.models.weight import load_weight
+
+    out = dict(
+        load_weight(
+            glm5next_iter_gguf,
+            torch.device("cpu"),
+            include_moe_experts=False,
+            include_vision=True,
+            mmproj_path=full_vision_mmproj_gguf,
+        )
+    )
+    assert any(name.startswith("visual.") for name in out)
+    assert "visual.patch_embed.proj.weight" in out
+
+
+def test_load_vision_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_vision_mmproj_gguf, monkeypatch):
+    """Encoder-only path (scripts/ftw_hotfix.py read_tower): load_vision_weight must
+    forward mmproj_path to the family reader, so the GGUF branch reaches
+    iter_gguf_vision_weights instead of dying on the dispatcher's '--mmproj' guard.
+    Needs the full fixture: the spec resolution runs the boot config path, whose
+    pinned metadata and gate-width cross-check reject the one-block tiny tower."""
+    import freetoken.models.glm5_next.gguf as gguf_mod
+    from freetoken.models.weight import load_vision_weight
+
+    seen: dict = {}
+    real_reader = gguf_mod.iter_gguf_vision_weights
+
+    def spy_reader(mmproj_path, device=None):
+        seen["mmproj_path"] = mmproj_path
+        return real_reader(mmproj_path, device)
+
+    monkeypatch.setattr(gguf_mod, "iter_gguf_vision_weights", spy_reader)
+    out = dict(
+        load_vision_weight(glm5next_iter_gguf, torch.device("cpu"), mmproj_path=full_vision_mmproj_gguf)
+    )
+    assert seen["mmproj_path"] == full_vision_mmproj_gguf
+    assert any(name.startswith("visual.") for name in out)
+    assert "visual.patch_embed.proj.weight" in out

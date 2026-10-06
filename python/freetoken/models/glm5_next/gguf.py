@@ -198,6 +198,103 @@ def parse_mmproj_vision_config(mmproj_path: str) -> "VisionConfig":
     )
 
 
+# mmproj block tensors -> the tail of the visual.blocks.N.<rel> param (everything
+# before the dot: the tensor-name suffix llama.cpp stores under v.blk.<N>.)
+_VISION_BLOCK_MAP = {
+    "attn_qkv.weight": "attn.qkv.weight",
+    "attn_qkv.bias": "attn.qkv.bias",
+    "attn_out.weight": "attn.proj.weight",
+    "attn_out.bias": "attn.proj.bias",
+    "attn_q_norm.weight": "attn.q_norm.weight",
+    "attn_k_norm.weight": "attn.k_norm.weight",
+    "ln1.weight": "norm1.weight",
+    "ln2.weight": "norm2.weight",
+    "ffn_gate.weight": "mlp.gate_proj.weight",
+    "ffn_gate.bias": "mlp.gate_proj.bias",
+    "ffn_up.weight": "mlp.up_proj.weight",
+    "ffn_up.bias": "mlp.up_proj.bias",
+    "ffn_down.weight": "mlp.down_proj.weight",
+    "ffn_down.bias": "mlp.down_proj.bias",
+}
+
+# mmproj tower-level tensors -> the full visual.* param (verified against the
+# NVFP4 reference; mm.post_norm is the merger's LayerNorm, v.post_ln the tower's
+# RMSNorm - the brief's candidate table had the two swapped)
+_VISION_MM_MAP = {
+    "mm.patch_merger.weight": "visual.downsample.weight",
+    "mm.patch_merger.bias": "visual.downsample.bias",
+    "mm.model.fc.weight": "visual.merger.proj.weight",
+    "mm.gate.weight": "visual.merger.gate_proj.weight",
+    "mm.up.weight": "visual.merger.up_proj.weight",
+    "mm.down.weight": "visual.merger.down_proj.weight",
+    "mm.post_norm.weight": "visual.merger.post_projection_norm.weight",
+    "mm.post_norm.bias": "visual.merger.post_projection_norm.bias",
+}
+
+
+def iter_gguf_vision_weights(
+    mmproj_path: str, device=None
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Yield (visual.* param, bf16 tensor) for every mmproj tower tensor.
+
+    The GGUF reader returns torch-order shapes (ggml ne reversed), so every linear
+    form lands (out, in) directly and the q|k|v fusion sits on the output axis
+    exactly as vision.py's qkv split expects. The Conv3d patch embedding ships one
+    slice per temporal frame: they stack on a new dim 2 into (out, in, kt, kh, kw).
+    Everything casts to bf16 like the reference _iter_vision. An unmapped name,
+    a missing vision block or an incomplete patch-slice set raises ValueError
+    naming the fact - no silent skips.
+    """
+    from freetoken.models.gguf.reader import iter_gguf_tensors, load_gguf_metadata
+
+    # device is accepted for reader-signature parity with the HF iter_vision_weights;
+    # the loader materializes onto the model params from these CPU tensors
+    depth = int(load_gguf_metadata(mmproj_path)["clip.vision.block_count"])
+    blocks: set[int] = set()
+    patch: dict[int, torch.Tensor] = {}
+    for t in iter_gguf_tensors(mmproj_path):
+        name = t.name
+        tensor = _cast(t, torch.bfloat16)
+        if name.startswith("v.blk."):
+            parts = name.split(".")
+            layer, suffix = int(parts[2]), ".".join(parts[3:])
+            rel = _VISION_BLOCK_MAP.get(suffix)
+            if rel is None:
+                raise ValueError(f"unmapped mmproj tensor: {name}")
+            blocks.add(layer)
+            pn = f"visual.blocks.{layer}.{rel}"
+            yield pn, _logged(pn, tensor, t)
+        elif name == "v.patch_embd.weight" or name.startswith("v.patch_embd.weight."):
+            patch[0 if name == "v.patch_embd.weight" else int(name.rsplit(".", 1)[1])] = tensor
+        elif name == "v.patch_embd.bias":
+            yield "visual.patch_embed.proj.bias", _logged("visual.patch_embed.proj.bias", tensor, t)
+        elif name == "v.post_ln.weight":
+            yield "visual.post_layernorm.weight", _logged("visual.post_layernorm.weight", tensor, t)
+        else:
+            rel = _VISION_MM_MAP.get(name)
+            if rel is None:
+                raise ValueError(f"unmapped mmproj tensor: {name}")
+            yield rel, _logged(rel, tensor, t)
+
+    missing = sorted(set(range(depth)) - blocks)
+    if missing:
+        raise ValueError(
+            f"mmproj {mmproj_path}: no tensors for vision blocks {missing} "
+            f"(clip.vision.block_count {depth})"
+        )
+    temporal = int(_MMPROJ_PINNED["temporal_patch_size"])
+    if sorted(patch) != list(range(temporal)):
+        raise ValueError(
+            f"mmproj {mmproj_path}: patch-embedding slices {sorted(patch)} != the "
+            f"temporal frames 0..{temporal - 1} (the base v.patch_embd.weight is frame 0)"
+        )
+    # stack, not cat: each slice is (out, in, kh, kw) and the temporal axis is
+    # INSERTED at dim 2 -> (out, in, kt, kh, kw); cat would stretch kh instead
+    weight = torch.stack([patch[i] for i in range(temporal)], dim=2)
+    pn = "visual.patch_embed.proj.weight"
+    yield pn, _logged(pn, weight, note="temporal stack of patch_embd slices")
+
+
 def parse_gguf_config(shim: "GgufConfigShim") -> "ModelConfig":
     from freetoken.models.glm5_next.config import parse_config
 
@@ -560,7 +657,8 @@ def iter_gguf_weights(
     *,
     include_moe_experts: bool,
     include_non_moe: bool,
-    include_vision: bool = True,
+    include_vision: bool = False,
+    mmproj_path: str | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield (param_name, tensor) for every non-expert glm5next param.
 
@@ -570,10 +668,10 @@ def iter_gguf_weights(
     once all their pieces are seen; anything without a map entry raises ValueError
     naming the tensor, and blk.45 (MTP/NextN) is skipped entirely.
 
-    include_vision is part of the load_weight contract now that the --mmproj spec
-    registers encoders (models/weight.py passes it whenever spec.encoders is
-    non-empty). The visual.* stream from the mmproj file lands in phase 2; until
-    then no branch of this reader opens the mmproj at all.
+    include_vision defaults False: a bare .gguf carries no vision tensors, and the
+    text-only spec's loader call passes no include_vision at all. load_weight passes
+    True together with the mmproj path once the family registers encoders and the
+    boot carries --mmproj; the visual.* tensors then stream after the text trunk.
     """
     from freetoken.models.gguf.reader import iter_gguf_tensors
     from freetoken.utils import cached_load_hf_config
@@ -729,6 +827,14 @@ def iter_gguf_weights(
                 f"glm5next GGUF: incomplete {buf_name} groups "
                 f"{sorted((l, sorted(s)) for l, s in buf.items())}"
             )
+
+    if include_vision:
+        if mmproj_path is None:
+            raise ValueError(
+                "glm5next GGUF: include_vision=True requires the --mmproj path; "
+                "the .gguf file itself carries no vision tensors"
+            )
+        yield from iter_gguf_vision_weights(mmproj_path)
 
 
 def iter_gguf_expert_sources(
