@@ -81,4 +81,4 @@
 - [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-4af8a5b1be10.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
 - [ft-merge-round4-closed](ft-merge-round4-closed-acbf7277ce25.md) — Round 4 aa0e71c fully CLOSED: boot-smoke PASS, GPU 103/0, F1 fixed by 9ac8830 (guard in load_ftw_banks_to_device)
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-13c8c4a0d708.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
-- [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-d675047f8a5a.md) — GGUF glm5next vision brief: ft checkpoint packs vision into FTW; flag only for raw .gguf
+- [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-1bf2a8037367.md) — mmproj GGUF vision: кейс ЗАКРЫТ (Фазы 1-5, e35577d..f67449b), 347/347 exact, HW PASS, TRAPS T68-T75
