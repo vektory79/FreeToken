@@ -245,6 +245,9 @@ concurrent microbenches both leaked and invalidated their own numbers).
 - A/B lever engagement (T76): count the lever's trigger events at the exact
   seam in EXISTING logs before writing the arm; zero engagements = void A/B -
   relocate the trigger (here: admission-adjacent) or drop the item.
+- Stale-brief reconciliation (T78): before executing a brief, reconcile every
+  load-bearing assumption against the current layer (the l2 dedup brief lost
+  5 of 13 assumptions to intervening waves; P9 compact invalidated its plan).
 
 ## 8. Commit discipline
 
@@ -268,6 +271,9 @@ concurrent microbenches both leaked and invalidated their own numbers).
   CUDA skipif (it hard-inits a CUDA context; fixture-level skip preferred).
   A conftest fixture vending a context manager returns the plain zero-arg
   function, never a pre-created instance (T77).
+- Fix completeness: a pinning/accounting invariant is closed only after a
+  caller census of the planning function pins EVERY seam, with a
+  deterministic fails-before test per seam (T79).
 - The skill files themselves (`.veai/skills/gguf-native-serving/`) are committed
   (6e673ab); further skill edits stay uncommitted until the user asks.
 
@@ -304,7 +310,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T77 + recipes D01-D10; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T79 + recipes D01-D10; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),
