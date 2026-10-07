@@ -981,7 +981,10 @@ class CacheManager:
         -- refresh the store's LRU currency at the matched path key and record the
         under-divergence boundary for the adaptive keep set. All boundary bookkeeping here is
         in TOKENS (cached_len and the victim boundary_len are token counts); page units are
-        derived only at the offer/restore seams. Sessions group by their FIRST-page
+        derived only at the offer/restore seams. The divergence recorded in st[1] is the
+        UNCAPPED owned-prefix frontier for hybrid managers - the match truncates at live
+        snapshots, but the tree may own pages past it (P2) - and cached_len itself for
+        KV-only ones. Sessions group by their FIRST-page
         chain key (a common system prefix groups coarser: documented phase-1 approximation).
         A full match (the whole stripped prompt cached) still promotes the tip."""
         if not self._tier_on:
@@ -991,7 +994,9 @@ class CacheManager:
             return
         st = self._tier_sessions.setdefault(chain[0], [0, 0, 0, None])
         if cached_len < st[0]:
-            st[1] = cached_len                      # last known divergence depth (tokens)
+            # owned frontier (P2), not the snapshot-truncated match: a mid-history rewrite
+            # truncates the hybrid match to 0 while the tree still owns the shared pages
+            st[1] = self._tier_divergence_depth(ids, cached_len)
         elif cached_len > st[0]:
             st[2], st[0] = st[0], cached_len        # the old tip becomes the newest non-tip
         if cached_len > 0:                          # a cold match only tracks the session
@@ -1006,9 +1011,25 @@ class CacheManager:
                 del self._tier_seen_ids[oldest]
                 self._tier_prefetch_drop(oldest)    # no ids left to re-evaluate: release it
 
+    def _tier_divergence_depth(self, ids, cached_len: int) -> int:
+        """The session's true divergence depth in TOKENS: the frontier of tree-owned KV along
+        the stripped prompt (one uncapped walk per divergence admission, not per chunk). A
+        KV-only manager owns KV on every matched node, so the match already is the frontier.
+        The hybrid match truncates to the deepest node with a LIVE snapshot: after a
+        mid-history rewrite that is 0 while the tree still owns the shared pages (tombstones
+        included) - recording the truncation left the under-divergence keep slot st[3]
+        permanently empty, so no stored boundary could ever sit below the rewrite point.
+        stamp=False: bookkeeping must not refresh node LRU currency (same rule as the idle
+        prefetch walk)."""
+        if not self.is_hybrid:
+            return cached_len
+        _, owned, _ = self.prefix_cache.owned_prefix(ids, stamp=False)
+        return owned
+
     def _tier_offer(self, victims) -> None:
         """Keep/drop each evicted victim against the adaptive set of its tracked session:
-        hybrid keeps {tip, the DEEPEST boundary <= divergence depth, newest non-tip}; a
+        hybrid keeps {tip, the DEEPEST snapshot-bearing boundary <= divergence depth (a
+        failed offer rolls the slot back), newest non-tip}; a
         KV-only manager keeps {tip} only - without snapshots the tip segment serves every
         shallower resume (probe matches the common chain prefix; restore depth-truncates
         its pages), while the hybrid under-divergence slot exists because a snapshot must
@@ -1023,6 +1044,7 @@ class CacheManager:
             st = self._tier_sessions.get(vp.chain_keys[0])
             if st is None:
                 continue
+            under_prev, under_commit = None, False  # rolled back if the offer fails
             if vp.boundary_len > st[0]:
                 st[2], st[0] = st[0], vp.boundary_len
             elif st[0] > vp.boundary_len > st[2]:
@@ -1030,7 +1052,12 @@ class CacheManager:
             if not self.is_hybrid:
                 if vp.boundary_len != st[0]:
                     continue                    # stale grid point: the tip already covers it
-            elif vp.boundary_len <= st[1] and (st[3] is None or vp.boundary_len >= st[3]):
+            elif (vp.boundary_len <= st[1] and vp.mamba_slot is not None
+                    and (st[3] is None or vp.boundary_len >= st[3])):
+                # snapshot bearers only: a snapshot-free victim (restore-finish adoption
+                # leaves KV-only) can never serve a hybrid restore, and committing it
+                # would block shallower bearers via the >= st[3] rule
+                under_prev, under_commit = st[3], True
                 st[3] = vp.boundary_len                     # deepest under-divergence slot
             elif vp.boundary_len == st[0] or vp.boundary_len == st[2]:
                 pass                                        # tip / newest non-tip slot
@@ -1043,8 +1070,11 @@ class CacheManager:
             ok = self.tier_store.offer(vp.path_key, len(vp.chain_keys), kv_pages, snaps)
             if ok and snaps is not None:
                 self._tier_snap_bound[vp.path_key] = len(vp.chain_keys)   # pages
-            elif not ok and vp.mamba_slot is not None:
-                self._tier_snap_bound.pop(vp.path_key, None)   # dropped offer: stale bound
+            elif not ok:
+                if under_commit:
+                    st[3] = under_prev      # rollback: a dangling slot blocks smaller bearers
+                if vp.mamba_slot is not None:
+                    self._tier_snap_bound.pop(vp.path_key, None)   # dropped offer: stale bound
             if ok:
                 # a same-prefix (re-)offer supersedes a live staging of it: the ticket is
                 # dropped unconsumed and the next idle point re-stages fresh bytes
@@ -1067,7 +1097,11 @@ class CacheManager:
         if not self._tier_on or cached_len >= len(ids):
             return None
         chain = self._chain_keys(ids)
-        hit = self.tier_store.probe(chain)
+        # Hybrid managers need the GDN snapshot AT the resume depth: the probe serves
+        # boundary-exact candidates only there (P1) - a mid-span match would be refused
+        # at the snap gate below while masking shallower servable boundaries. KV-only
+        # restores truncate mid-span pages cleanly and keep the default walk.
+        hit = self.tier_store.probe(chain, boundary_exact=self.is_hybrid)
         if hit is None:
             return None
         depth, handle = hit
@@ -1084,6 +1118,7 @@ class CacheManager:
         # snapshot always rides along (with an adopted KV-only span it is the only live
         # snapshot at depth, so a snapshot-only restore revives the boundary).
         owned_node, owned, owned_pages = self.prefix_cache.owned_prefix(ids[:depth * ps])
+        # owned_pg <= depth is guaranteed by the ids[:depth * ps] slice; fresh = depth - owned_pg
         owned_pg = owned // ps
         fresh = depth - owned_pg
         if depth == 0:
@@ -1285,7 +1320,9 @@ class CacheManager:
         chain = self._chain_keys(ids)
         if not chain:
             return
-        hit = self.tier_store.probe(chain, stamp=False)
+        # Same contract as try_restore (P1): stage what an admission can adopt, so the
+        # idle probe honors the hybrid boundary-exact restriction too.
+        hit = self.tier_store.probe(chain, stamp=False, boundary_exact=self.is_hybrid)
         if hit is None:
             return
         depth, handle = hit

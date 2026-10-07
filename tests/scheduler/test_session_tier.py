@@ -125,6 +125,54 @@ def test_content_addressing_dedup_and_probe(tmp_path):
     assert snaps == []
 
 
+def test_probe_boundary_exact_skips_mid_span_returns_deepest_boundary(tmp_path):
+    """P1 (M2c shape at HW depths 1657/1393/1328): the hybrid probe contract skips
+    mid-span matches - a segment with no live GDN snapshot at the matched depth can never
+    serve a hybrid restore (the snap gate would refuse) - and returns the DEEPEST
+    boundary-exact candidate instead (1328 over 1200). The default walk is untouched:
+    KV-only managers keep mid-span matches (restore depth-truncates the pages)."""
+    store = SessionTierStore(_cfg(ram=1 << 21))
+    keys, pages = _chain([(1, i) for i in range(1657)])
+    assert store.offer(b"path-tip", 1657, pages, _snap("tip"))
+    assert store.offer(b"path-old", 1328, pages[:1328], _snap("old"))
+    assert store.offer(b"path-shallow", 1200, pages[:1200], _snap("sh"))
+
+    request = keys[:1393] + [chain_page_key(keys[1392], (9, 9)),
+                             chain_page_key(chain_page_key(keys[1392], (9, 9)), (9, 9))]
+    # default walk unchanged: the deepest common page wins, mid-span included (KV-only)
+    mid = store.probe(request)
+    assert mid is not None and mid[0] == 1393 and mid[1].path_key == b"path-tip"
+    # hybrid walk: the 1393 match is inside the tip (its snapshot lives at 1657) -
+    # skipped; the deepest boundary-exact candidate is the 1328 segment
+    hit = store.probe(request, boundary_exact=True)
+    assert hit is not None and hit[0] == 1328 and hit[1].path_key == b"path-old"
+    got, snaps = store.restore(hit[1])
+    assert got == [data for _, data in pages[:1328]] and snaps == [_snap("old")]
+
+
+def test_probe_boundary_exact_without_candidate_misses_once_and_counts(tmp_path):
+    """P1 honesty: with ONLY mid-span matches reachable the hybrid walk reports 'no
+    candidate' - one probe_miss, no per-depth inflation - and the mid-span-only shape
+    keeps its own counter instead of pretending a servable hit. The sighting needs the
+    walk to CROSS a deeper segment mid-span at a visited boundary depth below the
+    divergence (here: the boundary-3 walk depth sees the boundary-5 segment)."""
+    store = SessionTierStore(_cfg(ram=1 << 12))
+    keys, pages = _chain([(7, i) for i in range(5)])
+    assert store.offer(b"path-deep", 5, pages, _snap("deep"))
+    x_keys, x_pages = _chain([(7, 0), (7, 1), (9, 2)])
+    assert store.offer(b"path-x", 3, x_pages)
+    request = keys[:4] + [chain_page_key(keys[3], (8, 8))]
+    assert store.probe(request, boundary_exact=True) is None
+    snap = store.snapshot()
+    assert snap["probe_miss"] == 1 and snap["probe_hit"] == 0
+    assert snap["probe_midspan_only"] == 1       # the boundary-5 seg crossed at depth 3
+    mid = store.probe(request)                   # default walk still returns the mid-span 4
+    assert mid is not None and mid[0] == 4 and mid[1].path_key == b"path-deep"
+    snap = store.snapshot()
+    assert snap["probe_miss"] == 1 and snap["probe_hit"] == 1
+    assert snap["probe_midspan_only"] == 1
+
+
 def test_restore_returns_byte_identical_pages_and_snapshots(tmp_path):
     store = SessionTierStore(_cfg())
     keys, pages = _chain([(2, 0), (2, 1), (2, 2)])
@@ -336,9 +384,12 @@ def test_sigkill_replay_after_supersede_keeps_exactly_live_set(tmp_path):
 
 def test_offers_dedup_metric_preseeded_and_in_stats_line(tmp_path):
     """offers_dedup is pre-seeded in the Counter (snapshot() copies it whole) and lands in
-    the stats_line fragment (batch log + shutdown final line via tier_stats_line)."""
+    the stats_line fragment (batch log + shutdown final line via tier_stats_line).
+    probe_midspan_only must be pre-seeded too: snapshot() copies the Counter whole, so an
+    unseeded key is missing (KeyError) until its first sighting."""
     store = SessionTierStore(_cfg(d=str(tmp_path)))
     assert store.snapshot()["offers_dedup"] == 0
+    assert store.snapshot()["probe_midspan_only"] == 0   # pre-seeded before any sighting
     assert "dedup=0" in store.stats_line()
     keys, pages = _chain([(9, 0), (9, 1)])
     assert store.offer(b"path", 2, pages)

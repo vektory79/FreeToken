@@ -2503,14 +2503,17 @@ def test_restore_telemetry_counters_ok_refused_and_stats_line():
     assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
     assert snap["restore_l1"] == 1               # attempts as before
 
-    # snap-gate refusal: probe serves a mid-span depth the offer's snapshot bound misses
+    # snap-gate refusal (the P1 safety net): the failed-re-offer bound pop (a rejected
+    # offer carrying a slot drops the stale bound) - state changed between the offer and
+    # the restore, so the boundary-exact probe serves the handle and the gate refuses
     from freetoken.kvcache.hybrid_radix_cache import VictimPath
 
     chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
-    cm._tier_sessions[chain4[0]][1] = 2          # divergence below the tip
-    cm._tier_offer([VictimPath(chain4[1], 2, tuple(chain4[:2]),
-                               torch.arange(2, dtype=torch.int32), None)])
-    mr = cm.match_req(_pend([1, 2, 9]))          # probe depth 2, snapshot bound 4
+    cm._tier_sessions[chain4[0]][1] = 4
+    cm._tier_offer([VictimPath(chain4[3], 4, tuple(chain4),
+                               torch.arange(4, dtype=torch.int32), None)])
+    cm._tier_snap_bound.pop(chain4[3])
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))    # boundary-exact depth 4, stale bound gone
     assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
     snap = cm.tier_store.snapshot()
     assert snap["restore_ok"] == 1 and snap["restore_refused"] == 1
@@ -2550,16 +2553,17 @@ def test_restore_refusal_log_line_carries_divergence_fields():
     from freetoken.kvcache.hybrid_radix_cache import VictimPath
 
     chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
-    cm._tier_sessions[chain4[0]][1] = 2
-    cm._tier_offer([VictimPath(chain4[1], 2, tuple(chain4[:2]),
-                               torch.arange(2, dtype=torch.int32), None)])
+    cm._tier_sessions[chain4[0]][1] = 4
+    cm._tier_offer([VictimPath(chain4[3], 4, tuple(chain4),
+                               torch.arange(4, dtype=torch.int32), None)])
 
     with _cache_log_capture() as cap:
-        cm.match_req(_pend([1, 2, 9]))           # snap-gate refusal: depth 2 vs bound 4
         saved = cm.free_slots
         cm.free_slots = saved[:2]
         cm.match_req(_pend([1, 2, 3, 4, 9]))     # resource refusal: depth 4, 4 pages needed
         cm.free_slots = saved
+        cm._tier_snap_bound.pop(chain4[3])       # failed-re-offer pop: state changed
+        cm.match_req(_pend([1, 2, 3, 4, 9]))     # snap-gate refusal: bound gone, depth 4
 
     assert len(cap.messages) == 2
     gate = next(m for m in cap.messages if "reason=snap_gate" in m)
@@ -2567,8 +2571,8 @@ def test_restore_refusal_log_line_carries_divergence_fields():
     for msg in (gate, res):
         assert "mgr=hybrid" in msg and "cached_tok=0" in msg and "owned_pg=0" in msg
         assert f"chain0={chain4[0][:4].hex()}" in msg
-        assert "snap_bound=4" in msg             # the demoted tip's offer-time boundary
-    assert "depth_pg=2" in gate                  # mid-span probe depth (pages)
+    assert "snap_bound=4" in res                 # the demoted tip's offer-time boundary
+    assert "depth_pg=4" in gate and "snap_bound=-" in gate   # popped bound renders absent
     assert "depth_pg=4" in res
 
 
@@ -2583,13 +2587,19 @@ def test_prefetch_adopt_refusal_deduped_at_sync_fall_through():
     _settle_tier(cm)
     assert cm._tier_prefetch[key].ticket.state == "ready"
 
+    # The failed-re-offer bound pop (a rejected offer carrying a slot drops the stale
+    # bound): state changed between the idle probe and the admission - the snap gate is
+    # the safety net, and the adopt -> sync fall-through repeats it once (deduped).
+    cm._tier_snap_bound.pop(cm._tier_prefetch[key].path_key)
+
     with _cache_log_capture() as cap:
-        mr = cm.match_req(_pend([1, 2, 9]))      # mid-span probe depth 2 vs snap bound 4
+        mr = cm.match_req(_pend([1, 2, 3, 4, 9]))   # boundary-exact depth 4 adopt
     assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
     assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
     refusals = [m for m in cap.messages if "session tier restore refused:" in m]
     assert len(refusals) == 1                    # was 2 identical lines (adopt + sync)
-    assert "reason=snap_gate" in refusals[0] and "depth_pg=2" in refusals[0]
+    assert "reason=snap_gate" in refusals[0] and "depth_pg=4" in refusals[0]
+    assert "snap_bound=-" in refusals[0]         # the popped bound renders as absent
     snap = cm.tier_store.snapshot()
     assert snap["restore_refused"] == 1          # was 2
     assert snap["restore_ok"] == 0
@@ -2597,28 +2607,37 @@ def test_prefetch_adopt_refusal_deduped_at_sync_fall_through():
 
 
 def test_restore_refusal_log_nonzero_divergence_fields():
-    """TP2: the mid-history signature the HW classifier matches - the tree owns a live
-    snapshot prefix (cached_tok > 0, owned_pg > 0) while the store's snapshot bound sits
-    deeper than the probe depth (snap_bound > depth_pg)."""
+    """TP2: the divergence-field signature the HW classifier matches - the tree owns a
+    live snapshot prefix (cached_tok > 0, owned_pg > 0) while the store's boundary-exact
+    segment refuses at the gate: the offer-time bound was popped (the failed-re-offer
+    path) so the gate sees no snapshot currency at the resume depth. (The pre-P1 shape
+    of this pin - snap_bound deeper than a mid-span probe depth - is exactly the match
+    the boundary-exact probe no longer returns.)"""
     pool, kvpool = _pool(), _FakeKVPool()
     pt = torch.zeros(4, 64, dtype=torch.int32)
     cm = _tiered_cm(pool, kvpool, pt)
-    _, _, _ = _donate_one_snapshot(cm, pool, kvpool, pt, ids=(1, 2), boundary=1, uid=0)
     _original, donated4, _req = _donate_one_snapshot(
         cm, pool, kvpool, pt, ids=(1, 2, 3, 4, 5), boundary=4, uid=1)
-    from freetoken.kvcache.hybrid_radix_cache import VictimPath
-
+    _, _, _ = _donate_one_snapshot(cm, pool, kvpool, pt, ids=(1, 2), boundary=1, uid=0)
+    # the second donation re-validated (1): the LRU mamba victim is the (1,2,3,4) tip
+    er = cm.prefix_cache.evict_mamba(1, derive_paths=True)
+    cm._tier_offer(er.victim_paths)              # store holds the bound-4 segment (snaps)
+    cm.linear_state_pool.free(er.mamba_slots)
+    cm._free(er.kv_indices)
+    # the failed-re-offer bound pop (a rejected offer carrying a slot drops the stale
+    # bound): the boundary-exact probe still serves the handle, the gate refuses
     chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
-    vp = VictimPath(chain4[-1], 4, tuple(chain4), pt[1, :4].clone(), donated4)
-    cm._tier_offer([vp])                         # store holds the deeper bound-4 segment
+    cm._tier_snap_bound.pop(chain4[3])
 
     with _cache_log_capture() as cap:
-        mr = cm.match_req(_pend([1, 2, 9]))      # probe depth 2, tree cached 1
+        mr = cm.match_req(_pend([1, 2, 3, 4, 9]))   # tree cached 1, probe boundary-exact 4
     assert mr.cuda_handle.cached_len == 1
     (line,) = [m for m in cap.messages if "session tier restore refused:" in m]
     assert "reason=snap_gate" in line and "mgr=hybrid" in line
-    assert "cached_tok=1" in line and "owned_pg=2" in line
-    assert "depth_pg=2" in line and "snap_bound=4" in line
+    # owned_pg=1: the evicted tip was a LEAF, so the cascade unlinked (1,2)/(1,2,3,4)
+    # and the tree-owned frontier is the (1) node alone - still a nonzero divergence
+    assert "cached_tok=1" in line and "owned_pg=1" in line
+    assert "depth_pg=4" in line and "snap_bound=-" in line
 
 
 def test_kvonly_restore_refusal_line_mgr_kv():
@@ -2665,6 +2684,285 @@ def test_restore_bytes_mismatch_refusal_reason_bytes(monkeypatch):
     assert "reason=bytes" in line
     assert "depth_pg=4" in line and "snap_bound=4" in line
     assert cm.tier_store.snapshot()["restore_refused"] == 1
+
+
+# ------------- P1: the hybrid probe serves boundary-exact candidates only
+
+def test_hybrid_probe_serves_boundary_exact_below_divergence_m2c():
+    """P1 fails-before (M2c, the HW shape at page granularity): the store holds the washed
+    tip (boundary 4, GDN snapshot at 4) plus an older boundary-2 segment (snapshot at 2);
+    a turn diverging at 3 used to probe-match the tip MID-SPAN at 3 and refuse at the snap
+    gate - a full re-prefill of 2 servable pages, the older boundary never reachable. The
+    hybrid probe must skip the mid-span match and serve the boundary-exact 2-segment:
+    cached_len 2, the older snapshot rides the match, restore_ok increments, no refusal."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain2 = cm._chain_keys(torch.tensor([1, 2], dtype=torch.int32))
+    chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    # st = [tip, div, spare, under] in tokens: the wash keep-set shape - the washed tip
+    # (boundary 4) and the deepest under-divergence boundary (2) both get offered
+    cm._tier_sessions[chain2[0]] = [4, 2, 0, None]
+    snap2, snap4 = pool.alloc(1)[0], pool.alloc(1)[0]
+    cm._tier_offer([
+        VictimPath(chain2[1], 2, tuple(chain2), torch.arange(2, dtype=torch.int32), snap2),
+        VictimPath(chain4[3], 4, tuple(chain4), torch.arange(4, dtype=torch.int32), snap4),
+    ])
+    pool.free(snap2)                             # payload materialized inside offer()
+    pool.free(snap4)
+    assert {seg.boundary_len for seg in cm.tier_store._segments.values()} == {2, 4}
+    assert cm._tier_snap_bound[chain2[1]] == 2 and cm._tier_snap_bound[chain4[3]] == 4
+
+    with _cache_log_capture() as cap:
+        mr = cm.match_req(_pend([1, 2, 3, 9]))   # divergence at 3: mid-span for the tip
+    assert mr.cuda_handle.cached_len == 2        # fails-before: 0 (mid-span 3, snap-gate refusal)
+    assert mr.mamba_value is not None
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
+    assert snap["probe_hit"] == 1 and snap["probe_miss"] == 0
+    assert cap.messages == []                    # no fictional refusal
+
+
+def test_hybrid_probe_no_boundary_exact_is_an_honest_miss():
+    """P1 fails-before: with ONLY a mid-span match available (tip boundary 4, divergence
+    at 3, the M1-class shape) the old probe returned the unservable 3 and the snap gate
+    logged a refusal for a restore that could never serve - a fictional refusal. The
+    hybrid walk now reports no candidate: one honest probe miss, no store read, no
+    refusal line, clean fall-through to the justified re-prefill."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)        # tree empty, store holds the bound-4 tip
+
+    pre = cm.tier_store.snapshot()               # the cold admission already probed (miss)
+    with _cache_log_capture() as cap:
+        mr = cm.match_req(_pend([1, 2, 3, 9]))   # divergence at 3: mid-span only
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    snap = cm.tier_store.snapshot()
+    assert snap["probe_miss"] == pre.get("probe_miss", 0) + 1 and snap["probe_hit"] == 0
+    assert snap["restore_ok"] == 0 and snap["restore_refused"] == 0
+    assert snap["restore_l1"] == 0               # no store read for an unservable match
+    assert cap.messages == []                    # fails-before: the snap_gate line
+
+
+def test_kvonly_midspan_restore_still_truncates():
+    """P1 regression pin: the KV-only manager's contract is UNCHANGED - the probe still
+    returns mid-span matches (a plain-radix restore truncates the pages cleanly) and the
+    truncated restore feeds the normal insert path byte-exactly."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend([1, 2, 3, 4, 5]))         # cold admission tracks the session
+    pages, originals = _fill_pages(cm, kvpool, pt, ids)
+    chain = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    cm._tier_offer([VictimPath(chain[7], 8, tuple(chain[:8]), pages[:8], None)])
+    cm._free(pages[4:])                          # the offer covered [0:8); drop the rest
+
+    mr = cm.match_req(_pend(ids[:5] + [99]))     # divergence at 5: MID-SPAN for the seg-8
+    assert mr.cuda_handle.cached_len == 5        # mid-span depth served (not 0, not 8)
+    matched = mr.cuda_handle.get_matched_indices()
+    assert matched.numel() == 5
+    for j in range(5):
+        assert _kv_bytes(kvpool, int(matched[j])) == originals[int(pages[j])]
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
+    assert snap["probe_hit"] == 1                # the mid-span match counted as a probe hit
+
+
+# ------------- P2: the divergence is recorded at the owned frontier
+
+def test_hybrid_midhistory_divergence_owned_frontier_under_slot_restore():
+    """P2 fails-before (HW M2a + M2c shape at page granularity): a mid-history rewrite
+    leaves the tree OWNING the shared pages (tombstones included) with no live snapshot on
+    the walked path, so cached_len is 0. Recording st[1]=cached_len kept the
+    under-divergence keep slot st[3] empty forever - the boundary-2 victim washing after
+    the divergence was dropped (2 <= 0 false, spare slot occupied) - so the control turn
+    found nothing to restore from and re-prefilled in full. With st[1] at the owned
+    frontier the same victim fills st[3], the store retains the boundary, and the control
+    turn restores from B=2 <= divergence (P1 boundary-exact probe): cached_len 2, the
+    stored snapshot riding, restore_ok counted, zero refusals."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain2 = cm._chain_keys(torch.tensor([1, 2], dtype=torch.int32))
+    # old branch A(1-2) + B(3-4), natural LRU order; st seeded with an OCCUPIED spare (3)
+    # so the boundary-2 wash below is decided by the under-divergence slot alone
+    pages = cm._allocate(4)
+    cm.prefix_cache.insert(torch.tensor([1, 2], dtype=torch.int32), pages[:2],
+                           pool.alloc(1)[0])
+    cm.prefix_cache.insert(torch.tensor([1, 2, 3, 4], dtype=torch.int32), pages,
+                           pool.alloc(1)[0])
+    cm._tier_sessions[chain2[0]] = [4, 0, 3, None]
+
+    a = next(iter(cm.prefix_cache.root.children.values()))
+    b = next(iter(a.children.values()))
+    cm.ensure_mamba_slots(pool.num_free_slots + 1)   # wash exactly the oldest (A)
+    assert a.mamba_value is None and a.value.numel() == 2
+    assert b.mamba_value is not None             # the tip survives its own wash threshold
+    assert len(cm.tier_store._segments) == 0     # pre-divergence wash: nothing retained
+
+    mr = cm.match_req(_pend([1, 2, 3, 9, 9]))    # rewrite at 3: cached 0, tree owns 3
+    assert mr.cuda_handle.cached_len == 0
+    st = cm._tier_sessions[chain2[0]]
+    assert st[1] == 3                            # fails-before: 0 (the truncated match)
+    b = next(iter(a.children.values()))
+    assert b.length == 1 and b.children          # the walk split B at the rewrite point
+    assert next(iter(b.children.values())).mamba_value is not None   # old tip still live
+
+    snap2 = pool.alloc(1)[0]                     # the sub-divergence boundary washes
+    cm._tier_offer([VictimPath(chain2[1], 2, tuple(chain2),     # during the turn's churn
+                               torch.arange(2, dtype=torch.int32), snap2)])
+    pool.free(snap2)
+    assert st[3] == 2                            # fails-before: None (victim dropped)
+    assert cm._tier_snap_bound[chain2[1]] == 2
+    assert {s.boundary_len for s in cm.tier_store._segments.values()} == {2}
+
+    with _cache_log_capture() as cap:
+        mr2 = cm.match_req(_pend([1, 2, 9, 9, 9]))   # control turn (HW M2c)
+    assert mr2.cuda_handle.cached_len == 2       # fails-before: 0 (full miss)
+    assert mr2.mamba_value is not None           # the stored snapshot rides the match
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
+    assert snap["probe_hit"] == 1
+    assert cap.messages == []
+
+
+def test_hybrid_under_slot_skips_snapshot_free_victim():
+    """TP2 (a): restore-finish adoption leaves KV-only leaves whose evict_full victims
+    carry mamba_slot=None; a snapshot-free offer can never serve a hybrid restore (the
+    tail's snap gate refuses it), so the under-divergence slot must not commit to it -
+    the committed boundary would block shallower snapshot bearers via the >= st[3] rule."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain2 = cm._chain_keys(torch.tensor([1, 2], dtype=torch.int32))
+    cm._tier_sessions[chain2[0]] = [4, 3, 3, None]   # tip 4, divergence 3, spare 3
+    cm._tier_offer([VictimPath(chain2[1], 2, tuple(chain2),
+                               torch.arange(2, dtype=torch.int32), None)])
+    st = cm._tier_sessions[chain2[0]]
+    assert st[3] is None                             # fails-before: 2 (slot committed)
+    assert len(cm.tier_store._segments) == 0         # fails-before: 1 (stored, unservable)
+    assert chain2[1] not in cm._tier_snap_bound
+
+
+def test_hybrid_under_slot_keeps_smaller_snapshot_bearer_after_skip():
+    """TP2 (b): with the guard skipping the deeper snapshot-free victim, the shallower
+    snapshot-bearing boundary still fills st[3] and the control turn restores from it -
+    fails-before: the KV-only victim committed st[3]=2 and the bearer was dropped by the
+    >= st[3] rule, leaving the control turn a full re-prefill."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain2 = cm._chain_keys(torch.tensor([1, 2], dtype=torch.int32))
+    cm._tier_sessions[chain2[0]] = [4, 3, 3, None]
+    cm._tier_offer([VictimPath(chain2[1], 2, tuple(chain2),          # KV-only leaf victim
+                               torch.arange(2, dtype=torch.int32), None)])
+    snap1 = pool.alloc(1)[0]                         # the shallower snapshot bearer
+    cm._tier_offer([VictimPath(chain2[0], 1, tuple(chain2[:1]),
+                               torch.arange(1, dtype=torch.int32), snap1)])
+    pool.free(snap1)
+    st = cm._tier_sessions[chain2[0]]
+    assert st[3] == 1                                # fails-before: stays 2 (bearer dropped)
+    assert cm._tier_snap_bound[chain2[0]] == 1
+    assert {s.boundary_len for s in cm.tier_store._segments.values()} == {1}
+
+    mr = cm.match_req(_pend([1, 9, 9, 9, 9]))        # control turn: divergence at page 2
+    assert mr.cuda_handle.cached_len == 1            # fails-before: 0 (full re-prefill)
+    assert mr.mamba_value is not None                # the stored snapshot rides the match
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
+    assert snap["probe_hit"] == 1
+
+
+def test_hybrid_under_slot_rollback_on_failed_offer(monkeypatch):
+    """TP2 (b): the under-slot commits only after the offer lands - a rejected offer
+    rolls st[3] back so the dangling boundary cannot block shallower snapshot bearers."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain2 = cm._chain_keys(torch.tensor([1, 2], dtype=torch.int32))
+    cm._tier_sessions[chain2[0]] = [4, 3, 3, None]
+    monkeypatch.setattr(cm.tier_store, "offer", lambda *a, **k: False)
+    cm._tier_offer([VictimPath(chain2[1], 2, tuple(chain2),
+                               torch.arange(2, dtype=torch.int32), pool.alloc(1)[0])])
+    st = cm._tier_sessions[chain2[0]]
+    assert st[3] is None                             # fails-before: 2 (dangling slot)
+    monkeypatch.undo()
+    snap1 = pool.alloc(1)[0]                         # the slot admits the next bearer now
+    cm._tier_offer([VictimPath(chain2[0], 1, tuple(chain2[:1]),
+                               torch.arange(1, dtype=torch.int32), snap1)])
+    pool.free(snap1)
+    assert st[3] == 1
+
+
+def test_owned_frontier_counts_tombstones_until_cascade_reclaims():
+    """P2 pin on the frontier semantics under the tombstone cascade (P1-wave observation):
+    an internal snapshot wash leaves a KV-only tombstone whose pages stay OWNED - the
+    uncapped frontier (and st[1]) still counts them; when the leaf tip washes, the cascade
+    reclaims the exposed tombstone chain and the frontier collapses with it. Current
+    owned_prefix semantics, now pinned at the admission seam."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    chain6 = cm._chain_keys(torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32))
+    pages = cm._allocate(6)
+    for hi in (2, 4, 6):                          # prefix-wise: one chain A(1-2) B(3-4) C(5-6)
+        cm.prefix_cache.insert(
+            torch.tensor(list(range(1, hi + 1)), dtype=torch.int32),
+            pages[:hi], pool.alloc(1)[0])
+    # occupied spare keeps both wash victims out of the store: this test pins the FRONTIER,
+    # not the retention
+    cm._tier_sessions[chain6[0]] = [6, 0, 5, None]
+
+    cm.ensure_mamba_slots(pool.num_free_slots + 2)  # wash A(2) then B(4): both internal
+    a = next(iter(cm.prefix_cache.root.children.values()))
+    b = next(iter(a.children.values()))
+    assert a.mamba_value is None and a.value.numel() == 2      # tombstones, KV kept
+    assert b.mamba_value is None and b.value.numel() == 2
+    assert next(iter(b.children.values())).mamba_value is not None   # tip C(6) live
+    assert len(cm.tier_store._segments) == 0
+
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9, 9]))  # rewrite at 5: cached 0
+    assert mr.cuda_handle.cached_len == 0
+    assert cm._tier_sessions[chain6[0]][1] == 4   # frontier through 2 tombstones: 4
+                                                  # (fails-before: 0)
+    cm.ensure_mamba_slots(pool.num_free_slots + 1)  # tip C(6) washes: leaf -> cascade
+    assert cm.prefix_cache.root.children == {}    # the tombstone chain went with it
+    mr2 = cm.match_req(_pend([1, 2, 3, 4, 9, 9]))
+    assert mr2.cuda_handle.cached_len == 0
+    assert cm._tier_sessions[chain6[0]][1] == 0   # the frontier followed the cascade
+
+
+def test_kvonly_admission_divergence_still_records_cached_len():
+    """P2 regression pin: the KV-only manager's st[1] semantics are unchanged - there the
+    match already is the owned frontier (no snapshot-liveness truncation), so the recorded
+    divergence stays the plain cached_len."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 9))
+    cm.match_req(_pend(ids + [9]))               # track the session (cold)
+    pages, _originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids[:4], dtype=torch.int32), pages[:4])
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    cm.match_req(_pend(ids + [9]))               # tip 8 promoted
+    cm.match_req(_pend([1, 2, 3, 4, 99, 98]))    # divergence at 4
+    chain = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
+    assert cm._tier_sessions[chain[0]] == [8, 4, 0, None]
 
 
 if __name__ == "__main__":

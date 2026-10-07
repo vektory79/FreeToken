@@ -456,7 +456,8 @@ class SessionTierStore:
         self._marker_blockers = 0
         self._counters: Counter = Counter(offers_ok=0, offers_rej=0, offers_dedup=0,
                                           probe_hit=0,
-                                          probe_miss=0, note_match=0, restore_l1=0,
+                                          probe_miss=0, probe_midspan_only=0,
+                                          note_match=0, restore_l1=0,
                                           restore_l2=0, restore_ok=0, restore_refused=0,
                                           evictions=0, demotions=0,
                                           discards=0, tombstones=0, prefetch_begin=0,
@@ -537,24 +538,49 @@ class SessionTierStore:
     # ------------------------------------------------------------------ probe
 
     def probe(self, page_hashes: Sequence[bytes], *,
-              stamp: bool = True) -> tuple[int, TierHandle] | None:
+              stamp: bool = True,
+              boundary_exact: bool = False) -> tuple[int, TierHandle] | None:
         """Deepest match: walk the prompt's chain keys back to front; an equal key at
-        depth d implies an equal prefix [0:d]. Ties go to the most recently validated.
-        stamp=False is the idle prefetch probe: no LRU refresh (speculative interest must
-        not outrank real matches) and its own counters."""
+        depth d implies an equal prefix [0:d] (rolling chain keys). Ties go to the most
+        recently validated. stamp=False is the idle prefetch probe: no LRU refresh
+        (speculative interest must not outrank real matches) and its own counters.
+        boundary_exact=True (hybrid managers) serves only segments whose boundary sits
+        EXACTLY at d: a mid-span match has no live GDN snapshot at d, so the restore tail
+        would refuse it and mask shallower servable boundaries - the walk skips those
+        depths instead. Snapshots are still the tail gate's call (state can change
+        between probe and restore). Candidate depths are the live segments' boundary
+        lengths descending, not every page depth: nothing else can win, so the walk
+        jumps straight over the mid-span interior. A walk that saw mid-span matches but
+        no boundary-exact candidate counts one miss plus probe_midspan_only (the
+        M1-class 'consulted, unservable' signal), never a hit."""
         if not self.enabled:
             return None
         now = time.monotonic_ns()
         hit_key = "probe_hit" if stamp else "prefetch_probe_hit"
         miss_key = "probe_miss" if stamp else "prefetch_probe_miss"
         with self._lock:
+            if boundary_exact:
+                try:
+                    segs = list(self._segments.values())
+                except RuntimeError:
+                    # builder threads discard lock-free (account lock only): retry once
+                    # on the fresh dict instead of adding a lock to the builder path
+                    segs = list(self._segments.values())
+                depths = sorted({s.boundary_len for s in segs
+                                 if s.boundary_len <= len(page_hashes)}, reverse=True)
+            else:
+                depths = range(len(page_hashes), 0, -1)
             best = None
-            for d in range(len(page_hashes), 0, -1):
+            saw_midspan = False
+            for d in depths:
                 for seg_id, key_depth in self._index.get(page_hashes[d - 1], []):
                     if key_depth != d:
                         continue
                     seg = self._segments.get(seg_id)
                     if seg is None or seg.boundary_len < d:
+                        continue
+                    if boundary_exact and seg.boundary_len != d:
+                        saw_midspan = True     # servable for KV-only, never for hybrid
                         continue
                     if best is None or (seg.boundary_len == d, seg.last_validation) > \
                             (best[0].boundary_len == d, best[0].last_validation):
@@ -565,6 +591,8 @@ class SessionTierStore:
                         seg.last_validation = now
                     self._counters[hit_key] += 1
                     return d, TierHandle(seg.path_key, d, seg.seg_id)
+            if boundary_exact and saw_midspan:
+                self._counters["probe_midspan_only"] += 1
             self._counters[miss_key] += 1
             return None
 
