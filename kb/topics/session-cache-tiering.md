@@ -2,8 +2,8 @@
 title: "Ярусное вытеснение кеша сессий: RAM и SSD буферы фиксированного размера (дизайн-анализ)"
 date: 2026-09-22
 hardware: RTX 5090 32GB; NVMe Samsung 990 EVO Plus; RAM host
-branch-commits: "vektory79 @ d77d15e (фаза 1), 4b6aacb (закалка железа), 2348da5 (фаза-2 S-wave), 88102dd (кодеки QSA/KpoolDSA, KV-only tier, async prefetch), e5dd1f2 (supersede вложенных сегментов на offer)"
-status: фазы 1-2 реализованы и подтверждены железом (2026-09-22/23); supersede вложенных сегментов на offer реализован и измерен железом 2026-09-25 - честный no-op на гибридном flush (результаты в конце статьи); P4 конвейер флаша групп закоммичен (b99a103) и принят железом 2026-09-30 (2.18-2.46 ГБ/с против 0.95 у P3-базы; util-гейт открыт); ограничение restore при дивергенции истории: P0-P3 закрыты (P3 - симуляция 2026-10-07: алиасинг chain[0] лечится P1/P2, группирование сессий не требуется), 7 улучшений отложены в fast-follow
+branch-commits: "vektory79 @ d77d15e (фаза 1), 4b6aacb (закалка железа), 2348da5 (фаза-2 S-wave), 88102dd (кодеки QSA/KpoolDSA, KV-only tier, async prefetch), e5dd1f2 (supersede вложенных сегментов на offer), 1298048/c1d45c1/c2e9dbc (fast-follow тир-восстановления: скип снапшот-фри кандидатов + rollback st[3], рендер счётчиков, пины + conftest)"
+status: фазы 1-2 реализованы и подтверждены железом (2026-09-22/23); supersede вложенных сегментов на offer реализован и измерен железом 2026-09-25 - честный no-op на гибридном flush (результаты в конце статьи); P4 конвейер флаша групп закоммичен (b99a103) и принят железом 2026-09-30 (2.18-2.46 ГБ/с против 0.95 у P3-базы; util-гейт открыт); ограничение restore при дивергенции истории: P0-P3 закрыты (P3 - симуляция 2026-10-07: алиасинг chain[0] лечится P1/P2, группирование сессий не требуется), fast-follow закрыт волнами 2026-10-08 (W2/W3/W4 закоммичены 1298048/c1d45c1/c2e9dbc; W1 стейджинг NO-GO на железе, код откатан; chain0 entropy won't-fix)
 tags: [tiering, session-cache, snapshot-offload, pinned-host, o-direct, nvme, hybrid, radix]
 ---
 
@@ -400,8 +400,13 @@ dense-hybrid, 48 GDN + 16 full attention, рецепт 0.85/4096; протоко
 Финальная строка метрик stop-1:
 
 ```
-session tier final: session-tier: l1=0.0MiB, l2=24381.9MiB, offers=21/0, dedup=0, probes=9/4, restore=2(l1)/0(l2), evict=0, demote=21, discard=0, dead=0.0MiB, pf=0/0/0
+session tier final: session-tier: l1=0.0MiB, l2=24381.9MiB, offers=21/0, dedup=0, probes=9/4, midsn=0, snapfree=0, restore=2(l1)/0(l2), ok=2, refused=0, evict=0, demote=21, discard=0, tomb=0, dead=0rec/0.0MiB, holes=0.0MiB, pf=0/0/0, prej=0
 ```
+
+(Строка - ИЛЛЮСТРАЦИЯ актуального формата stats_line: порядок полей взят
+из докстринга stats_line в python/freetoken/scheduler/session_tier.py;
+поля midsn/snapfree/ok/refused/tomb/holes/prej появились позже руки
+2026-09-25 и оставлены нулями, остальные числа - из лога руки.)
 
 - Блоб 23.81 GiB бит-идентичен базовой руке; конечное состояние каталога
   яруса байт-в-байт совпало с базовым - регрессии нет.
@@ -516,12 +521,84 @@ refused=0, ноль refusal-строк; снапшоты A ходами B не �
 оговорки: один прогон, L1-давления не было. Кейс:
 [tier-restore-cache-loss](../cases/tier-restore-cache-loss/TASK.md).
 
-Отложенные улучшения (fast-follow; бриф вне git, пункты дистиллированы сюда):
+Отложенные улучшения (fast-follow): ВСЕ ЗАКРЫТЫ волнами 2026-10-08 (бриф вне
+git, пункты дистиллированы сюда; детали - в разделе "Follow-up волны
+тир-восстановления" ниже):
 
-- snapshot-only стейджинг revival-восстановлений: при fresh=0 idle-стейджинг пропускается и sync-путь memcpy-читает весь сегмент, хотя нужен только GDN-снапшот границы;
-- probe-time проверка живого снапшота в boundary-exact режиме: снапшот-фри кандидат доходит до гейта и маскирует более мелких носителей;
-- rollback st[3] при исключении из offer: исключение оставляет висячий под-дивергентный слот, блокирующий мелких носителей;
-- рендер midsn=/prej= в shutdown-строке: prefetch_rej_cap и probe_midspan_only предзасеяны, но в логах не видны;
-- хоист дублированной лог-ловушки _CacheLogCapture в tests/scheduler/conftest.py (два тестовых файла повторяют её из-за propagate=False);
-- тест-пины: многоходовой poke/control/revert (форма M3), st[1] > st[0], idle-префетч гибрида стейджит только boundary-exact;
-- chain0 entropy (32-битный ключ сессии): разблокирован вердиктом P3 (группирование не требуется) - решение о ширине/составе ключа остаётся за дизайном.
+- snapshot-only стейджинг revival-восстановлений - NO-GO на железе, код откатан: рычаг не в механике стейджинга (она CPU-доказана байт-в-байт), а в точке вовлечения - нужен admission-adjacent триггер (idle-хук не срабатывает на шве back-to-back ходов); перед повтором запинить FIFO-хрупкую форму M2;
+- probe-time проверка живого снапшота в boundary-exact режиме - сделано (1298048);
+- rollback st[3] при исключении из offer - сделано (1298048);
+- рендер недошедших счётчиков в shutdown-строке - сделано (c1d45c1: midsn=/snapfree=/prej=, новый счётчик probe_snapfree_skip);
+- хоист лог-ловушки в tests/scheduler/conftest.py - сделано (c2e9dbc);
+- тест-пины (poke/control/revert M2/M2c/M3, st[1] > st[0], prefetch boundary-exact, dead-bound без подстановки, exception-before-commit, snapfree idle-прохода) - сделано (c2e9dbc);
+- chain0 entropy (32-битный ключ сессии) - won't-fix: вердикт P3 снял потребность в группировке сессий; возврат - только при реальном лог-окне с вредом мисаттрибуции чатов общей преамбулы.
+
+## Follow-up волны тир-восстановления (2026-10-07)
+
+Fast-follow за фиксом P1+P2 (577d79c): 7 пунктов инженерного долга из ревью
+P0/P1/P2. Волны исполнены 2026-10-08 (CPU-гейт каждой волны
+`uv run pytest tests/kvcache/radix tests/scheduler -m "not slow"`); финал на
+HEAD c2e9dbc - 476 passed / 1 skipped. Итог по пунктам: 1 - NO-GO на железе,
+2-6 - закоммичены, 7 - won't-fix.
+
+### W2, пункты 2+3 (коммит 1298048, "skip snapshot-free boundary-exact tier candidates and roll back st[3] on offer errors")
+
+- probe() в boundary_exact-режиме гибрида пропускает кандидатов без
+  снапшот-байтов (KV-only tip/spare офферы после restore-finish adoption):
+  раньше такой кандидат выигрывал обход, а гейт снапшота его отвергал -
+  маскируя более мелких снапшот-носителей. Предикат presence-only, тот же,
+  что у гварда под-дивергентного слота в _tier_offer; KV-only обход не тронут;
+  idle-префетч наследует фикс через тот же boundary_exact.
+- _tier_offer: исключение из store.offer откатывает слот st[3] (rollback +
+  honest-лог + re-raise) вместо висячего слота, блокировавшего мелких
+  носителей до следующего глубокого.
+- Ревью трассировало сохранность snap_lens через re-offer/demote/replay -
+  пути ложного отрицания не найдено. Оба теста fail-before (single-revert
+  пробой). Гейт волны: 468 passed / 1 skipped.
+
+### W3, пункт 4 (коммит c1d45c1, "render tier probe and prefetch rejection counters in the final stats line")
+
+- Счётчик probe_snapfree_skip (W2-скип был невидим в логах) и рендер
+  midsn=/snapfree=/prej= в stats_line - финальная shutdown-строка и
+  периодический batch-фрагмент; порядок прежних полей не менялся (пример
+  актуального формата - в разделе Supersede выше). Гейт: 470 passed /
+  1 skipped.
+
+### W4, пункты 5+6 (коммит c2e9dbc, "hoist tier log capture to conftest and pin boundary restore invariants", только тесты)
+
+- Хоист: tests/scheduler/conftest.py - общий LogCapture + фикстура
+  log_capture_factory, per-file фикстуры биндят свой логгер (caplog слеп:
+  init_logger ставит propagate=False); 48 мест вызова мигрированы механически.
+- Шесть пинов инвариантов, каждый проверен single-revert пробоем (откат
+  точки -> тест красный -> восстановление по sha256): poke/control/revert
+  менеджер-тест формы M2/M2c/M3 (KEY-границы, ноль отказов); st[1] > st[0]
+  при росте keep-набора; prefetch стейджит только boundary-exact; мёртвый
+  snap-bound доходит до гейта без подстановки (честный refused=snap_gate);
+  исключение до коммита оставляет st[3] нетронутым; snapfree-скип считается
+  и на idle-проходе. Гейт: 476 passed / 1 skipped.
+
+### W1, пункт 1: snapshot-only стейджинг - NO-GO на железе (код откатан, коммита нет)
+
+A/B полной серией P1+P2, обе руки на 37c976e: контрольный ход M2c - 26.75 с
+(фикс) против 26.65 с (база) и 26.7 с (якорь) - выигрыша нет, механизм НЕ
+вступает в работу на шве: между ответом M2 и admission M2c планировщик не
+делает ни одного idle-прохода (back-to-back ходы), M2c в обеих руках
+обслужен синхронным чтением (счётчики идентичны). Стейджинги фикса в чужих
+idle-точках (pf=0/4/4: 4 begin, 4 abandon, 0 adopt) удерживали mamba-слот
+через фазу мутаций - и коррелированно перевернули FIFO-хрупкий частичный HIT
+хода M2 (81,216 ток / 37.5 с) в полный промах (0 / 142.3 с). Вывод: рычаг -
+точка вовлечения (admission-adjacent триггер), не механика стейджинга; любой
+повтор обязан сначала запинить форму M2 для одно-переменного A/B. Код и
+тесты откатаны до бита (пост-откат гейт 466 passed / 1 skipped). Отчёт -
+.tasks/tier-restore-followups/REPORT-hw-item1-staging.md (вне git, числа
+дистиллированы сюда).
+
+### Пункт 7, chain0 entropy: won't-fix
+
+32-битный chain0 в refusal-строках остаётся как есть: симуляция P3 (2 чата
+с байт-в-байт идентичной преамбулой, ~234k ток, пик L1 4.8/10 GiB) показала,
+что алиасинг chain[0] лечится самой связкой P1/P2 на измеренном масштабе -
+оба возврата восстановлены (ok=2, refused=0, ноль refusal-строк),
+группирование сессий данными не требуется. Возврат к пункту - только если
+реальное лог-окно покажет вред мисаттрибуции между чатами, делящими
+преамбулу.

@@ -551,7 +551,8 @@ class SessionTierStore:
         depths instead. A boundary-exact segment with no snapshot bytes (a KV-only
         tip/spare offer left by a restore-finish adoption) is skipped for the same
         reason - the presence-only snapshot predicate _tier_offer's under-divergence
-        guard uses; each such skip counts probe_snapfree_skip. Snapshots are still
+        guard uses; each such skip counts probe_snapfree_skip (the idle prefetch
+        walk, stamp=False, counts its skips there too). Snapshots are still
         the tail gate's call (state can change between probe and restore). Candidate
         depths are the live segments' boundary
         lengths descending, not every page depth: nothing else can win, so the walk

@@ -260,6 +260,25 @@ docs - 197d029. Полный отчёт и сырые ходы -
   fast-follow (бриф вне git, дистиллированы в
   [session-cache-tiering.md](../../topics/session-cache-tiering.md)).
 
+#### Fast-follow волны (2026-10-08): кампания закрыта полностью
+
+Все 7 отложенных пунктов разобраны (дистиллят с коммитами - в разделе
+"Follow-up волны тир-восстановления (2026-10-07)"
+[session-cache-tiering.md](../../topics/session-cache-tiering.md)): пункты
+2+3 - 1298048 (скип снапшот-фри boundary-exact кандидатов в probe + rollback
+st[3] при исключении offer), пункт 4 - c1d45c1 (счётчик probe_snapfree_skip +
+рендер midsn=/snapfree=/prej=), пункты 5+6 - c2e9dbc (conftest-хоист + 6
+пинов; финальный гейт 476 passed / 1 skipped). Пункт 1 (snapshot-only
+стейджинг) - NO-GO на железе, код и тесты откатаны: M2c wall 26.75 против
+26.65 с, на шве back-to-back ходов idle-проходов нет, M2c в обеих руках через
+sync-путь; коррелированная регрессия M2 81,216/37.5 с -> 0/142.3 с. Рычаг
+перенесён в точку вовлечения (admission-adjacent триггер, не механика
+стейджинга); отчёт - .tasks/tier-restore-followups/REPORT-hw-item1-staging.md
+(вне git, числа дистиллированы в тему). Пункт 7 (chain0 entropy) - won't-fix:
+вердикт P3 (алиасинг лечится P1/P2 на измеренном масштабе, группирование
+не требуется); возврат - только при реальном лог-окне с вредом
+мисаттрибуции.
+
 ## Приёмка
 
 1. CPU-гейт: `uv run pytest tests/kvcache/radix tests/scheduler -m "not slow"`
