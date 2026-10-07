@@ -36,7 +36,6 @@
 - [process-hygiene-protocol](process-hygiene-protocol-74ae16a3c293.md) — Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment
 - [sandbox-path-absence-trap](sandbox-path-absence-trap-3f7778c9bdfc.md) — Delegated agents' list_dir is sandboxed to project root; outside paths falsely reported absent - verify via IDE terminal
 - [lean-subagent-context](lean-subagent-context-32151731dde8.md) — Cloud LLM: do not resume big-context subagents (costly); prefer fresh narrow agents; resume only for tiny deltas
-- [ft-tier-phase2-swave](ft-tier-phase2-swave-d5a28fb6bbb5.md) — Tier phase-2; offer-supersede e5dd1f2 no-op on hybrid flush; kb amended, l2-snapshot-dedup brief ready (extents)
 - [ft-serve-600s-abort-client-timeout](ft-serve-600s-abort-client-timeout-f75316b3a28f.md) — ft serve ~600s decode abort = client SDK default timeout; 'Aborting request' log + 0-token ring row discriminate
 - [ft-serve-shutdown-grace-kills-tier-flush](ft-serve-shutdown-grace-kills-tier-flush-d0b0eee76b02.md) — ft serve tier-flush on llama-swap stop FIXED: worker SIGTERM handler, commit f5e51fd
 - [ft-interleave-cache-wash-repro](ft-interleave-cache-wash-repro-f0766afb3a90.md) — Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x
@@ -69,7 +68,6 @@
 - [ft-p7-io-uring-wave](ft-p7-io-uring-wave-9db8ddac17e6.md) — ftw_uring.py io_uring FTW read backend: committed 21f1525, opt-in default direct; QD refuted (5.16 GB/s), sys x1.45
 - [ft-p5-lru-research](ft-p5-lru-research-b498a9e9b960.md) — P5 LRU already in prod; wipe was :329 degenerate; 94e4783 overflow observability committed; P8/P9 briefs executed
 - [ft-p1-ftw-pool-wave](ft-p1-ftw-pool-wave-c9b7aa30344f.md) — P1 FTW bank-pool committed 94d5e4a; P10 seams refuted; P12 read-tempo CLOSED NO-GO (zero-fill 8.6% @ pool=8)
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-001b6f980160.md) — gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag
 - [ft-fix-329-cap-accounting](ft-fix-329-cap-accounting-c912c8f24f20.md) — Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-5ce36c040947.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
 - [ft-serve-boot-shutdown-io-research](ft-serve-boot-shutdown-io-research-ab444aa50b22.md) — HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore
@@ -83,4 +81,7 @@
 - [ft-p12-read-tempo-brief](ft-p12-read-tempo-brief-11eefbaf5632.md) — P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ pool=8 < 10% gate; case P1-P13 closed 2026-10-05
 - [ft-tier-restore-attempt-counter](ft-tier-restore-attempt-counter-dfcbfd7380a1.md) — Tier restore case closed P0-P3 (sim H2: aliasing healed by P1/P2, no grouping needed); follow-ups brief in .tasks
 - [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-0270361228f3.md) — HybridRadixCache test integrity: vacuous fails-before, single-revert probes, det-clock in both scheduler tier tests
-- [ft-tier-restore-followups](ft-tier-restore-followups-02c497d8552a.md) — Tier-restore follow-up waves: W1 staging HW NO-GO; W2 probe snapshot-filter + st\[3\] rollback commit 1298048
+- [ft-l2-extent-dedup](ft-l2-extent-dedup-7e424d42274e.md) — L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79
+- [ft-tier-restore-followups](ft-tier-restore-followups-858fc8fef287.md) — Tier-restore follow-up waves: W1 staging HW NO-GO; W2 probe snapshot-filter + st\[3\] rollback commit 1298048
+- [ft-tier-phase2-swave](ft-tier-phase2-swave-709c47569b69.md) — Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-817c76e69b3a.md) — gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)

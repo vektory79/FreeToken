@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-native-serving-skill"
-description: "gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag"
+description: "gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)"
 type: project
-lastUpdated: 2026-10-04T18:42
-lastRecall: 2026-10-07T20:50
+lastUpdated: 2026-10-08T00:36
+lastRecall: 2026-10-08T00:23
 ---
 
 # GGUF native serving skill: reusable methodology for any model family
@@ -38,3 +38,9 @@ At the END of every session that produced reusable knowledge (root causes with c
 
 ## Обновление 2026-10-04 (P12 session)
 Добавлена T67 (лимитер-атрибуция: ключить к дефолту цепочкой из исходников + гейт потолком устранения до кода; прецедент P12 wave-1, кросс-реф kb/methods/limiter-attribution.md) в новой секции "Boot/shutdown I/O кампания ... T67" (TRAPS.md :386-404). Счётчики синхронизированы до 67: TRAPS.md :1, SKILL.md :146 (был отставший 63), ORCHESTRATION.md :302 (был T01-T63). NOTE "sync counters to T66" устарел. Правки скилл-файлов НЕКОММИЧЕНЫ (user-gated).
+
+## Correction (2026-10-08): TRAPS counters stale in this memory
+On-disk counters moved past T66: T67-T75 landed with mmproj campaigns (committed), T76-T77 committed as 5b64d6c (tier-restore follow-ups lessons: idle-lever engagement-at-seam; conftest fixture factory returns plain function), T78-T79 applied UNCOMMITTED 2026-10-08 (L2 dedup lessons: stale-brief reconciliation; pin-invariant caller census). Ledger entries referenced in this memory remain valid; counter claims are not.
+
+## Correction (2026-10-08, later same day): T78-T79 committed
+User said "закоммить всё" - T78-T79 self-update committed as 542ece4 "docs(skill): add traps t78-t79 from the l2 extent dedup wave, sync trap counters" (3 files, 32+/3-, guarded staging, zero non-skill staged). All TRAPS entries T01-T79 now committed; working tree clean except .veai/memory churn.

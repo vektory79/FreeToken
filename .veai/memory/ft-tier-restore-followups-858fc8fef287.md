@@ -2,8 +2,8 @@
 name: "ft-tier-restore-followups"
 description: "Tier-restore follow-up waves: W1 staging HW NO-GO; W2 probe snapshot-filter + st[3] rollback commit 1298048"
 type: project
-lastUpdated: 2026-10-07T21:17
-lastRecall: 2026-10-07T20:50
+lastUpdated: 2026-10-08T00:33
+lastRecall: 2026-10-08T00:02
 ---
 
 # Tier-restore follow-ups (fast-follow za 577d79c): 7 items, .tasks/tier-restore-followups/TASK.md
@@ -25,3 +25,6 @@ docs: distill tier-restore follow-up waves and refresh session-tier topic (5 fil
 
 ## Skill self-update committed (2026-10-08, user request "закоммить всё")
 T76-T77 self-update (TRAPS.md/SKILL.md/ORCHESTRATION.md, 3 files 34+/3-) committed as 5b64d6c "docs(skill): add traps t76-t77 from tier-restore follow-ups, sync trap counters" - guarded staging (3 files, zero non-skill staged, no .veai/memory). HEAD vektory79 = 5b64d6c; working tree clean except .veai/memory churn. Campaign fully closed, nothing uncommitted.
+
+## Post-campaign dispositions (2026-10-08)
+Residual #1 (admission-adjacent staging trigger) formalized as kb case tier-staging-admission-trigger, commit 88ba376 (blocking prereq recorded: pin/neutralize the FIFO-fragile M2 shape first). L2-snapshot-dedup residual EXECUTED - see memory ft-l2-extent-dedup (23.81 -> 8.17 GiB HW). Skill traps T76-T77 committed (5b64d6c); T78-T79 applied uncommitted.

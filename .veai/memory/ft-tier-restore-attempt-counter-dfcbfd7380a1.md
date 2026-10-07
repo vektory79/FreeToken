@@ -3,7 +3,7 @@ name: "ft-tier-restore-attempt-counter"
 description: "Tier restore case closed P0-P3 (sim H2: aliasing healed by P1/P2, no grouping needed); follow-ups brief in .tasks"
 type: project
 lastUpdated: 2026-10-07T17:10
-lastRecall: 2026-10-07T20:37
+lastRecall: 2026-10-07T21:26
 ---
 
 # Tier restore cache-loss: счётчик restore считает ПОПЫТКИ, не успехи

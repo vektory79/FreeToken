@@ -1,9 +1,9 @@
 ---
 name: "ft-tier-phase2-swave"
-description: "Tier phase-2; offer-supersede e5dd1f2 no-op on hybrid flush; kb amended, l2-snapshot-dedup brief ready (extents)"
+description: "Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)"
 type: project
-lastUpdated: 2026-09-25T18:29
-lastRecall: 2026-10-07T17:47
+lastUpdated: 2026-10-08T00:33
+lastRecall: 2026-10-08T00:23
 ---
 
 # Session-tier phase-2 S-wave (metrics, scheduled compaction, safety guards)
@@ -35,3 +35,6 @@ UPDATE 2026-09-25: offer-supersede COMMITTED on vektory79 as e5dd1f2 "feat(sched
 - kb/topics/session-cache-tiering.md amended (274 -> 346 lines): new dated section "Supersede вложенных сегментов на offer (2026-09-25)" - what landed (e5dd1f2, page_keys-prefix correction), HW arm verdict (honest no-op on hybrid flush, verbatim metrics line), calibration (21/21 snapshot-bearing, 147 MiB GDN snaps; bloat unreachable at offer seam), open follow-up pointer; frontmatter branch-commits + status updated; kb/topics/README.md hook extended. Checks: table_lint 0 issues; links 614 checked / 0 broken. NOT committed.
 - Design brief READY: .tasks/session-cache-tiering/briefs/l2-snapshot-dedup.md (333 L). Recommendation: direction (a) content/page-key-addressed KV extents in the blob, written at the _demote/_offer payload seam, restricted to prefix-proven same-chain sharing; (d) merge as compact()'s legacy-migration/defrag lever. Expected L2 ~7 GiB (one full KV ~4 GiB + 21 snaps ~3.07 GiB) vs 23.81. Direction (c) flush-only-deepest REFUTED - dropping contained snapshots breaks _restore_tail exact-depth gate for measured multi-depth reboot HITs. New anchor facts: session_tier.py is 1152 L at e5dd1f2 (old line refs drifted: _journal_append ~L943, compact ~L1042 keep-set ~L1061, _discard ~L622); compact() today copies live spans at ORIGINAL offsets and rewrites journal VERBATIM (record identity stable -> (a) can keep the (path_key, l2_off, l2_n) keep-set unchanged). Verdict: Size L (additive journal field + dual-read legacy path, extent refcount lifecycle, ~8-10 new tests, one HW arm reusing arm27b_dedup.sh + tier_journal_classify.py; acceptance asserts "l2 used" log value, not blob.bin stat).
 - kb agent flagged (out of scope, not done): kb/baselines/session-cache-tiering-arms.md lacks the dedup-arm anchors; top-level kb/README.md topics list omits session-cache-tiering.md (pre-existing gap).
+
+## UPDATE 2026-10-08: l2-snapshot-dedup EXECUTED - see memory ft-l2-extent-dedup
+The "NEXT TASK (brief ready)" above is done: L2 extent dedup landed (26e98c2 -> c73fe90 -> f0115a6, kb d3623ee), HW verdict 23.81 -> 8.17 GiB (-65.7%) on the 27B arm, review journey 2x BLOCK (accounting-drift via two seams) -> SHIP, gate 493/1. Also: residual case tier-staging-admission-trigger opened in kb/cases (commit 88ba376).
