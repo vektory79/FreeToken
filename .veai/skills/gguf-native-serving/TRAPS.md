@@ -1,4 +1,4 @@
-# TRAPS.md - 75 ловушек для native GGUF serving (T01-T75, рецепты D01-D10)
+# TRAPS.md - 77 ловушек для native GGUF serving (T01-T77, рецепты D01-D10)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -482,6 +482,32 @@ kb/topics/decode-chain-microfusion.md; все четыре env-ручки вал
   (ftw_lacks_vision) не тронут. Эвиденс: 2b91236, models/gguf/config.py
   + scripts/ftw_hotfix.py; дистиллят
   kb/cases/gguf-glm5next-vision/phases-3-4.md.
+
+## tier-restore follow-ups кампания 2026-10-08 (scheduler/kvcache) T76-T77
+
+- **T76** (scheduler, A/B design) Асинхронный/idle-path рычаг
+  проверяется на ЗАДЕЙСТВОВАНИЕ В ЦЕЛЕВОМ ШВЕ до постройки A/B.
+  W1 (tier prefetch staging): фикс работал (CPU-доказанный byte-exact
+  staging), но планировщик записал НОЛЬ idle-pass между ответом
+  мутационного хода и допуском следующего (back-to-back ходы) -
+  контрольный ход обслуживался sync-путём в ОБОИХ руках, 26.75 s (fix)
+  vs 26.65 s (base) - void A/B. Правило: сосчитай idle-pass в точном
+  шве по СУЩЕСТВУЮЩИМ логам ДО написания руки; рычаг в шве не стреляет
+  - переноси триггер (здесь: admission-adjacent) или вычёркивай пункт.
+  Следствие: проверь побочные эффекты рычага на резидентность ресурсов
+  - фикс держал один mamba-слот резидентным через фазу мутации и
+  перевернул FIFO-хрупкий соседний partial-HIT ход (cached 81,216 tok
+  / 37.5 s) в полный промах (cached 0 / 142.3 s), отравив
+  однофакторную атрибуцию. Эвиденс: коммита нет (W1 NO-GO, откат),
+  .tasks/tier-restore-followups/REPORT-hw-item1-staging.md +
+  WAVE-LOG.md.
+- **T77** (tests, pytest) Conftest-фикстура, отдающая context
+  manager, возвращает ЧИСТУЮ zero-arg функцию, а НЕ предсозданный
+  экземпляр context manager: предсозданный экземпляр ронял каждый
+  `with tier_log_capture() as cap:` ContextDecorator TypeError - 43
+  теста падали разом. Правило: factory-фикстура возвращает функцию;
+  каждый with-блок создаёт свежий контекст. Эвиденс: c2e9dbc,
+  tests/scheduler/conftest.py.
 
 ## Debugging
 

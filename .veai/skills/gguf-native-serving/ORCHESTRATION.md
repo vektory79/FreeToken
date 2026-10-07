@@ -242,6 +242,9 @@ concurrent microbenches both leaked and invalidated their own numbers).
   the fast suite. Never ship instrumentation (fix3 campaign pattern).
 - OMP/thread-pinning env is set BEFORE process start (libgomp parses in a
   pre-main constructor; setenv from main collapses threads onto core 0).
+- A/B lever engagement (T76): count the lever's trigger events at the exact
+  seam in EXISTING logs before writing the arm; zero engagements = void A/B -
+  relocate the trigger (here: admission-adjacent) or drop the item.
 
 ## 8. Commit discipline
 
@@ -263,6 +266,8 @@ concurrent microbenches both leaked and invalidated their own numbers).
   commit 3); extract fails-before regression tests to their proper home
   (tests/moe/test_legacy_format.py). Tests touching convert_checkpoint need a
   CUDA skipif (it hard-inits a CUDA context; fixture-level skip preferred).
+  A conftest fixture vending a context manager returns the plain zero-arg
+  function, never a pre-created instance (T77).
 - The skill files themselves (`.veai/skills/gguf-native-serving/`) are committed
   (6e673ab); further skill edits stay uncommitted until the user asks.
 
@@ -299,7 +304,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T75 + recipes D01-D10; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T77 + recipes D01-D10; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),
