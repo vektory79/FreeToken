@@ -46,6 +46,13 @@ Specification / Acceptance / Checklist.
   W2/W3/W4 закоммичены (1298048/c1d45c1/c2e9dbc, финальный гейт 476 passed/
   1 skipped), W1 стейджинг NO-GO (код откатан, рычаг - admission-adjacent
   точка вовлечения), chain0 entropy won't-fix).
+- [tier-staging-admission-trigger/](tier-staging-admission-trigger/) —
+  постановка задачи 2026-10-07: остаток W1 - fast path тир-восстановления не
+  срабатывает на шве back-to-back ходов (idle-проходов ноль, M2c в обеих
+  руках обслужен sync-чтением всего сегмента); рычаг перенесён в точку
+  вовлечения - admission-adjacent триггер snapshot-only стейджинга (до старта
+  обязателен пин FIFO-гонки M2). Вход:
+  [TASK.md](tier-staging-admission-trigger/TASK.md). Статус: OPEN.
 - [session-cache-tiering/](session-cache-tiering/) — бриф ярусного кеша сессий
   (L0 VRAM -> L1 RAM 30 GiB -> L2 SSD 100 GiB): pull-on-evict с адаптивной
   селекцией, контент-адресный стор, журнал-персистентность; фазы 1/2, приёмка
