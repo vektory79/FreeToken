@@ -2,7 +2,7 @@
 name: "ft-gguf-kernel-jit-toolchain"
 description: "gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args"
 type: project
-lastUpdated: 2026-09-17T18:21
+lastUpdated: 2026-10-07T11:35
 lastRecall: 2026-10-06T03:29
 ---
 
@@ -19,3 +19,5 @@ Verified 2026-09-13 (Phase 4 of the glm5next GGUF plan); UPDATED 2026-09-15 (hyb
 
 - v0 sort change (2026-09-17, uncommitted on vektory79): adding an OPTIONAL tensor arg to the JIT extension requires `std::optional<torch::Tensor>` in the pybind signature - torch's Tensor caster REJECTS None (verified on torch 2.11.0+cu130). Keep the python wrapper default (`order: torch.Tensor | None = None`) so older positional callers (fused_q4_0's 7-arg call) keep working. ggml_moe_a8_vec threads the param through all 19 moe_vec launcher templates - count them on any signature change (mechanical edits are where copy-paste errors hide).
 - moe_vec perm design: moe_vec_q takes `const int* order` (pair = order ? order[blockIdx.z] : blockIdx.z) and writes dst[pair*nrows+row], so the kernel itself inverts the expert-sorted order and outputs stay pair-major with NO python scatter; the same order works unchanged for the down call (top_k=1 -> token==pair indexes the interleaved rows). Lifetime nuance the review caught: a local named tensor in the host fn (order_buf) outlives the LAUNCH (enqueue), not the EXECUTION - safety past the async launch comes from torch's same-stream caching allocator (freed block reusable only on its allocation stream). Never generalize the pattern to cross-stream use without record_stream; word the comment accordingly.
+
+2026-10-07 (tier P0 HW arm): prebuilt kernel-cache wheel did not cover the serving kernels -> boot ran live nvcc JIT; readiness by real chat request 109 s total on RTX 5090 (GLM-5.3 UD-Q3_K_XL GGUF). Expect boot-time JIT whenever wheel coverage lags the kernel set.

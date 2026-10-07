@@ -3,7 +3,7 @@ name: "ft-p1-ftw-pool-wave"
 description: "P1 FTW bank-pool committed 94d5e4a; P10 seams refuted; P12 read-tempo CLOSED NO-GO (zero-fill 8.6% @ pool=8)"
 type: project
 lastUpdated: 2026-10-04T18:36
-lastRecall: 2026-10-05T15:28
+lastRecall: 2026-10-07T11:55
 ---
 
 # P1 FTW bank-pool wave (boot-shutdown-io case, CPU part, 2026-09-29)

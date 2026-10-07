@@ -3,7 +3,7 @@ name: "ft-interleave-cache-wash-repro"
 description: "Interleave wash HW-confirmed: ratio 2.0 = 11/11 full misses; ratio 8 + 350k = full hits ~20x"
 type: project
 lastUpdated: 2026-09-26T17:23
-lastRecall: 2026-09-26T17:18
+lastRecall: 2026-10-06T22:26
 ---
 
 # Interleave cache wash (orchestrator/subagent): hardware-confirmed + flag-level fix

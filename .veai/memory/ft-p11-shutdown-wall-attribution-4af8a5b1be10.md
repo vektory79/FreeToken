@@ -3,7 +3,7 @@ name: "ft-p11-shutdown-wall-attribution"
 description: "P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed"
 type: project
 lastUpdated: 2026-10-05T15:34
-lastRecall: 2026-10-05T15:30
+lastRecall: 2026-10-07T11:55
 ---
 
 # P11 shutdown-wall attribution (boot-shutdown-io, 2026-10-02, no code @ b99e967)

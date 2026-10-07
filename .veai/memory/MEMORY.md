@@ -11,7 +11,6 @@
 - [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-08c4102d02ca.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate
 - [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-3ab3f82469b1.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
-- [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-4a9cf979b001.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
 - [ft-bare-logger-liveness-trap](ft-bare-logger-liveness-trap-6399769cb81b.md) — Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)
 - [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-540a37c5ed9f.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 hypothesis now verified
@@ -35,7 +34,6 @@
 - [kb-authoring-user-requirements](kb-authoring-user-requirements-d5e5128874ab.md) — User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity
 - [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md
 - [process-hygiene-protocol](process-hygiene-protocol-74ae16a3c293.md) — Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment
-- [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-6668ba48ee3d.md) — HybridRadixCache test integrity rules + tiering store tests carry own det-clock fixture
 - [sandbox-path-absence-trap](sandbox-path-absence-trap-3f7778c9bdfc.md) — Delegated agents' list_dir is sandboxed to project root; outside paths falsely reported absent - verify via IDE terminal
 - [lean-subagent-context](lean-subagent-context-32151731dde8.md) — Cloud LLM: do not resume big-context subagents (costly); prefer fresh narrow agents; resume only for tiny deltas
 - [ft-tier-phase2-swave](ft-tier-phase2-swave-d5a28fb6bbb5.md) — Tier phase-2; offer-supersede e5dd1f2 no-op on hybrid flush; kb amended, l2-snapshot-dedup brief ready (extents)
@@ -48,7 +46,6 @@
 - [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-7ef390fc96b0.md) — GGUF prefill MMQ roofline analysis: step-0 nsys split, v0 no-op, v2 grouped +16.4%, ~758 ceiling unreachable (ALU-bound)
 - [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-5405b1861a61.md) — Hybrid decode per-layer cost model: no fixed handshake floor; CPU-leg x fetch-volume coupling; 26.9 GB/s idle-inflated
 - [kb-first-research-workflow](kb-first-research-workflow-69ea95d4e31a.md) — Research workflow: kb/ first, questions one-by-one; research+instrumentation in-session; only optimizations split out
-- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-4e3773c6a82d.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; torch.profiler aborts scheduler
 - [ft-decode-stats-instruments-unwired](ft-decode-stats-instruments-unwired-e3ffca136987.md) — Decode T1 driver v3: hook GraphRunner.replay (replay bypasses layer host code); kineto aborts scheduler; events-only
 - [kb-read-file-virtual-fs-block](kb-read-file-virtual-fs-block-18ef02cfb524.md) — read_file blocked on kb/ (empty content or virtual-FS warning); write/edit work; read via shell or call_code_agent
 - [orchestrator-emission-loop](orchestrator-emission-loop-cadbb56c54cb.md) — Emission loop: agent repeats read_* instead of planned run_command; stop, text-only turn or delegate to call_code_agent
@@ -72,7 +69,6 @@
 - [ft-p7-io-uring-wave](ft-p7-io-uring-wave-9db8ddac17e6.md) — ftw_uring.py io_uring FTW read backend: committed 21f1525, opt-in default direct; QD refuted (5.16 GB/s), sys x1.45
 - [ft-p5-lru-research](ft-p5-lru-research-b498a9e9b960.md) — P5 LRU already in prod; wipe was :329 degenerate; 94e4783 overflow observability committed; P8/P9 briefs executed
 - [ft-p1-ftw-pool-wave](ft-p1-ftw-pool-wave-c9b7aa30344f.md) — P1 FTW bank-pool committed 94d5e4a; P10 seams refuted; P12 read-tempo CLOSED NO-GO (zero-fill 8.6% @ pool=8)
-- [ft-p12-read-tempo-brief](ft-p12-read-tempo-brief-1766b14e0c22.md) — P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ default pool=8 < 10% gate; premise refuted, no code; kb fixated
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-001b6f980160.md) — gguf-native-serving skill ledger: TRAPS T01-T66 (T64-T66 microfusion, a8fb231); fix3 a20519e; counters may lag
 - [ft-fix-329-cap-accounting](ft-fix-329-cap-accounting-c912c8f24f20.md) — Fix :329 boot _ssd_used reseed from live journal, commit ab3a117; replay-timing tech-note invalid
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-5ce36c040947.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
@@ -82,3 +78,9 @@
 - [ft-merge-round4-closed](ft-merge-round4-closed-acbf7277ce25.md) — Round 4 aa0e71c fully CLOSED: boot-smoke PASS, GPU 103/0, F1 fixed by 9ac8830 (guard in load_ftw_banks_to_device)
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-13c8c4a0d708.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
 - [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-1bf2a8037367.md) — mmproj GGUF vision: кейс ЗАКРЫТ (Фазы 1-5, e35577d..f67449b), 347/347 exact, HW PASS, TRAPS T68-T75
+- [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-ec9bd17c625b.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
+- [cuda-debug-tool-strategy](cuda-debug-tool-strategy-9f1351479310.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; kineto aborts ft serve scheduler
+- [ft-p12-read-tempo-brief](ft-p12-read-tempo-brief-11eefbaf5632.md) — P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ pool=8 < 10% gate; case P1-P13 closed 2026-10-05
+- [ft-tier-restore-attempt-counter](ft-tier-restore-attempt-counter-dfcbfd7380a1.md) — Tier restore case closed P0-P3 (sim H2: aliasing healed by P1/P2, no grouping needed); follow-ups brief in .tasks
+- [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-0270361228f3.md) — HybridRadixCache test integrity: vacuous fails-before, single-revert probes, det-clock in both scheduler tier tests
+- [ft-tier-restore-followups](ft-tier-restore-followups-02c497d8552a.md) — Tier-restore follow-up waves: W1 staging HW NO-GO; W2 probe snapshot-filter + st\[3\] rollback commit 1298048

@@ -3,7 +3,7 @@ name: "ft-p13-tombstone-wave"
 description: "P13 tombstone COMMITTED (12623ff code + 91e53ff kb); KeyError accepted; sub-floor gate refined; case P1-P13 all closed"
 type: project
 lastUpdated: 2026-10-05T11:18
-lastRecall: 2026-10-05T11:01
+lastRecall: 2026-10-07T11:55
 ---
 
 # P13 durable-tombstone wave (boot-shutdown-io, 2026-10-04/05, HEAD 9d91ec8 + wave, commit pending)

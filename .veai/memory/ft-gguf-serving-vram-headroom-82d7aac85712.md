@@ -3,7 +3,7 @@ name: "ft-gguf-serving-vram-headroom"
 description: "GGUF glm5next VRAM headroom: 0.80/400k winner needs >=29.28 GiB free at boot; flips with desktop VRAM swing; options"
 type: project
 lastUpdated: 2026-09-20T20:41
-lastRecall: 2026-10-04T19:41
+lastRecall: 2026-10-07T11:56
 ---
 
 # GGUF glm5next serving VRAM headroom: measured config matrix (RTX 5090, 32607 MiB)

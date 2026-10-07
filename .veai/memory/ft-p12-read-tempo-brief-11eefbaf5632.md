@@ -1,9 +1,9 @@
 ---
 name: "ft-p12-read-tempo-brief"
-description: "P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ default pool=8 < 10% gate; premise refuted, no code; kb fixated"
+description: "P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ pool=8 < 10% gate; case P1-P13 closed 2026-10-05"
 type: project
-lastUpdated: 2026-10-04T18:36
-lastRecall: 2026-10-05T15:28
+lastUpdated: 2026-10-07T11:58
+lastRecall: 2026-10-07T11:55
 ---
 
 # P12 read-path tempo: ЗАКРЫТА NO-GO (wave-1 2026-10-04, no code @ 2d57b78)
@@ -24,7 +24,7 @@ lastRecall: 2026-10-05T15:28
 - Measurement-only волна -> один фокусный ревью вместо полного x2 (оправдано: поймал 2 TP + 2 FP в отчёте).
 
 ## kb (зафиксировано, КОММИТА НЕТ - решение пользователя)
-TASK.md P12 = ЗАКРЫТА NO-GO (числа инлайном); P1-NOTES P10-iron атрибуция = ОПРОВЕРГНУТО + коррекция; topics/ftw-load-path.md итог; НОВАЯ карточка kb/methods/limiter-attribution.md; methods/README + cases/README индексы. Артефакты волны: .tasks/boot-shutdown-io/p12-read-tempo/ (гит-игнор, нΕ переживает клон). kb-правки (5 изменённых + 1 новый файл) некоммичены.
+TASK.md P12 = ЗАКРЫТА NO-GO (числа инлайном); P1-NOTES P10-iron атрибуция = ОПРОВЕРГНУТО + коррекция; topics/ftw-load-path.md итог; НОВАЯ карточка kb/methods/limiter-attribution.md; methods/README + cases/README индексы. Артефакты волны: .tasks/boot-shutdown-io/p12-read-tempo/ (гит-игнор, не переживает клон). kb-правки (5 изменённых + 1 новый файл) некоммичены.
 
 **Why:** единственный открытый рычаг гейта P1 (23 с / 5.5 ГБ/с default-пути) исчерпан: гейт на default-пути недостижим известными рычагами; берут только born-pinned руки (22-23 с) ценой общего бута 80-85 с (не рекомендация).
-**How to apply:** не реанимировать zero-fill-рычаги для FTW-загрузки; следующий шаг кейса - P13 durable-tombstone (отдельная сессия по явному запросу).
+**How to apply:** не реанимировать zero-fill-рычаги для FTW-загрузки; кейс boot-shutdown-io P1-P13 ЗАКРЫТ 2026-10-05 - P13 tombstone реализована и закоммичена (12623ff код + 91e53ff kb), детали в ft-p13-tombstone-wave.

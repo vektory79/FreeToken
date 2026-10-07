@@ -1,9 +1,9 @@
 ---
 name: "hybrid-radix-lru-test-integrity"
-description: "HybridRadixCache test integrity rules + tiering store tests carry own det-clock fixture"
+description: "HybridRadixCache test integrity: vacuous fails-before, single-revert probes, det-clock in both scheduler tier tests"
 type: project
-lastUpdated: 2026-09-23T10:08
-lastRecall: 2026-09-30T03:14
+lastUpdated: 2026-10-07T20:50
+lastRecall: 2026-10-07T20:25
 ---
 
 # Test integrity for hybrid radix LRU tests (Fix-3 wave lessons, 2026-09-21)
@@ -28,3 +28,6 @@ How to apply: any new test asserting eviction order, LRU survival, or timestamp 
 
 ## Addition (2026-09-22, session-cache-tiering W3)
 tests/scheduler/test_session_tier.py carries its own `_deterministic_clock` autouse fixture (itertools.count over time.monotonic_ns) - the det-clock pattern is no longer exclusive to tests/kvcache/radix; when porting ordering asserts into other tests/scheduler files, copy this fixture rather than trusting the real clock.
+
+## Correction (2026-10-07, W4 review evidence)
+The "tests/scheduler does NOT get the det clock" caveat is now STALE: tests/scheduler/test_hybrid_cache_manager.py has its OWN autouse det_clock fixture (:21-36, ported earlier) alongside test_session_tier.py's. Both scheduler tier test files are deterministic; still assume nothing for NEW test files. Also confirmed: match_prefix (hybrid_radix_cache.py:96-113) re-stamps ONLY the deepest live-snapshot node then returns - fill-match re-stamps the tip, which makes wash-order deterministic under the det clock (used by the poke/control/revert pin).

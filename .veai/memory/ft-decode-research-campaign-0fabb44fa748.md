@@ -3,7 +3,7 @@ name: "ft-decode-research-campaign"
 description: "GGUF decode 5-arm A/B + additive step model + T1 block decomposition; harness .tasks/decode-research"
 type: project
 lastUpdated: 2026-09-29T23:00
-lastRecall: 2026-10-04T19:42
+lastRecall: 2026-10-07T11:56
 ---
 
 # decode-research campaign: 5-arm hybrid decode A/B on the user config (2026-09-26)

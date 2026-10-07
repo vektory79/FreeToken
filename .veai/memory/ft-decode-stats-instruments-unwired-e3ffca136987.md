@@ -3,7 +3,7 @@ name: "ft-decode-stats-instruments-unwired"
 description: "Decode T1 driver v3: hook GraphRunner.replay (replay bypasses layer host code); kineto aborts scheduler; events-only"
 type: project
 lastUpdated: 2026-09-26T22:58
-lastRecall: 2026-10-02T22:43
+lastRecall: 2026-10-07T11:55
 ---
 
 # Decode-stats instrumentation: unwired in code, T1 harness driver now exists (2026-09-26)
