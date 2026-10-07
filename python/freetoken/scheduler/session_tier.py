@@ -890,7 +890,7 @@ class SessionTierStore:
             return n + ent[3]
         return 0
 
-    def _plan_share(self, seg: _Segment) -> tuple[list, list, int | None]:
+    def _plan_share(self, seg: _Segment) -> tuple[list, int, int | None]:
         """Deepest prefix-proven same-chain in_l2 ancestor whose page region is extent
         aligned: its page extents are byte-identical to this segment's pages [0:M) (an
         equal chain key at depth d implies an equal page prefix - probe's store
@@ -1077,30 +1077,37 @@ class SessionTierStore:
         record was journaled after an fsync)."""
         payload = payload if payload is not None else b""
         shares, skip, _src = self._plan_share(seg)
-        private = payload[sum(seg.page_lens[:skip]):]
-        need = len(private)
-        r = self._reserve_blob_span(need)
-        if r is None:
-            return False
-        off, padded = r
-        view = memoryview(private + b"\0" * (padded - need))
+        # Pin the committed source across the reserve: this path's own eviction sweep
+        # can otherwise discard the refs==0 source before the crc resolution below and
+        # the journal re-creates its extents crc-less (flush-seam F1, same mechanism).
+        pins = self._pin_share_sources({_src} if _src is not None else set())
         try:
-            self._pwrite_span(off, view)
-            os.fdatasync(self._blob_fd)
-        except OSError as e:
-            logger.warning("session tier: blob append failed (%s); record aborted", e)
-            return False
-        extents = self._private_extents(seg, skip, off, private)
-        # resolve the shared extents' crc/alg/pad from the extent table (the owner
-        # registered them when its own record was journaled)
-        resolved = []
-        for soff, sn, _src in shares:
-            ent = self._extents.get((soff, sn))
-            resolved.append((soff, sn, ent[1] if ent else None,
-                             ent[2] if ent else None, ent[3] if ent else 0))
-        return self._journal_and_account(seg, resolved + extents, padded,
-                                         _calc_payload_crc(payload, _CRC32C_ALG),
-                                         off=off)
+            private = payload[sum(seg.page_lens[:skip]):]
+            need = len(private)
+            r = self._reserve_blob_span(need)
+            if r is None:
+                return False
+            off, padded = r
+            view = memoryview(private + b"\0" * (padded - need))
+            try:
+                self._pwrite_span(off, view)
+                os.fdatasync(self._blob_fd)
+            except OSError as e:
+                logger.warning("session tier: blob append failed (%s); record aborted", e)
+                return False
+            extents = self._private_extents(seg, skip, off, private)
+            # resolve the shared extents' crc/alg/pad from the extent table (the owner
+            # registered them when its own record was journaled)
+            resolved = []
+            for soff, sn, _src in shares:
+                ent = self._extents.get((soff, sn))
+                resolved.append((soff, sn, ent[1] if ent else None,
+                                 ent[2] if ent else None, ent[3] if ent else 0))
+            return self._journal_and_account(seg, resolved + extents, padded,
+                                             _calc_payload_crc(payload, _CRC32C_ALG),
+                                             off=off)
+        finally:
+            self._drop_share_pins(pins)
 
     def _seg_iovecs(self, seg: _Segment, padded: int, skip_pages: int = 0) -> list:
         """Zero-copy record layout for the freshly appended span: payload iovecs straight

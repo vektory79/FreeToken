@@ -3908,13 +3908,57 @@ def test_extent_share_source_pinned_against_builder_eviction(tmp_path):
     assert store.restore(hit[1]) == ([data for _, data in pages], [_snap("b")])
 
 
+def test_extent_share_source_pinned_against_reserve_eviction(tmp_path):
+    """F1 round 2 (runtime _write_blob seam): between _plan_share and the crc
+    resolution, the demote's own _reserve_blob_span eviction sweep can discard the
+    refs==0 committed share source; _journal_and_account then re-creates the released
+    extent with crc=None (extents_shared missed) and _ssd_used loses the source
+    span's bytes (negative-capable on the dependent's later discard). The runtime
+    path pins _src across the reserve exactly like the builder pins its deps.
+    Deterministic: p1 (the share source) is the oldest L2 segment, so pre-fix the
+    sweep evicts exactly it; post-fix it is pinned and pa (next-oldest) is evicted
+    instead, so the demote still succeeds and shares. Pre-fix the crc assert below
+    fails: the recreated (0, 256) extent carries crc None, extents_shared stays 0
+    and ssd_used 8192 drifts from the live-extents byte truth 8448."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=2048, ssd=2 * 4096, d=d))
+    keys, pages = _chain([(3, 0), (3, 1)])
+    _, ip = _chain([(4, 0)])
+    assert store.offer(b"p1", 1, pages[:1], _snap("a"))   # snap guards the supersede
+    assert store.offer(b"pa", 1, ip)                      # independent eviction fodder
+    assert store.offer(b"p2", 2, pages, _snap("b"))
+    assert store._demote_one_lru()             # oldest first: p1 -> L2 (the source)
+    assert store._demote_one_lru()             # then pa -> L2
+    seg1, seg2 = store._by_path(b"p1"), store._by_path(b"p2")
+    assert seg1.in_l2 and seg1.refs == 0 and seg2.in_l1
+    assert store._ssd_used == 2 * 4096 and store._blob_eof == 2 * 4096
+    assert store._demote(seg2)                 # cap 8192: the reserve must evict
+    snap = store.snapshot()
+    # (i) no crc=None recreated extent: the shared span kept its verifiable crc
+    assert all(e[1] is not None for e in store._extents.values())
+    # (ii) the share event is counted
+    assert snap["extents_shared"] == 1
+    # (iii) _ssd_used matches the live extents' byte truth (n + pad per extent)
+    assert snap["ssd_used"] == sum(k[1] + v[3] for k, v in store._extents.items())
+    assert snap["ssd_used"] == 2 * 4096
+    # (iv) the source survived the reserve sweep
+    assert store._by_path(b"p1") is not None and seg1.in_l2 and seg1.refs == 0
+    # both boundaries still serve byte-exact
+    hit = store.probe(keys)
+    assert store.restore(hit[1]) == ([data for _, data in pages], [_snap("b")])
+    hit = store.probe(keys[:1])
+    got = store.restore(hit[1])
+    assert got[0] == [data for _, data in pages[:1]]
+
+
 def test_extent_flush_journal_failure_blocks_dependents(tmp_path, monkeypatch):
     """F2 regression: a journal-append failure for a share source must land the
     source in failed_sids, or the dependent's record is journaled referencing a
-    span no journal record owns (boot-safe - replay drops it - but the in-memory
-    unique-byte accounting misses the span until replay/compact, contradicting the
-    dep-gate contract). The dependent is skipped and both segments keep their L1
-    residency for the retried flush."""
+    span no journal record owns. The span bytes are durable and the dependent's
+    build-time crc is valid, so replay would KEEP the record - the real defect is
+    the in-memory accounting miss (the span leaves _ssd_used until replay/compact),
+    contradicting the dep-gate contract. The dependent is skipped and both segments
+    keep their L1 residency for the retried flush."""
     d = str(tmp_path / "tier")
     store = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=d))
     keys, pages = _chain([(7, 0), (7, 1), (7, 2)])
