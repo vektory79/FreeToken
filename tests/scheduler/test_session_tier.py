@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
-import logging
 import os
 import struct
 import threading
@@ -524,25 +523,10 @@ def _graceful_stop(store):
     store.write_shutdown_marker()
 
 
-class _LogCapture(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.messages = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-@contextlib.contextmanager
-def _tier_log_capture():
-    """The module logger does not propagate (init_logger), so caplog cannot see it."""
-    lg = logging.getLogger("freetoken.scheduler.session_tier")
-    cap = _LogCapture()
-    lg.addHandler(cap)
-    try:
-        yield cap
-    finally:
-        lg.removeHandler(cap)
+@pytest.fixture
+def tier_log_capture(log_capture_factory):
+    """Module binding of the conftest factory: this module's non-propagating logger."""
+    return log_capture_factory("freetoken.scheduler.session_tier")
 
 
 def _counting_pread(monkeypatch):
@@ -1138,7 +1122,7 @@ def test_compact_sigkill_matrix_converges(tmp_path, monkeypatch, window):
     _restore_all(boot, data, [2, 3, 4])
 
 
-def test_boot_recovery_completes_armed_swap(tmp_path, monkeypatch):
+def test_boot_recovery_completes_armed_swap(tmp_path, monkeypatch, tier_log_capture):
     """P9 (g1): crash after the token armed, staged pair intact -> boot recovery
     completes the swap and logs it; the result is the clean shrunk state."""
     d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
@@ -1149,7 +1133,7 @@ def test_boot_recovery_completes_armed_swap(tmp_path, monkeypatch):
     assert os.path.exists(str(d / "swap.token"))
     assert os.path.exists(str(d / "blob.bin.new"))
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert boot.replay_journal() == 2
     assert any("completed interrupted compact swap" in m for m in cap.messages)
     assert (d / "blob.bin").stat().st_size == 2 * 4096
@@ -1157,7 +1141,7 @@ def test_boot_recovery_completes_armed_swap(tmp_path, monkeypatch):
     _restore_all(boot, data, [2, 3])
 
 
-def test_boot_recovery_rolls_back_broken_staged_pair(tmp_path, monkeypatch):
+def test_boot_recovery_rolls_back_broken_staged_pair(tmp_path, monkeypatch, tier_log_capture):
     """P9 (g2): armed token + corrupted staged blob (truncated) -> boot rolls back to
     the .old inodes; the OLD layout is intact bit-for-bit (and the discarded record
     stays dead - its tombstone is in the rolled-back journal), swap debris is gone."""
@@ -1169,7 +1153,7 @@ def test_boot_recovery_rolls_back_broken_staged_pair(tmp_path, monkeypatch):
     with open(str(d / "blob.bin.new"), "r+b") as f:
         f.truncate(4096)
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert boot.replay_journal() == 2
     assert any("rolled back" in m for m in cap.messages)
     assert (d / "blob.bin").stat().st_size == 3 * 4096
@@ -1177,7 +1161,7 @@ def test_boot_recovery_rolls_back_broken_staged_pair(tmp_path, monkeypatch):
     _restore_all(boot, data, [2, 3])
 
 
-def test_boot_recovery_rolls_back_stale_staged_journal(tmp_path, monkeypatch):
+def test_boot_recovery_rolls_back_stale_staged_journal(tmp_path, monkeypatch, tier_log_capture):
     """P9 (g3): armed token + corrupted staged JOURNAL (sha mismatch) -> same rollback."""
     d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
     _crash_on_fs(monkeypatch, lambda n, a: n == "link")
@@ -1190,7 +1174,7 @@ def test_boot_recovery_rolls_back_stale_staged_journal(tmp_path, monkeypatch):
         f.seek(20)
         f.write(bytes([b[0] ^ 0xFF]))
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert boot.replay_journal() == 2   # old journal intact; the tombstone holds
     assert any("rolled back" in m for m in cap.messages)
     assert (d / "blob.bin").stat().st_size == 3 * 4096
@@ -1224,7 +1208,7 @@ def test_compact_resets_p8_ledger_and_stats(tmp_path):
     assert "dead=0rec/0.0MiB" in line and "holes=0.0MiB" in line
 
 
-def test_graceful_stop_after_shrink_marker_fast_path(tmp_path, monkeypatch):
+def test_graceful_stop_after_shrink_marker_fast_path(tmp_path, monkeypatch, tier_log_capture):
     """P9 (e): the shutdown discipline (invalidate -> flush -> compact -> marker) leaves
     a VALID marker with the SHRUNK getsize; the next boot fast-paths with zero preads."""
     d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
@@ -1236,7 +1220,7 @@ def test_graceful_stop_after_shrink_marker_fast_path(tmp_path, monkeypatch):
         raise AssertionError("payload pread must not happen on the fast path")
 
     monkeypatch.setattr("freetoken.scheduler.session_tier.os.pread", boom)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d))
     assert n == 2
     assert any("replay fast-path (clean shutdown marker)" in m for m in cap.messages)
@@ -1262,7 +1246,7 @@ def test_append_after_shrink_survives_boot_double_reopen(tmp_path):
     assert (d / "blob.bin").stat().st_size == 3 * 4096
 
 
-def test_compact_deferred_while_blob_read_in_flight(tmp_path):
+def test_compact_deferred_while_blob_read_in_flight(tmp_path, tier_log_capture):
     """P9 (h): a shrinking swap must not move offsets under a by-path reader (restore /
     prefetch staging read outside the store lock): with a refs pin held, compact is a
     deferred no-op; released, it runs."""
@@ -1270,7 +1254,7 @@ def test_compact_deferred_while_blob_read_in_flight(tmp_path):
     hit = store.probe([chain_page_key(None, (2,))])
     seg = store._segments[hit[1]._seg_id]
     seg.refs += 1
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.compact() == 0
     assert any("compaction deferred" in m for m in cap.messages)
     assert (d / "blob.bin").stat().st_size == 3 * 4096      # unchanged
@@ -1279,7 +1263,7 @@ def test_compact_deferred_while_blob_read_in_flight(tmp_path):
     assert (d / "blob.bin").stat().st_size == 2 * 4096
 
 
-def test_compact_oserror_mid_commit_converges_to_old_pair(tmp_path, monkeypatch):
+def test_compact_oserror_mid_commit_converges_to_old_pair(tmp_path, monkeypatch, tier_log_capture):
     """Fix W10: a runtime OSError INSIDE _commit_swap after the arm (rename#2 here)
     must roll back synchronously through the anchors - the pre-fix cleanup erased the
     anchors and the token and left the NEW blob against the OLD journal: the next boot
@@ -1295,7 +1279,7 @@ def test_compact_oserror_mid_commit_converges_to_old_pair(tmp_path, monkeypatch)
         return real_rename(src, dst)
 
     monkeypatch.setattr(st.os, "rename", flaky)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.compact() == 0
     monkeypatch.undo()
     assert any("rolled back" in m for m in cap.messages)
@@ -1307,7 +1291,7 @@ def test_compact_oserror_mid_commit_converges_to_old_pair(tmp_path, monkeypatch)
     _restore_all(boot, data, [2, 3])
 
 
-def test_compact_oserror_before_arm_aborts_clean(tmp_path, monkeypatch):
+def test_compact_oserror_before_arm_aborts_clean(tmp_path, monkeypatch, tier_log_capture):
     """Fix (pre-arm path): an OSError while the commit has not started (the copy here)
     aborts cleanly - the old pair is untouched, the staged garbage is cleaned up, and
     the deferred dead records simply remain for the next compact."""
@@ -1319,7 +1303,7 @@ def test_compact_oserror_before_arm_aborts_clean(tmp_path, monkeypatch):
         raise OSError(5, "simulated EIO in the copy")
 
     monkeypatch.setattr(st.os, "pwrite", flaky)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.compact() == 0
     monkeypatch.undo()
     assert any("aborted before arm" in m for m in cap.messages)
@@ -1329,7 +1313,7 @@ def test_compact_oserror_before_arm_aborts_clean(tmp_path, monkeypatch):
     _restore_all(boot, data, [2, 3])
 
 
-def test_boot_recovery_rollback_with_anchors(tmp_path, monkeypatch):
+def test_boot_recovery_rollback_with_anchors(tmp_path, monkeypatch, tier_log_capture):
     """Fix (recovery classification): crash between the renames (anchors up) + a
     corrupted staged journal (sha mismatch) -> the boot rolls back to the OLD pair
     byte-exactly instead of renaming the corrupted journal into place."""
@@ -1346,14 +1330,14 @@ def test_boot_recovery_rollback_with_anchors(tmp_path, monkeypatch):
         f.seek(20)
         f.write(bytes([b[0] ^ 0xFF]))                        # corrupt the staged journal
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert boot.replay_journal() == 2   # rolled back to the old pair; tombstone holds
     assert any("rolled back" in m for m in cap.messages)
     assert _tier_files(d) == ["blob.bin", "journal.log"]
     _restore_all(boot, data, [2, 3])
 
 
-def test_marker_written_when_deferred_dead_all_tombstoned(tmp_path, monkeypatch):
+def test_marker_written_when_deferred_dead_all_tombstoned(tmp_path, monkeypatch, tier_log_capture):
     """P13 refines B3: a deferred compact leaves dead records journaled, but with a
     durable tombstone each they cannot fast-path-resurrect (replay filters tombstones
     before the fast-path ledger seed), so the marker stays honest and WRITES. The
@@ -1362,7 +1346,7 @@ def test_marker_written_when_deferred_dead_all_tombstoned(tmp_path, monkeypatch)
     hit = store.probe([chain_page_key(None, (2,))])
     seg = store._segments[hit[1]._seg_id]
     seg.refs += 1                       # a blob read in flight: compact WOULD defer
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         _graceful_stop_p13(store)
     seg.refs -= 1
     assert any("shutdown compact skipped" in m for m in cap.messages)
@@ -1375,13 +1359,13 @@ def test_marker_written_when_deferred_dead_all_tombstoned(tmp_path, monkeypatch)
     _restore_all(boot, data, [2, 3])
 
 
-def test_compact_writers_env_clamped(monkeypatch):
+def test_compact_writers_env_clamped(monkeypatch, tier_log_capture):
     """Fix B5 (P1 precedent): a nonsense override must not fork a thread army - clamped
     to 64 with a warning; in-range values pass through."""
     import freetoken.scheduler.session_tier as st
 
     monkeypatch.setenv("FREETOKEN_COMPACT_WRITERS", "1000")
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert st._compact_writers(8) == 64
     assert any("clamping" in m for m in cap.messages)
     monkeypatch.setenv("FREETOKEN_COMPACT_WRITERS", "63")
@@ -1390,7 +1374,7 @@ def test_compact_writers_env_clamped(monkeypatch):
     assert st._compact_writers(8) == 8
 
 
-def test_second_compact_skipped_while_token_pending(tmp_path, monkeypatch):
+def test_second_compact_skipped_while_token_pending(tmp_path, monkeypatch, tier_log_capture):
     """Fix: an armed failure that cannot roll back ('left for boot recovery') leaves the
     token + anchors + staged pair up; a SECOND compact must NOT start on top of the
     diverged disk - warning + rc=0, the recovery evidence survives, and the boot
@@ -1406,7 +1390,7 @@ def test_second_compact_skipped_while_token_pending(tmp_path, monkeypatch):
         raise OSError(5, "simulated EIO on every other rename")
 
     monkeypatch.setattr(st.os, "rename", flaky)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.compact() == 0
     monkeypatch.undo()
     assert any("left for boot recovery" in m for m in cap.messages)
@@ -1414,7 +1398,7 @@ def test_second_compact_skipped_while_token_pending(tmp_path, monkeypatch):
         assert os.path.exists(str(d / name)), name
 
     # the second compact on the SAME store: refused, evidence untouched
-    with _tier_log_capture() as cap2:
+    with tier_log_capture() as cap2:
         assert store.compact() == 0
     assert any("compaction skipped, an armed swap token is still pending" in m
                for m in cap2.messages)
@@ -1430,7 +1414,7 @@ def test_second_compact_skipped_while_token_pending(tmp_path, monkeypatch):
     _restore_all(boot, data, [2, 3])
 
 
-def test_recovery_reopen_failure_keeps_old_fds(tmp_path, monkeypatch):
+def test_recovery_reopen_failure_keeps_old_fds(tmp_path, monkeypatch, tier_log_capture):
     """Atomic tail reopen in recovery: if the second open fails, the old fds stay open
     and in charge (warned) - no fd is left closed or stale."""
     import freetoken.scheduler.session_tier as st
@@ -1451,7 +1435,7 @@ def test_recovery_reopen_failure_keeps_old_fds(tmp_path, monkeypatch):
         return real_open(path, flags, *args)
 
     monkeypatch.setattr(st.os, "open", flaky)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert boot.replay_journal() == 2
     monkeypatch.undo()
     assert any("post-recovery fd reopen failed" in m for m in cap.messages)
@@ -1757,7 +1741,7 @@ def _marker_path(d):
     return os.path.join(str(d), "shutdown.marker")
 
 
-def test_shutdown_marker_fast_path_replay(tmp_path, monkeypatch):
+def test_shutdown_marker_fast_path_replay(tmp_path, monkeypatch, tier_log_capture):
     """P2 (a): a completed graceful shutdown writes the fsync'ed marker; the next boot
     takes the fast path (no payload pread at all) and the data is intact."""
     d = tmp_path / "tier"
@@ -1771,7 +1755,7 @@ def test_shutdown_marker_fast_path_replay(tmp_path, monkeypatch):
         raise AssertionError("payload pread must not happen on the fast path")
 
     monkeypatch.setattr("freetoken.scheduler.session_tier.os.pread", boom)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d))
     assert n == 1
     assert "session tier: replay fast-path (clean shutdown marker), 1 records" in cap.messages
@@ -1781,7 +1765,7 @@ def test_shutdown_marker_fast_path_replay(tmp_path, monkeypatch):
     assert out == [x for _, x in pages] and snaps == [_snap("s")]
 
 
-def test_shutdown_marker_missing_or_stale_takes_full_path(tmp_path, monkeypatch):
+def test_shutdown_marker_missing_or_stale_takes_full_path(tmp_path, monkeypatch, tier_log_capture):
     """P2 (b): no marker, or a marker whose sizes no longer match (a runtime append after
     the previous stop) -> full per-record crc verification, records intact."""
     chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2)]
@@ -1791,7 +1775,7 @@ def test_shutdown_marker_missing_or_stale_takes_full_path(tmp_path, monkeypatch)
     for i, (keys, pages) in enumerate(chains, start=1):
         assert store.offer(f"path-{i}".encode(), 3, pages, _snap(f"{i}"))
     calls = _counting_pread(monkeypatch)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d1))
     assert n == 2 and calls["n"] == 2
     assert not any("fast-path" in m for m in cap.messages)
@@ -1813,7 +1797,7 @@ def test_shutdown_marker_missing_or_stale_takes_full_path(tmp_path, monkeypatch)
     assert n == 3 and calls["n"] == 3                             # full verification ran
 
 
-def test_shutdown_marker_full_path_drops_dead_keeps_live(tmp_path):
+def test_shutdown_marker_full_path_drops_dead_keeps_live(tmp_path, tier_log_capture):
     """P2 (b): a stale marker plus a corrupted payload region (torn append / hole) ->
     full path, the dead record is dropped with the crash-path report, the live ones
     restore byte-identically."""
@@ -1829,7 +1813,7 @@ def test_shutdown_marker_full_path_drops_dead_keeps_live(tmp_path):
         f.write(b"\xde" * seg1.l2_n)
     k4 = chain_page_key(None, (4,))
     assert store.offer(b"path-4", 1, [(k4, bytes([4]) * PAGE)])  # marker now stale
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d))
     assert n == 3
     assert "session tier: replay dropped 1 dead/torn records" in cap.messages
@@ -1844,7 +1828,7 @@ def test_shutdown_marker_full_path_drops_dead_keeps_live(tmp_path):
                                             else [(k4, bytes([4]) * PAGE)])]
 
 
-def test_shutdown_marker_invalidated_before_shutdown_crash(tmp_path, monkeypatch):
+def test_shutdown_marker_invalidated_before_shutdown_crash(tmp_path, monkeypatch, tier_log_capture):
     """P2 (c): a crash mid-shutdown_tier after a VALID marker from the previous stop must
     not give a false fast path. The marker is dropped at shutdown_tier start, before any
     flush mutation; the mid-flush crash then leaves no marker (and a torn tail)."""
@@ -1868,7 +1852,7 @@ def test_shutdown_marker_invalidated_before_shutdown_crash(tmp_path, monkeypatch
     with open(os.path.join(str(d), "journal.log"), "ab") as f:
         f.write(b"\x40\x00\x00\x00partial paylo")
     calls = _counting_pread(monkeypatch)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot3, n = _boot(str(d))
     assert n == 3                                                # live set intact
     assert calls["n"] == 3                                       # full verification ran
@@ -1914,7 +1898,7 @@ def test_fast_path_and_full_path_identical_state(tmp_path):
     assert boot_fast._marker_generation >= boot_full._marker_generation
 
 
-def test_fast_path_boot_seeds_ssd_used_from_live_records(tmp_path):
+def test_fast_path_boot_seeds_ssd_used_from_live_records(tmp_path, tier_log_capture):
     """P3 iron Finding 1: a fast-path boot must seed cap accounting (_ssd_used) from the
     live journal records, like the full path - not from the blob-size watermark, which
     carries holes (discards, previous generations). A watermark-seeded _ssd_used
@@ -1939,7 +1923,7 @@ def test_fast_path_boot_seeds_ssd_used_from_live_records(tmp_path):
                for s in store._segments.values() if s.in_l2)
     assert blob_size == live + garbage        # the watermark carries real holes
 
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
         assert boot.replay_journal() == 2     # fast path (marker sizes match)
     # fails-before: the watermark (blob size) seeded the cap accounting
@@ -1951,7 +1935,7 @@ def test_fast_path_boot_seeds_ssd_used_from_live_records(tmp_path):
 
     # Full path on the same on-disk state: identical accounting and log figure.
     os.unlink(_marker_path(d))
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot_full = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
         assert boot_full.replay_journal() == 2
     assert boot_full._ssd_used == live
@@ -1961,7 +1945,7 @@ def test_fast_path_boot_seeds_ssd_used_from_live_records(tmp_path):
     assert len(on) == 1 and "used=0.00 GiB" in on[0]
 
 
-def test_shutdown_marker_discard_invalidates(tmp_path, monkeypatch):
+def test_shutdown_marker_discard_invalidates(tmp_path, monkeypatch, tier_log_capture):
     """TP A1: a runtime discard rewrites no on-disk bytes (journal and blob eof
     untouched), so the marker's size checks cannot see it - the discard must drop the
     marker explicitly, or the next boot fast-paths a state that no longer matches the
@@ -1975,7 +1959,7 @@ def test_shutdown_marker_discard_invalidates(tmp_path, monkeypatch):
     assert store.evict_store(1) == 1             # runtime discard
     assert not os.path.exists(_marker_path(d))   # dropped immediately
     calls = _counting_pread(monkeypatch)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d))
     assert n == 0                                # P13: the tombstone keeps it dead
     assert calls["n"] == 0                       # no live records left to verify
@@ -2330,7 +2314,7 @@ def test_mixed_zlib_and_crc32c_catalog(tmp_path):
         assert boot.restore(hit[1])[0] == [data for _, data in pages]
 
 
-def test_corrupted_crc32c_record_dropped(tmp_path):
+def test_corrupted_crc32c_record_dropped(tmp_path, tier_log_capture):
     """A crc32c record whose blob region no longer matches is dead: dropped at replay
     (with the dropped-report intact), its neighbors survive."""
     d = str(tmp_path / "tier")
@@ -2347,7 +2331,7 @@ def test_corrupted_crc32c_record_dropped(tmp_path):
     with open(os.path.join(d, "blob.bin"), "r+b") as f:   # corrupt the middle record
         f.seek(victim["off"])
         f.write(b"\xAA" * 16)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
         assert boot.replay_journal() == 2
     assert any("replay dropped 1 dead/torn records" in m for m in cap.messages)
@@ -2465,7 +2449,7 @@ def test_partial_pwrite_failure_keeps_segment_in_l1(tmp_path, monkeypatch):
             assert boot.restore(hit[1])[0] == [data for _, data in pages]
 
 
-def test_failed_write_hole_skipped_by_next_group_no_dropped(tmp_path, monkeypatch):
+def test_failed_write_hole_skipped_by_next_group_no_dropped(tmp_path, monkeypatch, tier_log_capture):
     """B2: a failed group-1 write leaves a hole; the next group reserves AFTER it (the
     watermark intentionally stays past the hole). Boot takes the full path, no record
     references the hole, and 'replay dropped' is ABSENT - nothing looks dead."""
@@ -2496,7 +2480,7 @@ def test_failed_write_hole_skipped_by_next_group_no_dropped(tmp_path, monkeypatc
     recs, whole = _journal_records_raw(os.path.join(d, "journal.log"))
     assert whole and len(recs) == 2
     assert all(rec["off"] >= 4096 for rec in recs)   # the hole [0, 4096) is unreferenced
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
         assert boot.replay_journal() == 2
     assert not any("replay dropped" in m for m in cap.messages)   # nothing looks dead
@@ -2674,7 +2658,7 @@ def test_flush_pipeline_builds_next_group_during_previous_write(tmp_path, monkey
     assert boot.replay_journal() == 3
 
 
-def test_flush_group_build_failure_aborts_group_cleanly(tmp_path, monkeypatch):
+def test_flush_group_build_failure_aborts_group_cleanly(tmp_path, monkeypatch, tier_log_capture):
     """P4: a failure during group BUILD (lifting iovecs / crc off the L1 pool) aborts
     the whole group with no journal side effect: the segments keep their L1 residency
     with clean blob fields, the builder's refs pins are released, the pending volume
@@ -2698,7 +2682,7 @@ def test_flush_group_build_failure_aborts_group_cleanly(tmp_path, monkeypatch):
         return real_iovecs(self, seg, padded)
 
     monkeypatch.setattr(SessionTierStore, "_seg_iovecs", flaky)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.flush_live() == 2
     monkeypatch.undo()
     assert any("flush group #0 build failed at seg" in m and "group aborted" in m
@@ -2816,7 +2800,7 @@ def test_flush_drain_retry_admits_next_group_after_previous_settles(tmp_path, mo
     assert boot.restore(hit[1])[0] == [data for _, data in pages4]
 
 
-def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monkeypatch):
+def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monkeypatch, tier_log_capture):
     """Timeout fallback honesty: a wait_drained timeout logs a warning (what was waited
     for, how much pending is left) and retries the cap check with pending=0 - which may
     transiently over-commit the ssd cap by up to one group volume (documented in
@@ -2854,7 +2838,7 @@ def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monke
 
     monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
     monkeypatch.setattr(SessionTierStore, "_write_group", write)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.flush_live() == 2
     monkeypatch.undo()
     assert any("waited 60 s" in m and "still unjournaled" in m for m in cap.messages)
@@ -2864,7 +2848,7 @@ def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monke
 # ---------------------------------------------------- P5 flush overflow observability
 
 
-def test_flush_overflow_log_counts_cap_evictions(tmp_path, monkeypatch):
+def test_flush_overflow_log_counts_cap_evictions(tmp_path, monkeypatch, tier_log_capture):
     """P5 fails-before: a flush-phase cap eviction was invisible (no counter, no log).
     With the shrunk cap, s3's reserve evicts both runtime L2 victims and s4's
     drain-retry reserve sacrifices s3; the flush must log exactly one overflow line
@@ -2881,7 +2865,7 @@ def test_flush_overflow_log_counts_cap_evictions(tmp_path, monkeypatch):
     assert len([s for s in store._segments.values() if s.in_l2]) == 2   # runtime demotes
     store.ssd_bytes = 4096                    # every flush reserve must evict
 
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.flush_live() == 2        # s3 and s4 journaled (s3 sacrificed for s4)
     assert len(store._segments) == 1          # s1, s2, s3 discarded, only s4 survives
     overflow = [m for m in cap.messages if "flush overflow" in m]
@@ -2889,7 +2873,7 @@ def test_flush_overflow_log_counts_cap_evictions(tmp_path, monkeypatch):
                         "of oldest L2 to admit 1792 bytes"]
 
 
-def test_flush_without_evictions_logs_no_overflow_line(tmp_path):
+def test_flush_without_evictions_logs_no_overflow_line(tmp_path, tier_log_capture):
     """P5: silence when the cap never bites. Runtime L1->L2 demotes (offer pressure,
     _write_blob path) are not flush evictions and must not produce the line; the
     existing flushed-N line is untouched; an idle repeat flush logs nothing at all."""
@@ -2899,18 +2883,18 @@ def test_flush_without_evictions_logs_no_overflow_line(tmp_path):
         keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
         assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
 
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.flush_live() == 2        # only s3, s4 are still in L1
     assert not [m for m in cap.messages if "flush overflow" in m]
     assert any("flushed 2 live segments" in m for m in cap.messages)
     assert store._ssd_used == 4 * 4096        # s1..s4 journaled, nothing evicted
 
-    with _tier_log_capture() as cap:          # repeat flush: nothing live, full silence
+    with tier_log_capture() as cap:          # repeat flush: nothing live, full silence
         assert store.flush_live() == 0
     assert cap.messages == []
 
 
-def test_flush_overflow_counts_drain_retry_eviction(tmp_path, monkeypatch):
+def test_flush_overflow_counts_drain_retry_eviction(tmp_path, monkeypatch, tier_log_capture):
     """P5: the eviction made by the drain-retry reserve (the pending=0 fallback after
     a refusal caused by the previous group's still-unjournaled volume) lands in the
     same overflow tally. Refusal-first ordering is forced deterministically: group 0's
@@ -2943,7 +2927,7 @@ def test_flush_overflow_counts_drain_retry_eviction(tmp_path, monkeypatch):
 
     monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
     monkeypatch.setattr(SessionTierStore, "_write_group", write)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.flush_live() == 2
     monkeypatch.undo()
 
@@ -3203,14 +3187,14 @@ def test_flush_env_valid_group_bytes_splits_groups(tmp_path, monkeypatch):
             assert boot.restore(hit[1])[0] == [data for _, data in pages]
 
 
-def test_flush_env_below_minimum_falls_back_with_warning(monkeypatch):
+def test_flush_env_below_minimum_falls_back_with_warning(monkeypatch, tier_log_capture):
     """P6 (b): a set-but-below-minimum env knob falls back to the default with a
     warning, never a silent clamp or a zero/negative value reaching the pipeline."""
     import freetoken.scheduler.session_tier as st_mod
 
     monkeypatch.setenv("FREETOKEN_FLUSH_WRITERS", "0")
     monkeypatch.setenv("FREETOKEN_FLUSH_GROUP_BYTES", "1")   # below the 1 MiB floor
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert st_mod._flush_writers(st_mod._FLUSH_WRITERS) == st_mod._FLUSH_WRITERS
         assert (st_mod._flush_group_bytes(st_mod._FLUSH_GROUP_BYTES)
                 == st_mod._FLUSH_GROUP_BYTES)
@@ -3222,7 +3206,7 @@ def test_flush_env_below_minimum_falls_back_with_warning(monkeypatch):
                for m in warnings)
 
 
-def test_flush_env_garbage_falls_back_with_warning(monkeypatch):
+def test_flush_env_garbage_falls_back_with_warning(monkeypatch, tier_log_capture):
     """P6 (c): non-integer env values fall back to the default with a warning."""
     import freetoken.scheduler.session_tier as st_mod
 
@@ -3232,7 +3216,7 @@ def test_flush_env_garbage_falls_back_with_warning(monkeypatch):
                 monkeypatch.setenv(name, garbage)
             else:
                 monkeypatch.delenv(name, raising=False)
-            with _tier_log_capture() as cap:
+            with tier_log_capture() as cap:
                 w = st_mod._flush_writers(st_mod._FLUSH_WRITERS)
                 g = st_mod._flush_group_bytes(st_mod._FLUSH_GROUP_BYTES)
             assert w == st_mod._FLUSH_WRITERS and g == st_mod._FLUSH_GROUP_BYTES
@@ -3243,7 +3227,7 @@ def test_flush_env_garbage_falls_back_with_warning(monkeypatch):
                 assert garbage in garbage_warnings[0]
 
 
-def test_flush_config_log_line_one_per_flush(tmp_path, monkeypatch):
+def test_flush_config_log_line_one_per_flush(tmp_path, monkeypatch, tier_log_capture):
     """P6 (e): the flush logs ONE config line with the effective writers/group_bytes,
     once per flush phase (not per group) - the iron A/B attributes a run to the right
     knob even when the log tail is skimmed."""
@@ -3255,14 +3239,14 @@ def test_flush_config_log_line_one_per_flush(tmp_path, monkeypatch):
     for i in (1, 2):
         keys, pages = _big_pages(i)
         assert store.offer(f"p{i}".encode(), 1, pages, _snap(f"{i}"))
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.flush_live() == 2
     config = [m for m in cap.messages if "flush pipeline" in m]
     assert len(config) == 1
     assert "writers=3" in config[0] and "group_bytes=1048576" in config[0]
 
 
-def test_flush_env_garbage_writers_warns_once_per_flush(tmp_path, monkeypatch):
+def test_flush_env_garbage_writers_warns_once_per_flush(tmp_path, monkeypatch, tier_log_capture):
     """TP fix fails-before: writers resolved once per flush and passed down. Four
     384 KiB segments with group_bytes=1 MiB make TWO multi-segment groups; before the
     fix a garbage writers env warned at flush start AND once per group's pwrite
@@ -3277,7 +3261,7 @@ def test_flush_env_garbage_writers_warns_once_per_flush(tmp_path, monkeypatch):
         data = bytes([0x41 + i]) * (384 * 1024)
         keys = [chain_page_key(None, (i, 0))]
         assert store.offer(f"p{i}".encode(), 1, [(keys[0], data)], _snap(f"{i}"))
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         assert store.flush_live() == 4
     writer_warnings = [m for m in cap.messages
                        if "FREETOKEN_FLUSH_WRITERS" in m and "non-integer" in m]
@@ -3363,7 +3347,7 @@ def test_legacy_records_replay_unchanged_next_to_hand_framed_tombstone(tmp_path)
     _restore_all(boot, data, [2, 3])
 
 
-def test_shutdown_compact_skipped_all_dead_tombstoned_marker_fast_path(tmp_path, monkeypatch):
+def test_shutdown_compact_skipped_all_dead_tombstoned_marker_fast_path(tmp_path, monkeypatch, tier_log_capture):
     """P13 core: with every dead record tombstoned and the watermark above the P8
     floor the shutdown compact SKIPS (no blob rewrite), the marker still WRITES (they
     cannot fast-path-resurrect), and the next boot fast-paths with zero preads, the
@@ -3372,7 +3356,7 @@ def test_shutdown_compact_skipped_all_dead_tombstoned_marker_fast_path(tmp_path,
 
     d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,), blob_above_floor=True)
     assert store._blob_eof >= st_mod._COMPACT_FLOOR_BYTES   # the skip gate's premise
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         _graceful_stop_p13(store)
     assert any("shutdown compact skipped" in m for m in cap.messages)
     assert os.path.exists(_marker_path(d))
@@ -3383,7 +3367,7 @@ def test_shutdown_compact_skipped_all_dead_tombstoned_marker_fast_path(tmp_path,
         raise AssertionError("payload pread must not happen on the fast path")
 
     monkeypatch.setattr("freetoken.scheduler.session_tier.os.pread", boom)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d))
     assert n == 2
     assert any("replay fast-path (clean shutdown marker)" in m for m in cap.messages)
@@ -3393,7 +3377,7 @@ def test_shutdown_compact_skipped_all_dead_tombstoned_marker_fast_path(tmp_path,
     _restore_all(boot, data, [2, 3])
 
 
-def test_shutdown_compact_below_floor_rewrites_small_tier(tmp_path):
+def test_shutdown_compact_below_floor_rewrites_small_tier(tmp_path, tier_log_capture):
     """P13 gate refine (fails-before): a tier whose blob stays below the P8 compact
     floor keeps the pre-P13 shutdown hygiene - the compact RUNS even though every
     dead record is already tombstoned (the runtime gate can never fire down there,
@@ -3402,7 +3386,7 @@ def test_shutdown_compact_below_floor_rewrites_small_tier(tmp_path):
 
     d, store, data = _shrink_fixture(tmp_path, n=3, dead=(1,))
     assert store._blob_eof < st_mod._COMPACT_FLOOR_BYTES    # below the floor
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         _graceful_stop_p13(store)
     assert any("compact shrink" in m for m in cap.messages)
     assert not any("shutdown compact skipped" in m for m in cap.messages)
@@ -3417,7 +3401,7 @@ def test_shutdown_compact_below_floor_rewrites_small_tier(tmp_path):
     _restore_all(boot, data, [2, 3])
 
 
-def test_full_replay_ledger_mixed_tombstoned_and_payload_dead(tmp_path):
+def test_full_replay_ledger_mixed_tombstoned_and_payload_dead(tmp_path, tier_log_capture):
     """P13 ledger exactness on the FULL replay path with mixed dead: a tombstoned
     victim (v) and a payload-crc-dead record (pdropped) each feed the P8 ledger
     exactly once (dead = v + pdropped), while only the untombstoned payload-dead
@@ -3426,7 +3410,7 @@ def test_full_replay_ledger_mixed_tombstoned_and_payload_dead(tmp_path):
     with open(d / "blob.bin", "r+b") as f:      # corrupt record 2: pdropped = 1
         f.seek(4096)
         f.write(b"\\xde" * 256)
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d))                 # full path: no marker was ever written
     assert n == 2                               # live: 3, 4
     assert any("replay honored 1 tombstones" in m for m in cap.messages)
@@ -3461,7 +3445,7 @@ def test_tombstone_append_failure_forces_shutdown_compact(tmp_path, monkeypatch)
     _restore_all(boot, data, [2, 3])
 
 
-def test_marker_skipped_when_blocker_and_compact_deferred(tmp_path, monkeypatch):
+def test_marker_skipped_when_blocker_and_compact_deferred(tmp_path, monkeypatch, tier_log_capture):
     """B3 survives for un-tombstoned dead: a failed tombstone append + a deferred
     compact (blob reads in flight) leave dead records WITHOUT tombstones - the marker
     must not write, or a fast-path boot would resurrect them (the pre-P13 behavior)."""
@@ -3475,7 +3459,7 @@ def test_marker_skipped_when_blocker_and_compact_deferred(tmp_path, monkeypatch)
     hit = store.probe([chain_page_key(None, (2,))])
     seg = store._segments[hit[1]._seg_id]
     seg.refs += 1                       # a blob read in flight: compact defers
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         _graceful_stop_p13(store)
     seg.refs -= 1
     assert any("compaction deferred" in m for m in cap.messages)
@@ -3485,14 +3469,14 @@ def test_marker_skipped_when_blocker_and_compact_deferred(tmp_path, monkeypatch)
     assert n == 3                       # the pre-P13 discard durability, unchanged
 
 
-def test_torn_tombstone_never_applied_converges(tmp_path):
+def test_torn_tombstone_never_applied_converges(tmp_path, tier_log_capture):
     """Crash window of a torn tombstone: a torn tombstone tail fails the framing crc,
     replay stops at the last complete record and converges to the pre-discard state -
     the same semantics as a torn live-record append (no corruption, no live loss)."""
     d, store, data = _shrink_fixture(tmp_path, n=3, dead=())
     with open(d / "journal.log", "ab") as f:
         f.write(struct.pack("<I", 18) + b'{"t":1,"pat')   # torn tombstone tail
-    with _tier_log_capture() as cap:
+    with tier_log_capture() as cap:
         boot, n = _boot(str(d))
     assert any("journal tail truncated/torn" in m for m in cap.messages)
     assert n == 3

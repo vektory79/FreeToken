@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import contextlib
 import itertools
-import logging
 import time
 from types import SimpleNamespace
 
@@ -2507,25 +2506,10 @@ def test_bug3_refused_restore_leaves_tree_ledger_and_store_intact():
 
 
 # ------------------------------------------------- P0 telemetry: restore_ok / restore_refused
-class _CacheLogCapture(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.messages = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-@contextlib.contextmanager
-def _cache_log_capture():
-    """The module logger does not propagate (init_logger), so caplog cannot see it."""
-    lg = logging.getLogger("freetoken.scheduler.cache")
-    cap = _CacheLogCapture()
-    lg.addHandler(cap)
-    try:
-        yield cap
-    finally:
-        lg.removeHandler(cap)
+@pytest.fixture
+def tier_log_capture(log_capture_factory):
+    """Module binding of the conftest factory: this module's non-propagating logger."""
+    return log_capture_factory("freetoken.scheduler.cache")
 
 
 def test_restore_telemetry_counters_ok_refused_and_stats_line():
@@ -2582,7 +2566,7 @@ def test_restore_telemetry_counters_ok_refused_and_stats_line():
     assert "restore=2(l1)/0(l2)" in line         # attempt counters unchanged by the split
 
 
-def test_restore_refusal_log_line_carries_divergence_fields():
+def test_restore_refusal_log_line_carries_divergence_fields(tier_log_capture):
     """P0 fails-before: every refusal logs ONE line with the probe depth (pages), the tree's
     cached_len, the owned_prefix frontier, the offer's snap_bound and the session key's
     short hash - the fields the tier-loss case needs for its divergence verdict."""
@@ -2599,7 +2583,7 @@ def test_restore_refusal_log_line_carries_divergence_fields():
     cm._tier_offer([VictimPath(chain4[3], 4, tuple(chain4),
                                torch.arange(4, dtype=torch.int32), None)])
 
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         saved = cm.free_slots
         cm.free_slots = saved[:2]
         cm.match_req(_pend([1, 2, 3, 4, 9]))     # resource refusal: depth 4, 4 pages needed
@@ -2618,7 +2602,7 @@ def test_restore_refusal_log_line_carries_divergence_fields():
     assert "depth_pg=4" in res
 
 
-def test_shutdown_final_line_renders_probe_and_prefetch_rejection_counters():
+def test_shutdown_final_line_renders_probe_and_prefetch_rejection_counters(tier_log_capture):
     """W3 (brief item 4 + review 1298048 addendum): the shutdown final line renders the
     rejection counters - midsn= (probe_midspan_only), snapfree= (probe_snapfree_skip, the
     W2 snapshot-free boundary-exact skip shape) and prej= (prefetch_rej_cap) - with
@@ -2627,7 +2611,7 @@ def test_shutdown_final_line_renders_probe_and_prefetch_rejection_counters():
     pool, kvpool = _pool(), _FakeKVPool()
     pt = torch.zeros(4, 64, dtype=torch.int32)
     cm = _tiered_cm(pool, kvpool, pt)
-    with _cache_log_capture() as cap:            # no events: preseeded zeros still render
+    with tier_log_capture() as cap:            # no events: preseeded zeros still render
         cm.shutdown_tier()
     final = next(m for m in cap.messages if "session tier final:" in m)
     assert "midsn=0" in final and "snapfree=0" in final and "prej=0" in final
@@ -2673,13 +2657,13 @@ def test_shutdown_final_line_renders_probe_and_prefetch_rejection_counters():
     snap = store.snapshot()
     assert snap["probe_midspan_only"] == 1 and snap["probe_snapfree_skip"] == 1
 
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         cm.shutdown_tier()
     final = next(m for m in cap.messages if "session tier final:" in m)
     assert "midsn=1" in final and "snapfree=1" in final and "prej=1" in final
 
 
-def test_prefetch_adopt_refusal_deduped_at_sync_fall_through():
+def test_prefetch_adopt_refusal_deduped_at_sync_fall_through(tier_log_capture):
     """TP1 fails-before: when an adopt-leg snap-gate refusal falls through to the sync
     path, the SAME gate refuses again on the same probe (one probe, one handle, identical
     fields). The old code counted restore_refused twice and logged two identical lines
@@ -2695,7 +2679,7 @@ def test_prefetch_adopt_refusal_deduped_at_sync_fall_through():
     # the safety net, and the adopt -> sync fall-through repeats it once (deduped).
     cm._tier_snap_bound.pop(cm._tier_prefetch[key].path_key)
 
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         mr = cm.match_req(_pend([1, 2, 3, 4, 9]))   # boundary-exact depth 4 adopt
     assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
     assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
@@ -2709,7 +2693,7 @@ def test_prefetch_adopt_refusal_deduped_at_sync_fall_through():
     assert snap["restore_l1"] == 1               # the sync re-read still counts its attempt
 
 
-def test_restore_refusal_log_nonzero_divergence_fields():
+def test_restore_refusal_log_nonzero_divergence_fields(tier_log_capture):
     """TP2: the divergence-field signature the HW classifier matches - the tree owns a
     live snapshot prefix (cached_tok > 0, owned_pg > 0) while the store's boundary-exact
     segment refuses at the gate: the offer-time bound was popped (the failed-re-offer
@@ -2732,7 +2716,7 @@ def test_restore_refusal_log_nonzero_divergence_fields():
     chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
     cm._tier_snap_bound.pop(chain4[3])
 
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         mr = cm.match_req(_pend([1, 2, 3, 4, 9]))   # tree cached 1, probe boundary-exact 4
     assert mr.cuda_handle.cached_len == 1
     (line,) = [m for m in cap.messages if "session tier restore refused:" in m]
@@ -2743,7 +2727,7 @@ def test_restore_refusal_log_nonzero_divergence_fields():
     assert "depth_pg=4" in line and "snap_bound=-" in line
 
 
-def test_kvonly_restore_refusal_line_mgr_kv():
+def test_kvonly_restore_refusal_line_mgr_kv(tier_log_capture):
     """TP4a: the plain-radix manager's resource refusal tags mgr=kv and carries no snap
     bound (KV-only offers set none): the snap gate is unreachable there by construction."""
     kvpool = _FakeKVPool()
@@ -2758,7 +2742,7 @@ def test_kvonly_restore_refusal_line_mgr_kv():
     cm._tier_offer(victims)                      # wash: tree empty, store warm (KV-only)
     saved = cm.free_slots
     cm.free_slots = saved[:2]                    # the 12-page restore cannot fit
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         mr = cm.match_req(_pend(ids + [99]))
     cm.free_slots = saved
     assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
@@ -2769,7 +2753,7 @@ def test_kvonly_restore_refusal_line_mgr_kv():
     assert cm.tier_store.snapshot()["restore_refused"] == 1
 
 
-def test_restore_bytes_mismatch_refusal_reason_bytes(monkeypatch):
+def test_restore_bytes_mismatch_refusal_reason_bytes(monkeypatch, tier_log_capture):
     """TP4b: a store result whose page count misses the probe depth (len(pages) != depth)
     refuses at the shared tail with reason=bytes."""
     cm, pool, kvpool, _original = _washed_hybrid_cm()
@@ -2780,7 +2764,7 @@ def test_restore_bytes_mismatch_refusal_reason_bytes(monkeypatch):
         return pages[:-1], snaps
 
     monkeypatch.setattr(cm.tier_store, "restore", short_restore)
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         mr = cm.match_req(_pend([1, 2, 3, 4, 9]))
     assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
     (line,) = [m for m in cap.messages if "session tier restore refused:" in m]
@@ -2791,7 +2775,7 @@ def test_restore_bytes_mismatch_refusal_reason_bytes(monkeypatch):
 
 # ------------- P1: the hybrid probe serves boundary-exact candidates only
 
-def test_hybrid_probe_serves_boundary_exact_below_divergence_m2c():
+def test_hybrid_probe_serves_boundary_exact_below_divergence_m2c(tier_log_capture):
     """P1 fails-before (M2c, the HW shape at page granularity): the store holds the washed
     tip (boundary 4, GDN snapshot at 4) plus an older boundary-2 segment (snapshot at 2);
     a turn diverging at 3 used to probe-match the tip MID-SPAN at 3 and refuse at the snap
@@ -2818,7 +2802,7 @@ def test_hybrid_probe_serves_boundary_exact_below_divergence_m2c():
     assert {seg.boundary_len for seg in cm.tier_store._segments.values()} == {2, 4}
     assert cm._tier_snap_bound[chain2[1]] == 2 and cm._tier_snap_bound[chain4[3]] == 4
 
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         mr = cm.match_req(_pend([1, 2, 3, 9]))   # divergence at 3: mid-span for the tip
     assert mr.cuda_handle.cached_len == 2        # fails-before: 0 (mid-span 3, snap-gate refusal)
     assert mr.mamba_value is not None
@@ -2828,7 +2812,7 @@ def test_hybrid_probe_serves_boundary_exact_below_divergence_m2c():
     assert cap.messages == []                    # no fictional refusal
 
 
-def test_hybrid_probe_no_boundary_exact_is_an_honest_miss():
+def test_hybrid_probe_no_boundary_exact_is_an_honest_miss(tier_log_capture):
     """P1 fails-before: with ONLY a mid-span match available (tip boundary 4, divergence
     at 3, the M1-class shape) the old probe returned the unservable 3 and the snap gate
     logged a refusal for a restore that could never serve - a fictional refusal. The
@@ -2841,7 +2825,7 @@ def test_hybrid_probe_no_boundary_exact_is_an_honest_miss():
     cm.ensure_mamba_slots(pool.num_slots)        # tree empty, store holds the bound-4 tip
 
     pre = cm.tier_store.snapshot()               # the cold admission already probed (miss)
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         mr = cm.match_req(_pend([1, 2, 3, 9]))   # divergence at 3: mid-span only
     assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
     snap = cm.tier_store.snapshot()
@@ -2880,7 +2864,7 @@ def test_kvonly_midspan_restore_still_truncates():
 
 # ------------- P2: the divergence is recorded at the owned frontier
 
-def test_hybrid_midhistory_divergence_owned_frontier_under_slot_restore():
+def test_hybrid_midhistory_divergence_owned_frontier_under_slot_restore(tier_log_capture):
     """P2 fails-before (HW M2a + M2c shape at page granularity): a mid-history rewrite
     leaves the tree OWNING the shared pages (tombstones included) with no live snapshot on
     the walked path, so cached_len is 0. Recording st[1]=cached_len kept the
@@ -2928,7 +2912,7 @@ def test_hybrid_midhistory_divergence_owned_frontier_under_slot_restore():
     assert cm._tier_snap_bound[chain2[1]] == 2
     assert {s.boundary_len for s in cm.tier_store._segments.values()} == {2}
 
-    with _cache_log_capture() as cap:
+    with tier_log_capture() as cap:
         mr2 = cm.match_req(_pend([1, 2, 9, 9, 9]))   # control turn (HW M2c)
     assert mr2.cuda_handle.cached_len == 2       # fails-before: 0 (full miss)
     assert mr2.mamba_value is not None           # the stored snapshot rides the match
@@ -3066,6 +3050,267 @@ def test_kvonly_admission_divergence_still_records_cached_len():
     cm.match_req(_pend([1, 2, 3, 4, 99, 98]))    # divergence at 4
     chain = cm._chain_keys(torch.tensor(ids, dtype=torch.int32))
     assert cm._tier_sessions[chain[0]] == [8, 4, 0, None]
+
+
+# ------------- W4: review-folded pins (boundary restore invariants, current behavior)
+
+def test_multi_turn_poke_control_revert_restores_at_boundaries(tier_log_capture):
+    """Brief item 6 (HW M2/M2c/M3 manager shape): fill a hybrid session, poke an insertion
+    at mid-history, the clean control turn restores HIT at the insertion boundary, and
+    after the insertion boundary washed too the reverted-history control turn restores HIT
+    at the original boundary again - no full miss, no refusal line anywhere. Depths are
+    asserted by boundary KEY identity, never by filtered counts."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+
+    chain2 = cm._chain_keys(torch.tensor([1, 2], dtype=torch.int32))
+    chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+
+    # fill: two live snapshot boundaries; the second admission promotes the tip (st[0]=4)
+    cm.match_req(_pend([1, 2, 3, 4, 50]))          # cold: tracks the session
+    pages = cm._allocate(4)
+    cm.prefix_cache.insert(torch.tensor([1, 2], dtype=torch.int32), pages[:2],
+                           pool.alloc(1)[0])
+    cm.prefix_cache.insert(torch.tensor([1, 2, 3, 4], dtype=torch.int32), pages,
+                           pool.alloc(1)[0])
+    mr = cm.match_req(_pend([1, 2, 3, 4, 50]))
+    assert mr.cuda_handle.cached_len == 4
+    assert cm._tier_sessions[chain2[0]] == [4, 0, 0, None]
+
+    # poke: insertion at page 3 (mid-history). The tree match keeps the [1,2] snapshot;
+    # the divergence records the owned frontier (P2); the store is still empty.
+    poke = [1, 2, 8, 3, 4, 60]
+    mr = cm.match_req(_pend(poke))
+    assert mr.cuda_handle.cached_len == 2
+    assert cm._tier_sessions[chain2[0]] == [4, 2, 0, None]
+
+    # M2 churn, LRU order: the ORIGINAL tip washes first (tip keeper -> store, bound set),
+    # then the insertion-boundary snapshot fills the under-divergence slot
+    cm.ensure_mamba_slots(pool.num_free_slots + 1)
+    assert cm._tier_snap_bound[chain4[3]] == 4
+    cm.ensure_mamba_slots(pool.num_free_slots + 1)
+    assert cm._tier_sessions[chain2[0]] == [4, 2, 2, 2]   # the wash also lands on the spare
+    assert cm._tier_snap_bound[chain2[1]] == 2
+    # the poke turn's own KV-only tip lands snapshot-free (restore-finish adoption shape)
+    chain_poke = cm._chain_keys(torch.tensor(poke[:5], dtype=torch.int32))
+    assert cm.tier_store.offer(chain_poke[4], 5,
+                               [(key, b"x" * 64) for key in chain_poke])
+    assert cm.prefix_cache.root.children == {}     # tree empty: both restores go to tier
+
+    # M2c control: boundary-exact restore at the insertion boundary (KEY chain2[1]); the
+    # snapshot-free poke tip is skipped, never served mid-span nor via the snap gate
+    with tier_log_capture() as cap:
+        hit = cm.tier_store.probe(cm._chain_keys(torch.tensor(poke[:5],
+                                                             dtype=torch.int32)),
+                                  boundary_exact=True)
+        assert hit[0] == 2 and hit[1].path_key == chain2[1]     # KEY identity
+        mr = cm.match_req(_pend(poke[:5] + [9]))
+    assert mr.cuda_handle.cached_len == 2
+    assert mr.mamba_value is not None
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
+    assert snap["probe_snapfree_skip"] == 2     # manual probe + the admission probe
+    assert cap.messages == []
+
+    # M3 revert control: the insertion is undone; the store still holds the ORIGINAL
+    # boundary -> HIT at KEY chain4[3], again with zero refusals
+    with tier_log_capture() as cap:
+        mr = cm.match_req(_pend([1, 2, 3, 4, 70]))
+    assert mr.cuda_handle.cached_len == 4
+    assert mr.mamba_value is not None
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 2 and snap["restore_refused"] == 0
+    assert snap["restore_l1"] == 2
+    assert cm._tier_sessions[chain2[0]][3] == 2  # the keep set was never disturbed
+    assert cap.messages == []                    # no full miss, no leftover refusal
+
+
+def test_divergence_frontier_stays_above_the_floor_across_the_keep_set():
+    """Brief item 6 (st[1] > st[0], traced benign): the divergence recorded at admission
+    is the UNCAPPED owned frontier (P2) and it lands ABOVE the recorded floor st[0]; the
+    under-divergence keep set st[3] fills deepest-first at/below it and survives the next
+    divergence. Only _tier_offer consumes st[1] (the under-branch upper bound), which is
+    why a later st[0] climb past it stays benign - the pair ordering asserted here is the
+    one that branch relies on."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain6 = cm._chain_keys(torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32))
+    # owned KV past the recorded floor, no live snapshot anywhere (post-wash shape)
+    pages = cm._allocate(6)
+    cm.prefix_cache.insert(torch.tensor([1, 2], dtype=torch.int32), pages[:2], None)
+    cm.prefix_cache.insert(torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32),
+                           pages, None)
+    cm._tier_sessions[chain6[0]] = [4, 0, 0, None]   # floor 4, recorded pre-wash
+
+    mr = cm.match_req(_pend([1, 2, 3, 4, 5, 6, 9]))  # divergence admission: cached 0
+    assert mr.cuda_handle.cached_len == 0
+    st = cm._tier_sessions[chain6[0]]
+    assert st[1] == 6 and st[1] > st[0]              # frontier ABOVE the floor
+
+    slot3 = pool.alloc(1)[0]                         # the keep set: bearers at/below the
+    cm._tier_offer([VictimPath(chain6[2], 3, tuple(chain6[:3]),   # frontier, deepest wins
+                               torch.arange(3, dtype=torch.int32), slot3)])
+    pool.free(slot3)
+    st = cm._tier_sessions[chain6[0]]
+    assert st[3] == 3 and st[1] > st[0]
+
+    slot4 = pool.alloc(1)[0]
+    cm._tier_offer([VictimPath(chain6[3], 4, tuple(chain6[:4]),
+                               torch.arange(4, dtype=torch.int32), slot4)])
+    pool.free(slot4)
+    st = cm._tier_sessions[chain6[0]]
+    assert st[3] == 4 and st[3] <= st[1] and st[1] > st[0]
+
+    # a second divergence narrows the frontier; floor and keep set survive it
+    mr = cm.match_req(_pend([1, 2, 3, 4, 5, 8, 9]))  # poke at page 6
+    st = cm._tier_sessions[chain6[0]]
+    assert st[1] == 5 and st[1] > st[0]
+    assert st[3] == 4                                # the >= st[3] rule kept the deepest
+    assert mr.cuda_handle.cached_len == 4            # the keep set serves the poke turn
+    assert mr.mamba_value is not None
+
+
+def test_prefetch_stages_only_boundary_exact_candidates():
+    """Brief item 6 (P1 review fold): the hybrid idle prefetch probes boundary-exact
+    (cache.py _tier_prefetch_begin), so a mid-span-only sighting stages NOTHING - no
+    prefetch begin, no ticket - while a boundary-exact snapshot-bearing candidate does
+    begin staging on the next idle pass."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    store = cm.tier_store
+
+    cm.match_req(_pend([1, 2, 3, 8, 9]))             # track the session on the poke chain
+    from freetoken.scheduler.session_tier import chain_page_key
+
+    k4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    # two prefix-sharing segments: the fill tip (boundary 4) and an own branch at 3 - the
+    # W3 recipe for a genuine mid-span-only sighting at the visited depth 3
+    assert store.offer(k4[3], 4, [(key, b"x" * 64) for key in k4], b"s" * 16)
+    e2 = chain_page_key(k4[1], (7, 7))
+    assert store.offer(e2, 3, [(k4[0], b"x" * 64), (k4[1], b"x" * 64), (e2, b"e" * 64)],
+                       b"s" * 16)
+
+    cm.prefetch_tier_idle()                          # depth 3 crosses the boundary-4 seg
+    assert cm._tier_prefetch == {} and store._tickets == {}
+    snap = store.snapshot()
+    assert snap["probe_midspan_only"] == 1
+    assert snap["prefetch_probe_miss"] == 1 and snap["prefetch_begin"] == 0
+    assert snap["probe_snapfree_skip"] == 0          # a mid-span sighting is not a skip
+
+    k3 = k4[:3]                                      # a boundary-exact bearer DOES stage
+    assert store.offer(k3[2], 3, [(key, b"y" * 64) for key in k3], b"s" * 16)
+    cm.prefetch_tier_idle()
+    _settle_tier(cm)
+    key = cm._chain_keys(torch.tensor([1, 2, 3, 8], dtype=torch.int32))[0]
+    assert cm._tier_prefetch[key].ticket.state == "ready"
+    snap = store.snapshot()
+    assert snap["prefetch_begin"] == 1 and snap["prefetch_probe_hit"] == 1
+
+
+def test_prefetch_walk_counts_the_snapfree_skip():
+    """W3-review fold: probe_snapfree_skip increments via the IDLE-PREFETCH walk too
+    (stamp=False, boundary_exact=self.is_hybrid). The snapshot-free boundary-exact
+    candidate is constructed so only the prefetch walk ever sees it: the admission that
+    tracked the session ran while the store was still empty."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    store = cm.tier_store
+
+    cm.match_req(_pend([1, 2, 3, 4, 9]))             # track the session (store empty)
+    assert store.snapshot()["probe_snapfree_skip"] == 0
+    k = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    assert store.offer(k[3], 4, [(key, b"x" * 64) for key in k])   # KV-only tip offer
+
+    cm.prefetch_tier_idle()                          # only the prefetch walk sees it
+    assert cm._tier_prefetch == {} and store._tickets == {}
+    snap = store.snapshot()
+    assert snap["probe_snapfree_skip"] == 1          # fails-before (revert): 0, staged
+    assert snap["prefetch_probe_miss"] == 1 and snap["prefetch_begin"] == 0
+    assert snap["probe_midspan_only"] == 0           # a skip is not a mid-span sighting
+
+
+def test_dead_snap_bound_bearer_reaches_gate_without_substitution(tier_log_capture):
+    """W2-review pin (1298048 fires only on snap_lens EMPTY): a boundary-exact candidate
+    WITH snapshot rows but a dead snap bound (the offer-time currency never established /
+    expired) is NOT skipped by the probe - it reaches the restore gate and is refused
+    honestly (reason=snap_gate, one refusal line, restore_refused counted), while the
+    even-deeper snapshot-free segment is skipped; no shallower live bearer is silently
+    substituted after the refusal."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    store = cm.tier_store
+    k = cm._chain_keys(torch.tensor([1, 2, 3, 4, 9], dtype=torch.int32))
+    # deepest: snapshot-free boundary-exact seg (the KV-only tip shape) - must be skipped
+    assert store.offer(k[4], 5, [(key, b"x" * 64) for key in k])
+    # mid: snapshot-bearing but the snap bound is dead -> the gate refuses it
+    assert store.offer(k[3], 4, [(key, b"y" * 64) for key in k[:4]], b"s" * 16)
+    # shallow: a LIVE bearer that must NOT be silently substituted after the refusal
+    assert store.offer(k[1], 2, [(key, b"z" * 64) for key in k[:2]], b"s" * 16)
+
+    hit = store.probe(k, boundary_exact=True)
+    assert hit[0] == 4 and hit[1].path_key == k[3]   # the dead-bound bearer is served
+    assert store.snapshot()["probe_snapfree_skip"] == 1   # only the snapfree seg skipped
+
+    with tier_log_capture() as cap:
+        mr = cm.match_req(_pend([1, 2, 3, 4, 9, 9]))
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    (line,) = [m for m in cap.messages if "session tier restore refused:" in m]
+    assert "reason=snap_gate" in line and "depth_pg=4" in line
+    assert "snap_bound=-" in line                    # the dead bound renders as absent
+    snap = store.snapshot()
+    assert snap["restore_refused"] == 1 and snap["restore_ok"] == 0
+    assert snap["restore_l1"] == 1                   # ONE store read: no substitution
+    assert snap["probe_snapfree_skip"] == 2          # manual probe + the admission probe
+    assert cm._tier_pending_restore == {}
+    cm.check_integrity()                             # the refusal leaked nothing
+
+
+def test_tier_offer_exception_before_commit_leaves_slot_untouched(tier_log_capture):
+    """W2-review pin (under_commit=False): an offer exception on a tip/spare keeper never
+    committed the under slot - st[3] stays None, the spare promotion stands, exactly one
+    warning is logged and the exception re-raises; a shallower bearer is admitted right
+    after. Contrast with the after-commit rollback pin
+    (test_tier_offer_exception_rolls_back_under_slot)."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+    from freetoken.kvcache.utils import chain_page_key
+
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    k = [chain_page_key(None, (1,))]
+    for t in (2, 3, 4):
+        k.append(chain_page_key(k[-1], (t,)))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("store offer exploded")
+
+    cm._tier_sessions[k[0]] = [8, 2, 0, None]        # tip 8 tok, divergence 2 tok
+    real_offer = cm.tier_store.offer
+    cm.tier_store.offer = boom
+    slot = pool.alloc(1)[0]
+    with tier_log_capture() as cap:
+        with pytest.raises(RuntimeError, match="store offer exploded"):
+            cm._tier_offer([VictimPath(k[1], 4, tuple(k[:2]),
+                                       torch.arange(2, dtype=torch.int32), slot)])
+    cm.tier_store.offer = real_offer
+    pool.free([slot])
+    st = cm._tier_sessions[k[0]]
+    assert st == [8, 2, 4, None]     # spare promoted pre-offer, under slot NEVER touched
+    warnings_ = [m for m in cap.messages if "session tier offer raised" in m]
+    assert len(warnings_) == 1       # fails-before (revert): no try/except, no line
+
+    snap2 = pool.alloc(1)[0]                         # the slot admits the next bearer now
+    cm._tier_offer([VictimPath(k[0], 2, tuple(k[:1]),
+                               torch.arange(1, dtype=torch.int32), snap2)])
+    pool.free([snap2])
+    assert cm._tier_sessions[k[0]][3] == 2
 
 
 if __name__ == "__main__":
