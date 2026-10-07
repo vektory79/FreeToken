@@ -29,6 +29,15 @@ Specification / Acceptance / Checklist.
 - [fix3-snapshot-lru-refresh/](fix3-snapshot-lru-refresh/) — диагностика
   периодической полной потери кэша по двум телам запросов; WAVES-план волн.
   Вход: [TASK.md](fix3-snapshot-lru-refresh/TASK.md). Статус: OPEN.
+- [tier-restore-cache-loss/](tier-restore-cache-loss/) — исследование 2026-10-06:
+  полная потеря кеша сессии при работе агента (save_memory/вопрос/move между
+  ходами), счётчик restore растёт, кеш не восстанавливается. Диагноз: счётчик
+  считает попытки, гейт снапшота отказывает mid-span матч, probe маскирует
+  boundary-exact сегмент, дивергенция в адаптивном наборе пишется нулём.
+  Бриф фикса P0-P3 (P0 телеметрия закрывает точку дивергенции). Вход:
+  [TASK.md](tier-restore-cache-loss/TASK.md). Статус: P0 исполнен
+  (телеметрия ok/refused + железная серия 2026-10-07), P1/P2 обязательны
+  для семейства move/вопрос.
 - [session-cache-tiering/](session-cache-tiering/) — бриф ярусного кеша сессий
   (L0 VRAM -> L1 RAM 30 GiB -> L2 SSD 100 GiB): pull-on-evict с адаптивной
   селекцией, контент-адресный стор, журнал-персистентность; фазы 1/2, приёмка
