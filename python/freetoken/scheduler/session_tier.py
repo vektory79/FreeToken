@@ -79,6 +79,11 @@ _ZERO_BLK = bytes(_BLK)
 _COMPACT_WRITERS = 8
 _COMPACT_CHUNK = 32 << 20
 _COMPACT_WRITERS_ENV = "FREETOKEN_COMPACT_WRITERS"
+# L2 extent dedup: an extent list longer than this falls back to a private copy. The
+# bound exists for pathological chains only - prefix sharing grows the list linearly
+# with boundary count (boundary k references k-1 page extents + own tail + snaps), and
+# a tight cap would defeat the dedup on exactly the many-boundary sessions it targets.
+_MAX_RECORD_EXTENTS = 64
 
 
 def _flush_writers(requested: int) -> int:
@@ -288,10 +293,14 @@ class _Segment:
     # L1 residency: per-page / per-snapshot pool offsets (-1 = empty).
     l1_page_offs: list[int] = field(default_factory=list)
     l1_snap_offs: list[int] = field(default_factory=list)
-    # L2 residency: blob record range (unpadded length).
+    # L2 residency: blob record range (unpadded length) of the PRIMARY (first) extent;
+    # extents lists every blob span the record consumes, in logical payload order
+    # (own pages then own snaps, pages|snaps seam always extent-aligned). Empty while
+    # the segment is L1-only; assigned before the journal append, immutable after.
     blob: str = ""
     l2_off: int = -1
     l2_n: int = 0
+    extents: list = field(default_factory=list)   # [(off, n, crc, alg), ...]
     refs: int = 0
     last_validation: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -317,6 +326,14 @@ class _GroupEntry:
     bufs: list = field(default_factory=list)
     crc: int = 0
     released: bool = False          # pipeline-claims guard, see _release_stage
+    # L2 extent dedup: skip = page count covered by shared extents (no iovecs, no
+    # bytes); shares = [(off, n, src_seg_id)] (src None = committed in_l2 ancestor);
+    # deps = same-flush source seg ids (their failed write skips this record too);
+    # extents = finalized [(off, n, crc, alg), ...] for the journal record.
+    skip: int = 0
+    shares: list = field(default_factory=list)
+    deps: set = field(default_factory=set)
+    extents: list | None = None
 
 
 class _Pool:
@@ -445,6 +462,11 @@ class SessionTierStore:
         # rejection counters on the disabled store before any early return. Pre-seeded so
         # snapshot()/stats_line() always see every key.
         self._dead_bytes = 0
+        # L2 extent refcounts, keyed by exact blob span (off, n): [refs, crc, alg].
+        # Derived at replay from the surviving record set, acquired at journal time,
+        # released in _discard; the table exists even when inert (same reason as the
+        # counters) and is rebuilt from scratch by replay and post-compact.
+        self._extents: dict[tuple[int, int], list] = {}
         # P8: record-reclaimable dead ledger - journal records a compact() would
         # actually drop, plus their padded bytes. Kept separate from _dead_bytes, whose
         # watermark seed carries physical holes no record-based compact can reclaim.
@@ -462,6 +484,7 @@ class SessionTierStore:
                                           restore_l2=0, restore_ok=0, restore_refused=0,
                                           evictions=0, demotions=0,
                                           discards=0, tombstones=0, prefetch_begin=0,
+                                          extents_shared=0,
                                           prefetch_adopt=0,
                                           prefetch_abandon=0, prefetch_fail=0,
                                           prefetch_rej_cap=0, prefetch_probe_hit=0,
@@ -836,6 +859,145 @@ class SessionTierStore:
         self._counters["demotions"] += 1
         return True
 
+    # ------------------------------------------------------------ l2 extent dedup
+
+    def _extent_acquire(self, off: int, n: int, crc, alg, pad: int) -> bool:
+        """One more record consuming the blob span (off, n); the first consumer creates
+        the table entry. Called with the journal append already durable. Returns True
+        when the span was already referenced (a dedup event, not first ownership).
+        `pad` is the extent's exclusive share of its physical span's block padding:
+        0 for interior extents, the span tail for the last one - so summed padded
+        sizes stay EXACT whether extents are contiguous or alone in a block."""
+        ent = self._extents.get((off, n))
+        if ent is None:
+            ent = self._extents[(off, n)] = [0, crc, alg, pad]  # [refs, crc, alg, pad]
+        ent[0] += 1
+        return ent[0] > 1
+
+    def _extent_release(self, off: int, n: int) -> int:
+        """Drop one reference; the last one moves the extent's exact bytes (n + its pad
+        share) from live capacity to reclaimable dead. Returns the bytes freed (0 while
+        the span stays referenced by another record - capacity truthfulness under
+        sharing)."""
+        ent = self._extents.get((off, n))
+        if ent is None:
+            return 0
+        ent[0] -= 1
+        if ent[0] <= 0:
+            del self._extents[(off, n)]
+            return n + ent[3]
+        return 0
+
+    def _plan_share(self, seg: _Segment) -> tuple[list, list]:
+        """Deepest prefix-proven same-chain in_l2 ancestor whose page region is extent
+        aligned: its page extents are byte-identical to this segment's pages [0:M) (an
+        equal chain key at depth d implies an equal page prefix - probe's store
+        invariant), so they are REFERENCED instead of re-appended. Returns (shares,
+        covered page count) with shares as (off, n, src_seg_id=None) - the crc is
+        resolved from the extent table at journal time. Legacy mixed spans (pages and
+        snaps in one extent), crc-less ancestors and page_lens mismatches contribute
+        nothing: an extent is never split, and a reference must carry a verifiable crc."""
+        try:
+            segs = list(self._segments.values())
+        except RuntimeError:
+            # builder threads evict lock-free (account lock only): retry once on the
+            # fresh dict instead of adding a lock to the build path (probe precedent)
+            segs = list(self._segments.values())
+        best = None
+        for s in segs:
+            if s.seg_id == seg.seg_id or not s.in_l2 or not s.extents:
+                continue
+            if not self._is_prefix(s.page_keys, seg.page_keys):
+                continue
+            if best is None or len(s.page_keys) > len(best.page_keys):
+                best = s
+        if best is None or seg.page_lens[:best.boundary_len] != best.page_lens:
+            return [], 0
+        region = sum(best.page_lens)
+        shares: list[tuple[int, int, int | None]] = []
+        covered = 0
+        for ext in best.extents:
+            if covered >= region:
+                break
+            if covered + ext[1] > region or ext[2] is None:
+                return [], 0          # pages|snaps seam not extent-aligned / no crc
+            shares.append((ext[0], ext[1], None))
+            covered += ext[1]
+        if covered != region:
+            return [], 0
+        extra = 1 + (1 if sum(seg.snap_lens) else 0)   # tail-pages extent + snaps extent
+        if len(shares) + extra > _MAX_RECORD_EXTENTS:
+            return [], 0              # safety valve: private copy above the cap
+        return shares, best.boundary_len
+
+    @staticmethod
+    def _chain_pool_crc(pool, offs, lens, alg: str) -> int:
+        """Chained payload crc over pool slices (per-page/per-snap granularity) - the
+        per-extent crcs of a flush-built record are computed without any byte copy."""
+        crc = 0
+        mm = pool.mm
+        for off, ln in zip(offs, lens):
+            if ln:
+                data = mm[off:off + ln]
+                crc = (crc32c.crc32c(data, crc) if alg == _CRC32C_ALG
+                       else zlib.crc32(data, crc))
+        return crc
+
+    def _seg_logical_crc(self, seg: _Segment, alg: str = _CRC32C_ALG) -> int:
+        """Record-level crc over the FULL logical payload (pages then snaps) - unchanged
+        semantics under sharing: old binaries verify it against the primary extent only
+        and drop multi-extent records; single-extent records verify exactly."""
+        offs = list(seg.l1_page_offs)
+        lens = list(seg.page_lens)
+        for off, ln in zip(seg.l1_snap_offs, seg.snap_lens):
+            if ln:
+                offs.append(off)
+                lens.append(ln)
+        return self._chain_pool_crc(self._pool, offs, lens, alg)
+
+    def _private_extents(self, seg: _Segment, skip: int, off: int, private: bytes,
+                         crc_tail: int | None = None,
+                         crc_snaps: int | None = None,
+                         snaps_n: int | None = None) -> list:
+        """Extent list for a freshly appended span: [tail pages][snaps] as separate
+        extents so the pages|snaps seam stays extent-aligned for deeper sharing.
+        snaps_n overrides len(private) - tail (the flush pipeline knows the split
+        without holding the private bytes). The physical span stays contiguous
+        ([tail][snaps][block pad]) - the LAST extent carries the span's padding as its
+        exclusive share, interior extents carry 0, so summed extent sizes equal the
+        reserved bytes exactly (no per-extent block rounding double-count)."""
+        tail = sum(seg.page_lens[skip:])
+        if snaps_n is None:
+            snaps_n = max(0, len(private) - tail)
+        span_pad = -(tail + snaps_n) % _BLK
+        out = []
+        if tail:
+            if crc_tail is None:
+                crc_tail = _calc_payload_crc(private[:tail], _CRC32C_ALG)
+            out.append((off, tail, crc_tail, _CRC32C_ALG, 0))
+        if snaps_n:
+            if crc_snaps is None:
+                crc_snaps = _calc_payload_crc(private[tail:], _CRC32C_ALG)
+            out.append((off + tail, snaps_n, crc_snaps, _CRC32C_ALG, 0))
+        if out:
+            last = out[-1]
+            out[-1] = (last[0], last[1], last[2], last[3], span_pad)
+        return out
+
+    def _read_l2_payload(self, seg: _Segment) -> bytes:
+        """Logical payload of an L2 segment: the ordered extents concatenated (one
+        O_DIRECT read per extent; a legacy record is its single extent)."""
+        if not seg.extents:
+            return self._blob_read(seg.blob, seg.l2_off, seg.l2_n)
+        total = sum(ext[1] for ext in seg.extents)
+        buf = bytearray(total)
+        pos = 0
+        for ext in seg.extents:
+            if ext[1]:
+                buf[pos:pos + ext[1]] = self._blob_read(seg.blob, ext[0], ext[1])
+            pos += ext[1]
+        return bytes(buf)
+
     def _reserve_blob_span(self, need: int, pending: int = 0) -> tuple[int, int] | None:
         """Cap-check (evicting oldest L2 first), then reserve the record's padded span at
         the blob tail. Returns (off, padded), or None when the cap cannot be met.
@@ -850,7 +1012,10 @@ class SessionTierStore:
         # only lowers _ssd_used - so the check stays conservative unsynchronized. The
         # lock also must NOT span the evictor below: _discard takes it (non-reentrant).
         if self.ssd_bytes and self._ssd_used + pending + padded > self.ssd_bytes:
-            self._evict_oldest_l2(need, pending)
+            # the evictor sizes by the PADDED need (not the unpadded one): with extent
+            # sharing a discard can free less than a victim's nominal span, so the loop
+            # must keep evicting until the padded requirement genuinely fits
+            self._evict_oldest_l2(padded, pending)
             if self.ssd_bytes and self._ssd_used + pending + padded > self.ssd_bytes:
                 return None
         off = self._blob_eof
@@ -869,15 +1034,30 @@ class SessionTierStore:
                 raise OSError("short blob write")
             pos += n
 
-    def _journal_and_account(self, seg: _Segment, off: int, need: int, padded: int,
-                             crc: int, crc_alg: str = _CRC32C_ALG) -> bool:
-        """Journal one durable record and take the capacity accounting. False = the blob
-        bytes are durable but unrecoverable across a boot: abort cleanly (the segment
-        keeps its L1 residency; no journal entry, no accounting)."""
-        seg.blob, seg.l2_off, seg.l2_n = _BLOB_NAME, off, need
-        if not self._journal_append(seg, off, need, crc, crc_alg):
+    def _journal_and_account(self, seg: _Segment,
+                             extents: list[tuple[int, int, int, str]], padded: int,
+                             crc: int, crc_alg: str = _CRC32C_ALG,
+                             off: int | None = None) -> bool:
+        """Journal one durable record and take the capacity accounting. `extents` is the
+        record's ordered extent list; the journal's off/n are its PRIMARY (first)
+        extent - the identity compact keep-sets and P13 tombstones match on. `padded`
+        counts only the freshly appended span (shared extents add no bytes - capacity
+        truthfulness under dedup). False = the blob bytes are durable but unrecoverable
+        across a boot: abort cleanly (the segment keeps its L1 residency; no journal
+        entry, no accounting, no extent refs)."""
+        seg.blob = _BLOB_NAME
+        seg.extents = list(extents)
+        if seg.extents:
+            seg.l2_off, seg.l2_n = seg.extents[0][0], seg.extents[0][1]
+        else:
+            seg.l2_off, seg.l2_n = (off if off is not None else 0), 0
+        if not self._journal_append(seg, crc, crc_alg):
+            seg.extents = []
             return False
         with self._account_lock:      # racing the builder thread's cap evictions
+            for ext in seg.extents:
+                if self._extent_acquire(ext[0], ext[1], ext[2], ext[3], ext[4]):
+                    self._counters["extents_shared"] += 1
             self._ssd_used += padded
         return True
 
@@ -886,34 +1066,52 @@ class SessionTierStore:
         reserved offset, ONE fdatasync, then the journal record - the durable order is
         what makes replay crash-safe. Every failure path returns False: no journal entry,
         no capacity accounting. Single-segment path (runtime offer/evict pressure); the
-        shutdown flush batches segments through _write_group instead."""
-        need = sum(seg.page_lens) + sum(seg.snap_lens)
+        shutdown flush batches segments through _write_group instead.
+        L2 extent dedup (briefs/l2-snapshot-dedup.md): the deepest prefix-proven
+        same-chain in_l2 ancestor's page extents are referenced and only the tail pages
+        + snapshots are appended; a referenced span is already durable (its owner's
+        record was journaled after an fsync)."""
+        payload = payload if payload is not None else b""
+        shares, skip = self._plan_share(seg)
+        private = payload[sum(seg.page_lens[:skip]):]
+        need = len(private)
         r = self._reserve_blob_span(need)
         if r is None:
             return False
         off, padded = r
-        view = memoryview((payload if payload is not None else b"")
-                          + b"\0" * (padded - need))
+        view = memoryview(private + b"\0" * (padded - need))
         try:
             self._pwrite_span(off, view)
             os.fdatasync(self._blob_fd)
         except OSError as e:
             logger.warning("session tier: blob append failed (%s); record aborted", e)
             return False
-        return self._journal_and_account(seg, off, need, padded,
-                                         _calc_payload_crc(view[:need], _CRC32C_ALG))
+        extents = self._private_extents(seg, skip, off, private)
+        # resolve the shared extents' crc/alg/pad from the extent table (the owner
+        # registered them when its own record was journaled)
+        resolved = []
+        for soff, sn, _src in shares:
+            ent = self._extents.get((soff, sn))
+            resolved.append((soff, sn, ent[1] if ent else None,
+                             ent[2] if ent else None, ent[3] if ent else 0))
+        return self._journal_and_account(seg, resolved + extents, padded,
+                                         _calc_payload_crc(payload, _CRC32C_ALG),
+                                         off=off)
 
-    def _seg_iovecs(self, seg: _Segment, padded: int) -> list:
-        """Zero-copy record layout: payload iovecs straight from the L1 pool mmap (pages,
-        then snapshots) plus the zero padding tail. The pool regions stay stable until
-        the write completes because flush_live holds the store lock - no offer/evict
-        mutation can touch them mid-flight."""
+    def _seg_iovecs(self, seg: _Segment, padded: int, skip_pages: int = 0) -> list:
+        """Zero-copy record layout for the freshly appended span: payload iovecs straight
+        from the L1 pool mmap (tail pages [skip_pages:], then snapshots) plus the zero
+        padding tail; shared extents contribute no iovecs - their bytes are already in
+        the blob. The pool regions stay stable until the write completes because
+        flush_live holds the store lock - no offer/evict mutation can touch them
+        mid-flight."""
         base = memoryview(self._pool.mm)
         bufs = [base[off:off + ln]
-                for off, ln in zip(seg.l1_page_offs, seg.page_lens)]
+                for off, ln in zip(seg.l1_page_offs[skip_pages:],
+                                   seg.page_lens[skip_pages:])]
         bufs.extend(base[off:off + ln]
                     for off, ln in zip(seg.l1_snap_offs, seg.snap_lens) if ln)
-        pad = padded - sum(seg.page_lens) - sum(seg.snap_lens)
+        pad = padded - sum(seg.page_lens[skip_pages:]) - sum(seg.snap_lens)
         if pad > 0:
             bufs.append(memoryview(_ZERO_BLK)[:pad])
         return bufs
@@ -966,22 +1164,71 @@ class SessionTierStore:
             pending.release(en.padded)
             en.seg.refs -= 1
 
+    def _plan_share_flush(self, seg: _Segment,
+                          plan: dict) -> tuple[list, int, set]:
+        """_plan_share over committed in_l2 segments plus earlier entries of the same
+        flush (the plan map). An earlier entry's planned extents are durable before ANY
+        journal record of their group (group fdatasync order), and the writer thread is
+        sequential - group N's bytes are durable before group N+1's journal appends - so
+        referencing them keeps the crash contract. A planned-but-failed source is
+        handled by the dep gate in _write_group (the dependent record is skipped too).
+        Returns (shares as (off, n, src_seg_id), covered page count, source seg ids).
+        The deepest ancestor wins: a committed ancestor shallower than the deepest
+        plan-mate is dropped, a deeper committed one keeps the plan-mate out."""
+        shares, skip = self._plan_share(seg)
+        deps: set = set()
+        best = None
+        for pe in plan.values():
+            if not self._is_prefix(pe["page_keys"], seg.page_keys):
+                continue
+            if best is None or len(pe["page_keys"]) > len(best["page_keys"]):
+                best = pe
+        if best is not None:
+            m = len(best["page_keys"])
+            if m > skip and seg.page_lens[:m] == best["page_lens"]:
+                region = sum(best["page_lens"])
+                covered = 0
+                plan_shares = []
+                aligned = True
+                for ext in best["extents"]:
+                    if covered >= region:
+                        break
+                    if covered + ext[1] > region:
+                        aligned = False      # seam not extent-aligned: keep committed
+                        break
+                    plan_shares.append((ext[0], ext[1], best["sid"]))
+                    covered += ext[1]
+                if aligned and covered == region:
+                    shares, skip = plan_shares, m
+        extra = 1 + (1 if sum(seg.snap_lens) else 0)
+        if len(shares) + extra > _MAX_RECORD_EXTENTS:
+            return [], 0, set()
+        deps = {src for _, _, src in shares if src is not None}
+        return shares, skip, deps
+
     def _build_group_stage(self, group: list[_Segment], pending: _PendingVolume,
-                           index: int = 0) -> list[_GroupEntry] | None:
+                           index: int = 0,
+                           plan: dict | None = None) -> list[_GroupEntry] | None:
         """Runs on the flush builder thread while the PREVIOUS group is being written:
         reserve every segment's span (cap check against the pipeline-wide pending
-        volume, evicting oldest L2 under pressure), pin each admitted segment with a
+        volume, evicting oldest L2 under pressure - only the PRIVATE volume is
+        reserved: shared extents append no bytes), pin each admitted segment with a
         refs claim (a reserved-but-unjournaled span makes the segment look in_l2 to
         the evictor), then lift each record's zero-copy iovecs and payload crc off the
-        L1 pool. No payload byte is ever copied. Returns the stage list, or None when
-        nothing was admitted or the build failed - the segments keep their L1
-        residency and the group is aborted with no journal side effect."""
+        L1 pool. No payload byte is ever copied. Extent planning (plan map keyed by
+        seg_id: geometry + extent slots, crcs patched in the second loop) lets a later
+        entry reference earlier entries of the same flush. Returns the stage list, or
+        None when nothing was admitted or the build failed - the segments keep their
+        L1 residency and the group is aborted with no journal side effect."""
         stage: list[_GroupEntry] = []
+        plan = plan if plan is not None else {}
         cur_seg, cur_need = group[0], 0
         try:
             for seg in group:
                 cur_seg, cur_need = seg, sum(seg.page_lens) + sum(seg.snap_lens)
-                r = self._reserve_blob_span(cur_need, pending.value())
+                shares, skip, deps = self._plan_share_flush(seg, plan)
+                private_need = cur_need - sum(seg.page_lens[:skip])
+                r = self._reserve_blob_span(private_need, pending.value())
                 if r is None and not stage and pending.value():
                     # P3 sacrifice semantics across the pipeline: the refusal may be
                     # caused by the previous group's still-unjournaled volume alone.
@@ -996,31 +1243,90 @@ class SessionTierStore:
                             "session tier: flush group #%d waited 60 s for the previous "
                             "group to settle, %d bytes still unjournaled; retrying the "
                             "cap check with pending=0", index, pending.value())
-                    r = self._reserve_blob_span(cur_need, 0)
+                    r = self._reserve_blob_span(private_need, 0)
                 if r is None:
                     logger.warning("session tier: L2 cap reached, cannot demote seg %d",
                                    seg.seg_id)
                     continue
                 pending.add(r[1])
                 seg.refs += 1                     # evictor guard, released in _write_group
-                stage.append(_GroupEntry(seg, r[0], cur_need, r[1]))
+                en = _GroupEntry(seg, r[0], cur_need, r[1])
+                en.skip, en.shares, en.deps = skip, shares, deps
+                stage.append(en)
+                # Plan entry: geometry + extent slots for later entries' share walks.
+                # The extent (off, n) list is final here (offsets are reserved); crc
+                # slots are patched with real values in the crc loop below. The pad
+                # share (last extent of the appended span) is fixed here too.
+                tail_pages = cur_need - sum(seg.page_lens[:skip]) - sum(seg.snap_lens)
+                snaps_n = sum(seg.snap_lens)
+                span_pad = -(tail_pages + snaps_n) % _BLK
+                slots = [(off, n, None, None, 0) for off, n, _ in shares]
+                if tail_pages:
+                    slots.append((r[0], tail_pages, None, None, 0))
+                if snaps_n:
+                    slots.append((r[0] + tail_pages, snaps_n, None, None, 0))
+                if slots:
+                    last = slots[-1]
+                    slots[-1] = last[:4] + (span_pad,)
+                plan[seg.seg_id] = {"sid": seg.seg_id, "page_keys": seg.page_keys,
+                                    "page_lens": seg.page_lens, "extents": slots}
             if not stage:
                 return None
             for en in stage:
                 cur_seg, cur_need = en.seg, en.need
-                en.bufs = self._seg_iovecs(en.seg, en.padded)
-                en.crc = _calc_payload_crc_iovecs(en.bufs, en.need, _CRC32C_ALG)
+                en.bufs = self._seg_iovecs(en.seg, en.padded, en.skip)
+                en.crc = self._seg_logical_crc(en.seg)
+                en.extents = self._stage_extents(en, plan)
+                plan[en.seg.seg_id]["extents"] = en.extents
         except Exception as e:                    # build failure: abort the whole group
             logger.warning(
                 "session tier: flush group #%d build failed at seg %d (%d bytes, %d of "
                 "%d admitted): %s; group aborted",
                 index, cur_seg.seg_id, cur_need, len(stage), len(group), e)
+            for en in stage:                      # doomed spans must not be shareable
+                plan.pop(en.seg.seg_id, None)
             self._release_stage(stage, pending)
             return None
         except BaseException:                     # KI/SystemExit: unpin, then propagate
+            for en in stage:
+                plan.pop(en.seg.seg_id, None)
             self._release_stage(stage, pending)
             raise
         return stage
+
+    def _stage_extents(self, en: _GroupEntry, plan: dict) -> list:
+        """Finalize a stage entry's extent list: resolve each planned share's crc (from
+        the extent table for committed ancestors, from the source entry's finalized
+        slots for same-flush sources - all finalized before any journal of this flush
+        can run), then append the freshly appended span's own extents. Runs on the
+        builder thread inside the build's crc loop, strictly after every share source's
+        own finalize."""
+        resolved = []
+        for off, n, src in en.shares:
+            crc = alg = None
+            pad = 0
+            if src is None:
+                ent = self._extents.get((off, n))
+                if ent is not None:
+                    crc, alg, pad = ent[1], ent[2], ent[3]
+            else:
+                for ext in plan.get(src, {}).get("extents") or []:
+                    if ext[0] == off and ext[1] == n:
+                        crc, alg, pad = ext[2], ext[3], ext[4]
+                        break
+            resolved.append((off, n, crc, alg, pad))
+        tail_pages = sum(en.seg.page_lens[en.skip:])
+        snaps_off = en.off + tail_pages
+        snaps_n = sum(en.seg.snap_lens)
+        crc_tail = self._chain_pool_crc(self._pool, en.seg.l1_page_offs[en.skip:],
+                                        en.seg.page_lens[en.skip:], _CRC32C_ALG)
+        crc_snaps = (self._chain_pool_crc(self._pool, en.seg.l1_snap_offs,
+                                          en.seg.snap_lens, _CRC32C_ALG)
+                     if snaps_n else None)
+        return resolved + self._private_extents(en.seg, en.skip, en.off, b"",
+                                                crc_tail=crc_tail,
+                                                crc_snaps=crc_snaps,
+                                                snaps_n=snaps_n)
 
     def _pwrite_group(self, stage: list[_GroupEntry], writers: int) -> set[int]:
         """Parallel pwritev bursts at the reserved offsets; writers comes resolved once
@@ -1045,7 +1351,7 @@ class SessionTierStore:
         return failed
 
     def _write_group(self, stage: list[_GroupEntry], pending: _PendingVolume,
-                     writers: int) -> int:
+                     writers: int, failed_sids: set) -> int:
         """Write one built group: parallel pwritev bursts (writers resolved once per
         flush) at the reserved offsets, ONE
         fdatasync for the whole group, then the group's journal records. Durable-order
@@ -1055,10 +1361,15 @@ class SessionTierStore:
         the group's bytes durable and unjournaled, and replay drops that blob tail
         (segments stay in L1 in a process that survives). The pipeline-wide pending
         volume stays counted until this group settles, so a concurrent builder always
-        sees a conservative cap budget. Returns the demoted count."""
+        sees a conservative cap budget. failed_sids accumulates the seg ids whose
+        record did not land (failed write, or a dep gate skip): a record referencing a
+        same-flush source that never became durable+journaled is skipped too - its
+        segment keeps its L1 residency for the next flush instead of journaling a
+        reference replay would have to drop. Returns the demoted count."""
         if not stage:
             return 0
         count = 0
+        skipped = 0
         try:
             failed = self._pwrite_group(stage, writers)
             # Group fdatasync: every byte written above is durable BEFORE any journal
@@ -1070,8 +1381,15 @@ class SessionTierStore:
                 return 0
             for i, en in enumerate(stage):
                 if i in failed:
+                    failed_sids.add(en.seg.seg_id)
                     continue
-                if self._journal_and_account(en.seg, en.off, en.need, en.padded, en.crc):
+                if en.deps and en.deps & failed_sids:
+                    # transitive: this record is skipped, so its own id blocks its
+                    # dependents further down the group/flush chain
+                    failed_sids.add(en.seg.seg_id)
+                    skipped += 1
+                    continue
+                if self._journal_and_account(en.seg, en.extents, en.padded, en.crc):
                     self._release_l1(en.seg)
                     self._counters["demotions"] += 1
                     count += 1
@@ -1083,6 +1401,9 @@ class SessionTierStore:
             # or raised): the pending volume returns to the cap budget, the refs pin
             # protects nothing once the journal attempt is over.
             self._release_stage(stage, pending)
+        if skipped:
+            logger.warning("session tier: flush skipped %d records whose extent "
+                           "sources failed; segments stay in L1", skipped)
         return count
 
     def _flush_groups(self, groups: list[list[_Segment]], writers: int) -> int:
@@ -1097,26 +1418,29 @@ class SessionTierStore:
         if self._blob_fd < 0:
             return 0
         pending = _PendingVolume()
+        plan: dict = {}                       # flush-local extent planning map
+        failed_sids: set = set()              # seg ids whose record did not land
         if len(groups) == 1:
-            stage = self._build_group_stage(groups[0], pending, 0)
-            return self._write_group(stage, pending, writers) if stage else 0
+            stage = self._build_group_stage(groups[0], pending, 0, plan)
+            return (self._write_group(stage, pending, writers, failed_sids)
+                    if stage else 0)
         count = 0
         built: list[_GroupEntry] | None = None
         futs: list[Future] = []
         try:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="flush-build") as ex:
-                fut = ex.submit(self._build_group_stage, groups[0], pending, 0)
+                fut = ex.submit(self._build_group_stage, groups[0], pending, 0, plan)
                 futs.append(fut)
                 for gi, group in enumerate(groups[1:], start=1):
-                    nxt = ex.submit(self._build_group_stage, group, pending, gi)
+                    nxt = ex.submit(self._build_group_stage, group, pending, gi, plan)
                     futs.append(nxt)
                     built = fut.result()
                     if built:
-                        count += self._write_group(built, pending, writers)
+                        count += self._write_group(built, pending, writers, failed_sids)
                     fut = nxt
                 built = fut.result()
                 if built:
-                    count += self._write_group(built, pending, writers)
+                    count += self._write_group(built, pending, writers, failed_sids)
         except BaseException:
             # KI/SystemExit mid-pipeline: the stage the writer was working on is released
             # by _write_group's own finally - or HERE if the write never got to run (a
@@ -1183,18 +1507,23 @@ class SessionTierStore:
             l2.remove(victim)
 
     def _discard(self, seg: _Segment) -> int:
-        """Append-only blob: the discarded padded span becomes a zero hole, reclaimable
-        only by compaction once the dead-record ledger trips (maybe_compact). The P13
-        tombstone makes the discard itself durable immediately (replay kills the victim
-        on both boot paths), so the hole is pure space, never a resurrection. Returns
-        the padded span freed from the capacity accounting."""
-        padded = (seg.l2_n + _BLK - 1) // _BLK * _BLK
+        """Append-only blob: the discarded spans become zero holes, reclaimable only by
+        compaction once the dead-record ledger trips (maybe_compact). The P13 tombstone
+        makes the discard itself durable immediately (replay kills the victim on both
+        boot paths), so the hole is pure space, never a resurrection. Under extent
+        sharing only PRIVATE bytes free up: each consumed extent drops one reference,
+        and a span still referenced by another record stays live (and stays counted in
+        _ssd_used) - capacity truthfulness under dedup. Returns the padded bytes freed
+        from the capacity accounting."""
         with self._account_lock:      # racing the writer thread's journal accounting
-            self._ssd_used -= padded
-            self._dead_bytes += padded
+            freed = 0
+            for ext in seg.extents:
+                freed += self._extent_release(ext[0], ext[1])
+            self._ssd_used -= freed
+            self._dead_bytes += freed
             if seg.in_l2:             # its journal record just became compact-droppable
                 self._dead_records += 1
-                self._dead_record_bytes += padded
+                self._dead_record_bytes += freed
                 # P13: durable NOW. Builder-thread evictions race the coordinator's
                 # appends lock-free: atomic O_APPEND write + order-independent tomb filter.
                 if self._append_tombstone(seg.path_key, seg.l2_off, seg.l2_n):
@@ -1222,7 +1551,7 @@ class SessionTierStore:
         # self-invalidate on their own; this explicit drop covers the failed-append
         # case: no on-disk trace, a stale-valid marker would resurrect the segment.
         self.invalidate_shutdown_marker()
-        return padded
+        return freed
 
     def _supersede(self, seg: _Segment) -> None:
         # L1 resources first: _discard only accounts the L2 padded span (a no-op when the
@@ -1253,7 +1582,7 @@ class SessionTierStore:
                     snaps = [self._pool.read(off, ln) for off, ln in
                              zip(seg.l1_snap_offs, seg.snap_lens)]
                 elif seg.in_l2:
-                    raw = self._blob_read(seg.blob, seg.l2_off, seg.l2_n)
+                    raw = self._read_l2_payload(seg)
                     pages, snaps = [], []
                     pos = 0
                     for i, ln in enumerate(seg.page_lens):
@@ -1405,7 +1734,7 @@ class SessionTierStore:
                             if ln:
                                 t._mv[off:off + ln] = self._pool.mm[l1_off:l1_off + ln]
                     elif seg.in_l2:
-                        raw = self._blob_read(seg.blob, seg.l2_off, seg.l2_n)
+                        raw = self._read_l2_payload(seg)
                         pos = 0
                         for off, ln in t._page_spans + t._snap_spans:
                             if ln:
@@ -1667,13 +1996,22 @@ class SessionTierStore:
         except (OSError, ValueError, struct.error):
             return False, None
 
-    def _journal_append(self, seg: _Segment, off: int, nbytes: int, crc: int,
+    def _journal_append(self, seg: _Segment, crc: int,
                         crc_alg: str = _CRC32C_ALG) -> bool:
+        """Durable journal record for a stored segment. off/n are the PRIMARY (first)
+        extent - the record identity compact keep-sets and P13 tombstones match on.
+        "extents" (additive field, briefs/l2-snapshot-dedup.md) lists every blob span
+        the record consumes in logical payload order; records without it (legacy
+        directories) are one private span. The record-level crc stays the LOGICAL
+        payload checksum: an old binary preading the primary region only mismatches it
+        for multi-extent records and drops them (clean downgrade: capability loss, no
+        corruption), while single-extent records verify and boot unchanged. The frame
+        format and crc are untouched."""
         rec = {
             "path_key": seg.path_key.hex(), "blen": seg.boundary_len,
             "page_keys": [k.hex() for k in seg.page_keys],
             "page_lens": seg.page_lens, "snap_lens": seg.snap_lens,
-            "blob": seg.blob, "off": off, "n": nbytes, "ts": seg.last_validation,
+            "blob": seg.blob, "off": seg.l2_off, "n": seg.l2_n, "ts": seg.last_validation,
             # payload checksum: replay drops records whose blob region no longer matches
             # (holes after compaction, torn/short appends) - the convergence mechanism.
             # crc_alg versions the algorithm: new records carry hardware CRC32C; records
@@ -1681,6 +2019,8 @@ class SessionTierStore:
             # The journal frame crc below stays zlib: see the versioning note at the top.
             "crc": crc,
         }
+        if seg.extents:
+            rec["extents"] = [[o, n, c, a, p] for o, n, c, a, p in seg.extents]
         if crc_alg:
             rec["crc_alg"] = crc_alg
         payload = json.dumps(rec, sort_keys=True).encode()
@@ -1743,7 +2083,8 @@ class SessionTierStore:
         # appended after their victims (append-only journal), but the filter is
         # order-independent anyway; the tombstone records themselves never become
         # segments. Old journals carry no "t" records and replay bit-identically.
-        dropped, dropped_bytes, pdropped = 0, 0, 0
+        dropped, pdropped = 0, 0
+        dropped_recs: list[dict] = []
         tomb_keys = {(r["path_key"], r["off"], r["n"]) for r in records if r.get("t")}
         if tomb_keys:
             victims = [r for r in records if not r.get("t")
@@ -1751,7 +2092,7 @@ class SessionTierStore:
             records = [r for r in records if not r.get("t")
                        and (r["path_key"], r["off"], r["n"]) not in tomb_keys]
             dropped = len(victims)
-            dropped_bytes = sum((v["n"] + _BLK - 1) // _BLK * _BLK for v in victims)
+            dropped_recs.extend(victims)
             logger.info("session tier: replay honored %d tombstones, %d records stay "
                         "dead (compact reclaims later)", len(tomb_keys), dropped)
         # Clean-shutdown fast path: after a graceful shutdown every record followed the
@@ -1783,7 +2124,9 @@ class SessionTierStore:
         if not fast:
             # Payload-crc validation: a record whose blob region no longer matches (holes
             # left by compaction, a torn append that advanced EOF) is dead - drop, never
-            # resurrect.
+            # resurrect. Extent records validate each DISTINCT consumed span once (the
+            # shared span is read one time no matter how many records reference it);
+            # legacy records validate their single private region exactly as before.
             blob_fd = -1
             if self._blob_path and os.path.exists(self._blob_path):
                 try:
@@ -1791,23 +2134,46 @@ class SessionTierStore:
                 except OSError:
                     blob_fd = -1
             if blob_fd >= 0:
-                kept, pdropped, pbytes = [], 0, 0
+                kept, pdropped_recs = [], []
+                ext_ok: dict[tuple[int, int], bool] = {}
                 for rec in records:
                     ok = True
-                    if "crc" in rec:
+                    exts = rec.get("extents")
+                    if exts is not None:
+                        for ext in exts:
+                            key = (ext[0], ext[1])
+                            good = ext_ok.get(key)
+                            if good is None:
+                                ecrc = ext[2] if len(ext) > 2 else None
+                                ealg = ext[3] if len(ext) > 3 else None
+                                good = True
+                                if ecrc is not None:
+                                    try:
+                                        good = _match_payload_crc(
+                                            os.pread(blob_fd, ext[1], ext[0]),
+                                            ealg, ecrc)
+                                    except OSError:
+                                        good = False
+                                ext_ok[key] = good
+                            if not good:
+                                ok = False
+                                break
+                    elif "crc" in rec:
                         try:
                             ok = _match_payload_crc(os.pread(blob_fd, rec["n"],
                                                              rec["off"]),
                                                     rec.get("crc_alg"), rec["crc"])
                         except OSError:
                             ok = False
-                    (kept.append(rec) if ok else None)
-                    pdropped += 0 if ok else 1
-                    pbytes += 0 if ok else (rec["n"] + _BLK - 1) // _BLK * _BLK
+                    if ok:
+                        kept.append(rec)
+                    else:
+                        pdropped_recs.append(rec)
                 os.close(blob_fd)
+                pdropped = len(pdropped_recs)
                 records = kept
                 dropped += pdropped
-                dropped_bytes += pbytes
+                dropped_recs.extend(pdropped_recs)
                 if pdropped:
                     logger.info("session tier: replay dropped %d dead/torn records",
                                 pdropped)
@@ -1829,21 +2195,53 @@ class SessionTierStore:
                                rec["page_lens"], rec["snap_lens"])
                 self._next_seg += 1
                 seg.blob, seg.l2_off, seg.l2_n = rec["blob"], rec["off"], rec["n"]
+                exts = rec.get("extents")
+                if exts is not None:
+                    seg.extents = [(e[0], e[1],
+                                    e[2] if len(e) > 2 else None,
+                                    e[3] if len(e) > 3 else None,
+                                    e[4] if len(e) > 4 else -e[1] % _BLK)
+                                   for e in exts]
+                else:
+                    # legacy dual-read: one private span covering pages+snaps, verified
+                    # by its whole-region crc exactly as before the extent format; the
+                    # span's block padding is the extent's exclusive share
+                    seg.extents = [(rec["off"], rec["n"], rec.get("crc"),
+                                    rec.get("crc_alg"), -rec["n"] % _BLK)]
                 seg.last_validation = rec["ts"]
                 self._segments[seg.seg_id] = seg
                 self._touch_index(seg)
-            # Cap accounting must count only the live record set, never the blob-size
+            # Extent refcounts are DERIVED, never journaled: rebuilt from the surviving
+            # record set, so replay converges to the same extent liveness from any
+            # journal prefix (torn tails, tombstones, payload drops - idempotent).
+            self._extents = {}
+            for seg in self._segments.values():
+                if seg.in_l2:
+                    for ext in seg.extents:
+                        self._extent_acquire(ext[0], ext[1], ext[2], ext[3], ext[4])
+            # Cap accounting must count only UNIQUE live extent bytes, never the blob-size
             # watermark: the blob carries holes (discards, previous generations), and a
             # watermark-seeded _ssd_used over-evicts or refuses the entire next flush
-            # (P3 iron Finding 1). Both boot paths seed identically here; _blob_eof
-            # stays the never-decreased watermark - hole-safe record reservation.
-            live = sum((s.l2_n + _BLK - 1) // _BLK * _BLK
-                       for s in self._segments.values() if s.in_l2)
+            # (P3 iron Finding 1). With sharing, per-record sums would double-count the
+            # shared spans - the "l2 used" figure is the unique bytes (each extent's n
+            # plus its exclusive padding share).
+            live = sum(key[1] + ent[3] for key, ent in self._extents.items())
             # _blob_eof is the never-decreased watermark: exact dead even on a re-replay.
             self._dead_bytes = max(0, self._blob_eof - live)
             self._ssd_used = live
             self._dead_records = dropped
-            self._dead_record_bytes = dropped_bytes
+            # P8 ledger, honest under sharing: a compact drops the dead RECORDS but only
+            # reclaims the extents that lose their last reference with them.
+            reclaimable = 0
+            for rec in dropped_recs:
+                exts = rec.get("extents")
+                span = [(e[0], e[1], e[4] if len(e) > 4 else -e[1] % _BLK)
+                        for e in exts] if exts is not None \
+                    else [(rec["off"], rec["n"], -rec["n"] % _BLK)]
+                for soff, sn, spad in span:
+                    if (soff, sn) not in self._extents:
+                        reclaimable += sn + spad
+            self._dead_record_bytes = reclaimable
             # P13: payload-dead records carry no tombstone - they alone can resurrect on
             # a fast-path boot, so they alone block the marker and the shutdown-compact
             # skip. Tombstoned victims were filtered before this point on both paths.
@@ -1941,7 +2339,17 @@ class SessionTierStore:
                             len(readers))
                 return 0
             old_size = os.path.getsize(self._blob_path)
-            live_bytes = sum((r["n"] + _BLK - 1) // _BLK * _BLK for r in keep)
+            live_bytes = 0
+            seen_ext: set[tuple[int, int]] = set()
+            for r in keep:
+                span = ([(e[0], e[1], e[4] if len(e) > 4 else -e[1] % _BLK)
+                         for e in r["extents"]]
+                        if r.get("extents") is not None
+                        else [(r["off"], r["n"], -r["n"] % _BLK)])
+                for soff, sn, spad in span:
+                    if (soff, sn) not in seen_ext:
+                        seen_ext.add((soff, sn))
+                        live_bytes += sn + spad
             logger.info("session tier: compact shrink start: %d records, live %.2f GiB "
                         "(blob %.2f GiB)", len(keep), live_bytes / 2**30,
                         old_size / 2**30)
@@ -1954,8 +2362,8 @@ class SessionTierStore:
             # erased the anchors and left the NEW blob against the OLD journal -
             # replay dropped every live record.)
             try:
-                layout, total = self._copy_blob_shrunk(keep)
-                journal = self._write_journal_new(keep, layout)
+                layout, total, new_extents = self._copy_blob_shrunk(keep)
+                journal = self._write_journal_new(keep, layout, new_extents)
                 self._arm_swap_token(total, journal, old_size)
                 self._swap_armed = True
                 self._commit_swap()
@@ -1973,13 +2381,19 @@ class SessionTierStore:
                 self._swap_armed = False
                 return 0
             self._swap_armed = False
-            # Post-commit in-memory swap: segments jump to their dense offsets and BOTH
-            # fds are reopened on the renamed files (the journal-fd reopen discipline
-            # from the P3 era, extended to the blob fd - both names are new inodes).
+            # Post-commit in-memory swap: segments jump to their dense offsets with
+            # remapped extent lists, and BOTH fds are reopened on the renamed files (the
+            # journal-fd reopen discipline from the P3 era, extended to the blob fd -
+            # both names are new inodes).
             by_key = {(seg.path_key.hex(), seg.l2_off, seg.l2_n): seg
                       for seg in self._segments.values() if seg.in_l2}
             for i, rec in enumerate(keep):
-                by_key[(rec["path_key"], rec["off"], rec["n"])].l2_off = layout[i]
+                seg = by_key[(rec["path_key"], rec["off"], rec["n"])]
+                # dense layout: remapped offsets, fresh crcs (split legacy parts carry
+                # their copy-time crc) and the pad share each extent owns in its run
+                seg.extents = [(layout[k][0], k[1], layout[k][1], layout[k][2],
+                                layout[k][3]) for k in new_extents[i]]
+                seg.l2_off, seg.l2_n = seg.extents[0][0], seg.extents[0][1]
             new_fd = os.open(self._blob_path, os.O_WRONLY | os.O_CREAT, 0o644)
             try:
                 new_jfd = os.open(self._journal_path,
@@ -1990,13 +2404,21 @@ class SessionTierStore:
             os.close(self._blob_fd)
             os.close(self._journal_fd)
             self._blob_fd, self._journal_fd = new_fd, new_jfd
-            self._ssd_used = live_bytes
+            # Dense file == UNIQUE live volume: shared spans were copied once.
+            self._ssd_used = total
             # The dense file has no holes: watermark and the P8 record ledger reset.
+            # The extent table is rebuilt from the remapped live set - stale entries
+            # (dead spans, pre-compact offsets) must not survive into the new generation.
             self._blob_eof = os.lseek(self._blob_fd, 0, os.SEEK_END)
             self._dead_bytes = 0
             self._dead_records = 0
             self._dead_record_bytes = 0
             self._marker_blockers = 0
+            self._extents = {}
+            for seg in self._segments.values():
+                if seg.in_l2:
+                    for ext in seg.extents:
+                        self._extent_acquire(ext[0], ext[1], ext[2], ext[3], ext[4])
             logger.info("session tier: compact shrink: blob %.2f GiB -> %.2f GiB",
                         old_size / 2**30, total / 2**30)
             # Tombstones are journal bookkeeping, not data records: the dropped-count
@@ -2032,26 +2454,82 @@ class SessionTierStore:
         finally:
             os.close(dfd)
 
-    def _copy_blob_shrunk(self, keep: list[dict]) -> tuple[dict[int, int], int]:
-        """P9 copy pass: every kept record's padded span is copied from the live blob
-        to its DENSE new offset in blob.bin.new by parallel pread->pwrite workers (P4
-        pipeline precedent, FREETOKEN_COMPACT_WRITERS). Each worker crcs the payload
-        bytes it copies (the first n of the span, per the record's crc_alg - padding is
-        not hashed, matching _write_blob) and a mismatch fails the whole copy: a live
-        record whose bytes no longer verify must never be moved. The PADDED span is
-        copied because the O_DIRECT reader reads block-aligned windows. OSError aborts
-        with the old blob untouched."""
+    def _copy_blob_shrunk(self, keep: list[dict]):
+        """P9 copy pass, extent-aware (briefs/l2-snapshot-dedup.md): each DISTINCT extent
+        consumed by a kept record is copied exactly once to its DENSE new offset by
+        parallel pread->pwrite workers (P4 pipeline precedent, FREETOKEN_COMPACT_WRITERS)
+        - a per-record copy would silently un-dedup by duplicating shared spans. Legacy
+        private records are MIGRATED (the brief's direction (d) lever): their mixed
+        span is split at the pages|snaps seam into two extents with copy-time crcs,
+        making them shareable for future offers. Each worker crcs the payload bytes it
+        copies (the first n of the run at the extent's own offset; split legacy parts
+        record their fresh crc); a mismatch fails the whole copy:
+        a live record whose bytes no longer verify must never be moved. The PADDED span
+        is copied because the O_DIRECT reader reads block-aligned windows. Returns
+        (layout, total, new_extents): layout maps source (off, n) -> [dst_off, crc,
+        alg, pad_share]; new_extents[i] lists keep[i]'s remapped extent keys in order.
+        OSError aborts with the old blob untouched."""
         tmp = self._blob_path + ".new"
         dst = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         src = os.open(self._blob_path, os.O_RDONLY)   # _blob_fd itself is write-only
-        layout: dict[int, int] = {}
-        spans = []
+        layout: dict[tuple[int, int], list] = {}
+        new_extents: list[list[tuple[int, int]]] = []
+        units: list[tuple[int, int, object, object, bool]] = []
+        seen: set[tuple[int, int]] = set()
+        for rec in keep:
+            keys: list[tuple[int, int]] = []
+            exts = rec.get("extents")
+            if exts is not None:
+                for e in exts:
+                    key = (e[0], e[1])
+                    keys.append(key)
+                    if key not in seen:
+                        seen.add(key)
+                        units.append((e[0], e[1],
+                                      e[2] if len(e) > 2 else None,
+                                      e[3] if len(e) > 3 else None, False))
+            else:
+                n = rec["n"]
+                seam = sum(rec["page_lens"])
+                snaps = sum(rec["snap_lens"])
+                if snaps and seam and n >= seam + snaps:
+                    # legacy migration: split pages|snaps (crcs computed at copy time)
+                    for soff, sn in ((rec["off"], seam), (rec["off"] + seam, n - seam)):
+                        key = (soff, sn)
+                        keys.append(key)
+                        if key not in seen:
+                            seen.add(key)
+                            units.append((soff, sn, None, _CRC32C_ALG, True))
+                else:
+                    key = (rec["off"], n)
+                    keys.append(key)
+                    if key not in seen:
+                        seen.add(key)
+                        units.append((rec["off"], n, rec.get("crc"),
+                                      rec.get("crc_alg"), False))
+            new_extents.append(keys)
+        # Merge physically adjacent units into RUNS (extents of one original private
+        # span that all survived together): one padded copy per run preserves the
+        # original contiguous layout and its single block padding - no block growth.
+        # Private spans are block-reserved, so adjacency can only mean same-span.
+        runs: list[list] = []       # [src_off, total_n, members, pad]
+        for u in units:
+            if runs and runs[-1][0] + runs[-1][1] == u[0]:
+                runs[-1][1] += u[1]
+                runs[-1][2].append(u)
+                runs[-1][3] = -(runs[-1][1]) % _BLK
+            else:
+                runs.append([u[0], u[1], [u], -(u[1]) % _BLK])
         off = 0
-        for i, rec in enumerate(keep):
-            span = (rec["n"] + _BLK - 1) // _BLK * _BLK
-            layout[i] = off
-            spans.append((off, rec["off"], span, rec["n"],
-                          rec.get("crc"), rec.get("crc_alg")))
+        spans = []
+        for run in runs:
+            span = run[1] + run[3]
+            for j, u in enumerate(run[2]):
+                # pad share: interior extents own nothing, the run's last extent owns
+                # the block padding - sums stay exact in the dense layout too
+                layout[(u[0], u[1])] = [off + (u[0] - run[0]), u[2], u[3],
+                                        run[3] if j == len(run[2]) - 1 else 0]
+            spans.append((off, run[0], span, run))
             off += span
         total = off
         # Preallocate: block allocation off the writers' critical path (P9B iron: the
@@ -2059,11 +2537,14 @@ class SessionTierStore:
         os.ftruncate(dst, total)
 
         def _copy_one(idx: int) -> None:
-            dst_off, src_off, span, need, crc, alg = spans[idx]
-            run, done = 0, 0
+            dst_off, run_src, span, run = spans[idx]
+            members, run_pad = run[2], run[3]
+            # per-member crc accumulator: [off, n, crc, alg, compute, acc]
+            acc = [[m[0], m[1], m[2], m[3], m[4], 0] for m in members]
+            done = 0
             while done < span:
                 n = min(_COMPACT_CHUNK, span - done)
-                buf = os.pread(src, n, src_off + done)
+                buf = os.pread(src, n, run_src + done)
                 if len(buf) < n:      # torn historical hole: keep the layout dense,
                     buf += b"\0" * (n - len(buf))   # the crc check flags live corruption
                 view = memoryview(buf)
@@ -2072,23 +2553,29 @@ class SessionTierStore:
                     w += os.pwrite(dst, view[w:], dst_off + done + w)
                 # The chunk lives in .new now: drop the source cache page so a 100+ GiB
                 # copy cannot evict the rest of the page cache from under the system.
-                os.posix_fadvise(src, src_off + done, n, os.POSIX_FADV_DONTNEED)
-                if crc is not None and done < need:
-                    take = view[:min(n, need - done)]
-                    run = (crc32c.crc32c(take, value=run) if alg == _CRC32C_ALG
-                           else zlib.crc32(take, run))
+                os.posix_fadvise(src, run_src + done, n, os.POSIX_FADV_DONTNEED)
+                for m in acc:
+                    rel, need = m[0] - run_src, m[1]
+                    lo, hi = max(rel - done, 0), min(rel + need - done, n)
+                    if hi > lo:
+                        take = view[lo:hi]
+                        alg = m[3] or _CRC32C_ALG
+                        m[5] = (crc32c.crc32c(take, value=m[5]) if alg == _CRC32C_ALG
+                                else zlib.crc32(take, m[5]))
                 done += n
-            if crc is not None and run != crc:
-                raise OSError(f"payload crc mismatch moving record at {src_off}")
+            for m in acc:                             # whole-extent verification
+                layout[(m[0], m[1])][1] = m[5]        # fresh dense-layout crc
+                if not m[4] and m[2] is not None and m[5] != m[2]:
+                    raise OSError(f"payload crc mismatch moving record at {m[0]}")
 
         try:
-            workers = min(_compact_writers(_COMPACT_WRITERS), len(keep))
+            workers = min(_compact_writers(_COMPACT_WRITERS), len(runs))
             if workers <= 1:
-                for i in range(len(keep)):
+                for i in range(len(runs)):
                     _copy_one(i)
             else:
                 with ThreadPoolExecutor(max_workers=workers) as ex:
-                    list(ex.map(_copy_one, range(len(keep))))
+                    list(ex.map(_copy_one, range(len(runs))))
             os.fdatasync(dst)
             # The copy is on disk: release its cache too.
             os.posix_fadvise(dst, 0, total, os.POSIX_FADV_DONTNEED)
@@ -2101,16 +2588,24 @@ class SessionTierStore:
         finally:
             os.close(src)
             os.close(dst)
-        return layout, total
+        return layout, total, new_extents
 
-    def _write_journal_new(self, keep: list[dict], layout: dict[int, int]) -> bytes:
-        """journal.log.new: the kept records with their P9 dense offsets. Every other
-        field is unchanged - including the payload crc, which covers record CONTENT,
-        not offsets - so replay verification semantics are identical."""
+    def _write_journal_new(self, keep: list[dict], layout: dict,
+                           new_extents: list) -> bytes:
+        """journal.log.new: the kept records with remapped extent lists - every extent
+        at its P9 dense offset, legacy records migrated to the extent format (split
+        spans carry their copy-time crcs). The record-level crc (logical payload) and
+        every other field are unchanged - the payload CONTENT did not move semantics,
+        only its storage locations - so replay verification behavior is identical."""
         out = bytearray()
         for i, rec in enumerate(keep):
             new_rec = dict(rec)
-            new_rec["off"] = layout[i]
+            exts = []
+            for key in new_extents[i]:
+                dst_off, crc, alg, pad = layout[key]
+                exts.append([dst_off, key[1], crc, alg, pad])
+            new_rec["extents"] = exts
+            new_rec["off"], new_rec["n"] = exts[0][0], exts[0][1]
             payload = json.dumps(new_rec, sort_keys=True).encode()
             out += struct.pack("<II", len(payload), zlib.crc32(payload)) + payload
         tmp = self._journal_path + ".new"
@@ -2401,7 +2896,7 @@ class SessionTierStore:
         return (f"session-tier: l1={snap['l1_used'] / 2**20:.1f}MiB, "
                 f"l2={snap['ssd_used'] / 2**20:.1f}MiB, "
                 f"offers={snap['offers_ok']}/{snap['offers_rej']}, "
-                f"dedup={snap['offers_dedup']}, "
+                f"dedup={snap['offers_dedup']}, ext={snap['extents_shared']}, "
                 f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
                 f"midsn={snap['probe_midspan_only']}, "
                 f"snapfree={snap['probe_snapfree_skip']}, "

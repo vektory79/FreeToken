@@ -1100,8 +1100,8 @@ def test_compact_sigkill_matrix_converges(tmp_path, monkeypatch, window):
     elif window == "jnew":
         real_jnew = store._write_journal_new
 
-        def boom(keep, layout):
-            real_jnew(keep, layout)
+        def boom(keep, layout, new_extents):
+            real_jnew(keep, layout, new_extents)
             raise _Crash("after journal.new")
 
         monkeypatch.setattr(store, "_write_journal_new", boom)
@@ -1777,7 +1777,7 @@ def test_shutdown_marker_missing_or_stale_takes_full_path(tmp_path, monkeypatch,
     calls = _counting_pread(monkeypatch)
     with tier_log_capture() as cap:
         boot, n = _boot(str(d1))
-    assert n == 2 and calls["n"] == 2
+    assert n == 2 and calls["n"] == 4   # 2 records x 2 extents (per-extent verify)
     assert not any("fast-path" in m for m in cap.messages)
     for i, (keys, pages) in enumerate(chains, start=1):
         hit = boot.probe(keys)
@@ -1794,7 +1794,7 @@ def test_shutdown_marker_missing_or_stale_takes_full_path(tmp_path, monkeypatch,
     assert store.offer(b"path-3", 1, [(k3, bytes([3]) * PAGE)])   # runtime, post-marker
     calls = _counting_pread(monkeypatch)
     boot, n = _boot(str(d2))
-    assert n == 3 and calls["n"] == 3                             # full verification ran
+    assert n == 3 and calls["n"] == 5     # 2 snapped records x 2 + 1 bare x 1
 
 
 def test_shutdown_marker_full_path_drops_dead_keeps_live(tmp_path, tier_log_capture):
@@ -1855,7 +1855,7 @@ def test_shutdown_marker_invalidated_before_shutdown_crash(tmp_path, monkeypatch
     with tier_log_capture() as cap:
         boot3, n = _boot(str(d))
     assert n == 3                                                # live set intact
-    assert calls["n"] == 3                                       # full verification ran
+    assert calls["n"] == 5          # 2 snapped records x 2 + 1 bare x 1 extents
     assert not any("fast-path" in m for m in cap.messages)
     assert any("journal tail truncated/torn" in m for m in cap.messages)
     for i, (keys, pages) in enumerate(chains, start=1):
@@ -2001,7 +2001,7 @@ def test_shutdown_marker_generation_monotonic_across_stale(tmp_path, monkeypatch
         f.write(struct.pack("<II", len(payload), zlib.crc32(payload)) + payload)
     calls = _counting_pread(monkeypatch)
     boot, n = _boot(str(d))
-    assert n == 1 and calls["n"] == 1            # stale sizes -> full verification
+    assert n == 1 and calls["n"] == 2   # stale sizes -> full per-extent verification
     boot.write_shutdown_marker()                 # graceful stop on this boot
     with open(_marker_path(d), "rb") as f:
         framed = f.read()
@@ -2048,8 +2048,17 @@ def test_flush_live_parallel_write_bytes_identical(tmp_path):
         seg = boot._by_path(name)
         assert seg.in_l2
         want = gold[name]
-        assert blob[seg.l2_off:seg.l2_off + seg.l2_n] == want[:seg.l2_n]
-        pad = blob[seg.l2_off + seg.l2_n:seg.l2_off + len(want)]
+        # the record's physical bytes = its ordered extents (shared spans included)
+        # concatenated; unshared records are one contiguous span - byte-identical to
+        # the sequential path's [payload][zero padding] layout
+        got = b""
+        end = 0
+        for ext in seg.extents:
+            got += blob[ext[0]:ext[0] + ext[1]]
+            end = max(end, ext[0] + ext[1])
+        assert got == want[:len(got)]
+        last = seg.extents[-1]
+        pad = blob[last[0] + last[1]:last[0] + last[1] + last[4]]
         assert pad == b"\0" * len(pad)          # padding zeros, byte-identical
         hit = boot.probe(keys)
         assert hit is not None and hit[0] == 3
@@ -2206,7 +2215,16 @@ def _journal_records_raw(path):
 
 
 def _blob_region(d, rec):
+    """The record's LOGICAL payload bytes: extents records concatenate their ordered
+    extent regions, legacy records read their single private span."""
     with open(os.path.join(d, "blob.bin"), "rb") as f:
+        exts = rec.get("extents")
+        if exts is not None:
+            out = b""
+            for e in exts:
+                f.seek(e[0])
+                out += f.read(e[1])
+            return out
         f.seek(rec["off"])
         return f.read(rec["n"])
 
@@ -2270,7 +2288,7 @@ def test_legacy_zlib_records_without_field_verify(tmp_path, monkeypatch):
     calls = _counting_pread(monkeypatch)
     boot = SessionTierStore(_cfg(ram=16384, ssd=64 * 4096, d=d))
     assert boot.replay_journal() == 3                           # full path, no drops
-    assert calls["n"] == 3                                      # every payload re-read
+    assert calls["n"] == 6                     # every payload re-read, per extent
     for name, keys, pages in chains:
         hit = boot.probe(keys)
         assert hit is not None and hit[0] == 3
@@ -2624,8 +2642,8 @@ def test_flush_pipeline_builds_next_group_during_previous_write(tmp_path, monkey
     idx = {"build": 0, "write": 0}
     built_next = threading.Event()
 
-    def build(self, group, pending, index=0):
-        r = real_build(self, group, pending, index)
+    def build(self, group, pending, index=0, plan=None):
+        r = real_build(self, group, pending, index, plan)
         with lock:
             i = idx["build"]
             idx["build"] += 1
@@ -2634,14 +2652,14 @@ def test_flush_pipeline_builds_next_group_during_previous_write(tmp_path, monkey
             built_next.set()
         return r
 
-    def write(self, stage, pending, writers):
+    def write(self, stage, pending, writers, failed_sids=()):
         with lock:
             i = idx["write"]
             idx["write"] += 1
             events.append(("write_start", i))
         if i == 0 and not built_next.wait(timeout=10.0):
             raise AssertionError("pipeline: group 1 was not built during group 0's write")
-        r = real_write(self, stage, pending, writers)
+        r = real_write(self, stage, pending, writers, failed_sids)
         with lock:
             events.append(("write_end", i))
         return r
@@ -2676,10 +2694,10 @@ def test_flush_group_build_failure_aborts_group_cleanly(tmp_path, monkeypatch, t
     real_iovecs = SessionTierStore._seg_iovecs
     victim = store._by_path(b"p1").seg_id
 
-    def flaky(self, seg, padded):
+    def flaky(self, seg, padded, skip_pages=0):
         if seg.seg_id == victim:
             raise OSError(5, "simulated pool page read failure")
-        return real_iovecs(self, seg, padded)
+        return real_iovecs(self, seg, padded, skip_pages)
 
     monkeypatch.setattr(SessionTierStore, "_seg_iovecs", flaky)
     with tier_log_capture() as cap:
@@ -2776,10 +2794,10 @@ def test_flush_drain_retry_admits_next_group_after_previous_settles(tmp_path, mo
             refused.set()
         return r
 
-    def write(self, stage, pending, writers):
+    def write(self, stage, pending, writers, failed_sids=()):
         if not refused.wait(timeout=10.0):
             raise AssertionError("group 1's reserve never refused on pending")
-        return real_write(self, stage, pending, writers)
+        return real_write(self, stage, pending, writers, failed_sids)
 
     monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
     monkeypatch.setattr(SessionTierStore, "_write_group", write)
@@ -2818,10 +2836,10 @@ def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monke
     real_write = SessionTierStore._write_group
     refused = threading.Event()
 
-    def write(self, stage, pending, writers):
+    def write(self, stage, pending, writers, failed_sids=()):
         if not refused.wait(timeout=10.0):
             raise AssertionError("group 1's reserve never refused on pending")
-        return real_write(self, stage, pending, writers)
+        return real_write(self, stage, pending, writers, failed_sids)
 
     def fake_wait(self, timeout):
         return False                       # simulate the 60 s timeout elapsing
@@ -2920,10 +2938,10 @@ def test_flush_overflow_counts_drain_retry_eviction(tmp_path, monkeypatch, tier_
             refused.set()
         return r
 
-    def write(self, stage, pending, writers):
+    def write(self, stage, pending, writers, failed_sids=()):
         if not refused.wait(timeout=10.0):
             raise AssertionError("group 1's reserve never refused on pending")
-        return real_write(self, stage, pending, writers)
+        return real_write(self, stage, pending, writers, failed_sids)
 
     monkeypatch.setattr(SessionTierStore, "_reserve_blob_span", reserve)
     monkeypatch.setattr(SessionTierStore, "_write_group", write)
@@ -2952,7 +2970,7 @@ def test_flush_pipeline_baseexception_releases_built_stages(tmp_path, monkeypatc
         keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
         assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
 
-    def boom(self, stage, pending, writers):
+    def boom(self, stage, pending, writers, failed_sids=()):
         raise SystemExit("simulated exit mid-pipeline")
 
     monkeypatch.setattr(SessionTierStore, "_write_group", boom)
@@ -2990,7 +3008,8 @@ def test_account_lock_stress_no_lost_updates(tmp_path):
         for i in range(m):
             seg = _Segment(seg_id=-(i + 1), path_key=bytes([i % 256]) * 8,
                            boundary_len=1, page_keys=[], page_lens=[], snap_lens=[])
-            assert store._journal_and_account(seg, 0, 0, 4096, 0)
+            assert store._journal_and_account(seg, [(0, 0, 0, "crc32c", 0)],
+                                               4096, 0, off=0)
 
     def discard_side():
         for seg in l2:
@@ -3504,3 +3523,341 @@ def test_tombstone_counter_in_snapshot_and_stats_line(tmp_path):
     fresh = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "fresh")))
     assert fresh.snapshot()["tombstones"] == 0
     assert "tomb=0" in fresh.stats_line()
+
+
+# ------------------------------------------------- L2 extent dedup (l2-snapshot-dedup)
+
+def _extent_chain_store(d, boundaries):
+    """L2-only store holding `boundaries` snapshot-bearing same-chain boundaries:
+    boundaries = [(tag, n_pages, snap_tag), ...]; returns (store, per-boundary
+    (path_key, keys, pages) list). Each boundary is offered under its own path key."""
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    out = []
+    token_lists = []
+    for i in range(max(n for _, n, _ in boundaries)):
+        token_lists.append((7, i))
+    keys, pages = _chain(token_lists)
+    for tag, n, snap_tag in boundaries:
+        assert store.offer(f"path-{tag}".encode(), n, pages[:n], _snap(snap_tag))
+        out.append((f"path-{tag}".encode(), keys[:n], pages[:n], _snap(snap_tag)))
+    return store, out
+
+
+def test_extent_write_dedups_contained_snapshot_bearing_offer(tmp_path):
+    """Core dedup: a deeper snapshot-boundary offer references the shallower boundary's
+    page extents and appends ONLY its tail pages + own snapshot - the unit-scale
+    analogue of 23.81 -> ~7 GiB. offers_dedup (snapshot-free path) stays untouched."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 2, "a"), (2, 4, "b")])
+    snap = store.snapshot()
+    assert snap["extents_shared"] == 1          # one page extent referenced, not copied
+    assert snap["offers_dedup"] == 0            # snapshot-bearing offers are always stored
+    assert snap["ssd_used"] == 2 * 4096         # unique bytes: b1 span + b2 private span
+    seg1 = store._segments[min(store._segments)]
+    recs, whole = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    assert whole and len(recs) == 2
+    assert [len(r["extents"]) for r in recs] == [2, 3]   # [pages][snaps] / [shared][tail][snaps]
+    assert recs[1]["off"] == recs[0]["off"] and recs[1]["n"] == sum(recs[0]["page_lens"])
+    # both boundaries restore byte-exact
+    for path_key, keys, pages, s in segs:
+        hit = store.probe(keys)
+        assert hit is not None and hit[0] == len(keys)
+        assert store.restore(hit[1]) == ([data for _, data in pages], [s])
+
+
+def test_extent_restore_byte_exact_across_shared_tail_seam(tmp_path):
+    """Every boundary depth of shared records restores byte-exact - depth truncation
+    crosses the shared/tail extent seam - and the boundary-EXACT probe preference is
+    unchanged; prefetch staging across extents lands byte-identical too."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 1, "a"), (2, 2, "b"), (3, 4, "c")])
+    # b2 references b1's page extent; b3 references b1's + b2's tail-page extents
+    assert store.snapshot()["extents_shared"] == 3
+    for path_key, keys, pages, s in segs:
+        hit = store.probe(keys)
+        assert hit is not None and hit[0] == len(keys)      # boundary-exact still wins
+        assert store.restore(hit[1]) == ([data for _, data in pages], [s])
+    deepest = segs[-1]
+    ticket = store.begin_restore(TierHandle(deepest[0], len(deepest[1]),
+                                            store._by_path(deepest[0]).seg_id))
+    assert ticket is not None
+    _settle(store)
+    got = store.consume_ticket(ticket)
+    assert got == ([data for _, data in deepest[2]], [deepest[3]])
+
+
+def test_extent_replay_derives_refcounts_orphan_span_converges_dead(tmp_path):
+    """Refcounts are derived from the surviving record set on boot; a span appended but
+    never journaled (crash before the record) is an unreferenced orphan: never counted
+    as live, reclaimed by the next compaction that fires."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 2, "a"), (2, 4, "b")])
+    with open(d / "blob.bin", "r+b") as f:
+        f.seek(0, os.SEEK_END)
+        f.write(b"\xab" * 4096)                 # orphan span, no journal record
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 2
+    assert boot._ssd_used == 2 * 4096           # the orphan is not live capacity
+    assert boot._dead_bytes == 4096             # watermark minus live
+    assert len(boot._extents) == 4              # pages+snaps of b1, private pages+snaps of b2
+    recs, _ = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    shared = (recs[0]["extents"][0][0], recs[0]["extents"][0][1])
+    assert boot._extents[shared][0] == 2        # referenced by BOTH records
+    # reclaim: discard b1 (tombstone -> dead record), compact reclaims b1-only bytes
+    # AND the orphan; the shared span survives via b2 and is copied exactly once
+    seg1 = [s for s in boot._segments.values()
+            if s.path_key == segs[0][0]][0]
+    boot.evict_store(1)
+    assert boot._dead_records == 1
+    assert boot.compact() == 1
+    # the shared page extent (512 B, interior) is copied alone -> own aligned block:
+    # 4096 (aligned shared span) + 4096 (b2's private tail+snap run)
+    assert boot._ssd_used == 2 * 4096
+    hit = boot.probe(segs[1][1])
+    assert boot.restore(hit[1]) == ([data for _, data in segs[1][2]], [segs[1][3]])
+    final = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert final.replay_journal() == 1
+    assert final._ssd_used == 2 * 4096
+    hit = final.probe(segs[1][1])
+    assert final.restore(hit[1]) == ([data for _, data in segs[1][2]], [segs[1][3]])
+
+
+def test_extent_torn_journal_tail_after_extent_record(tmp_path):
+    """A SIGKILL mid-journal-append after an extent record: replay keeps exactly the
+    complete prefix, the torn record's private bytes stay durable-but-unjournaled
+    holes, and the surviving shared records restore byte-exact."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 1, "a"), (2, 2, "b"), (3, 4, "c")])
+    raw = (d / "journal.log").read_bytes()
+    pos, sizes = 0, []
+    while pos + 8 <= len(raw):
+        plen, _ = struct.unpack_from("<II", raw, pos)
+        pos += 8 + plen
+        sizes.append(pos)
+    with open(d / "journal.log", "r+b") as f:
+        f.truncate(sizes[1] + 5)                # mid-third-record
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 2
+    recs, _ = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    # the surviving records still share: b2's first extent IS b1's pages span
+    assert recs[1]["extents"][0][0] == recs[0]["extents"][0][0]
+    assert boot._extents[(recs[0]["extents"][0][0],
+                          recs[0]["extents"][0][1])][0] == 2
+    for path_key, keys, pages, s in segs[:2]:
+        hit = boot.probe(keys)
+        assert hit is not None
+        assert boot.restore(hit[1]) == ([data for _, data in pages], [s])
+    hit = boot.probe(segs[2][1])
+    assert hit is None or hit[0] < len(segs[2][1])   # the torn boundary never serves
+
+
+def test_extent_dual_read_legacy_journal_boots_and_compact_migrates(tmp_path):
+    """Backward compat: a journal whose records carry NO extents field (every pre-L2
+    directory) boots via dual-read, restores byte-exact; the first compact migrates the
+    records to the extent format (pages|snaps split) after which a contained offer
+    SHARES the migrated page extents."""
+    d = tmp_path / "tier"
+    store = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=str(d)))
+    chains = []
+    for i in range(1, 4):
+        keys, pages = _chain([(i, 0), (i, 1), (i, 2)])
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(f"{i}"))
+        chains.append((f"p{i}".encode(), keys, pages, _snap(f"{i}")))
+    assert store.flush_live() == 3
+    # rewrite to the legacy format: single whole-payload span with a whole-region crc
+    # (stripping extents alone would leave the LOGICAL crc over a partial region - the
+    # exact clean-downgrade drop an old binary performs on multi-extent records)
+    import crc32c as _crc32c_mod
+
+    def to_legacy(rec):
+        whole = sum(rec["page_lens"]) + sum(rec["snap_lens"])
+        with open(os.path.join(str(d), "blob.bin"), "rb") as f:
+            f.seek(rec["off"])
+            body = f.read(whole)
+        rec.pop("extents")
+        rec["n"] = whole
+        rec["crc"] = _crc32c_mod.crc32c(body)
+        rec["crc_alg"] = "crc32c"
+
+    _rewrite_records(str(d), to_legacy)
+    boot = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 3
+    assert boot._ssd_used == 3 * 4096
+    for name, keys, pages, s in chains:
+        hit = boot.probe(keys)
+        assert boot.restore(hit[1]) == ([data for _, data in pages], [s])
+    assert boot.compact() == 0                  # nothing dead: no-op, no migration
+    recs, _ = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    assert all("extents" not in r for r in recs)
+    # force the migration: discard one record -> compact fires and rewrites the format
+    victim = boot._by_path(b"p1")
+    boot.evict_store(1)
+    assert boot.compact() == 1
+    recs, _ = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    assert len(recs) == 2 and all(len(r["extents"]) == 2 for r in recs)
+    hit = boot.probe(chains[1][1])
+    assert boot.restore(hit[1]) == ([data for _, data in chains[1][2]], [chains[1][3]])
+    # a contained snapshot-bearing offer now SHARES the migrated page extents
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))   # L2-only offers
+    assert boot.replay_journal() == 2
+    keys1, pages1 = chains[1][1], chains[1][2]
+    keys4 = keys1 + [chain_page_key(keys1[-1], (1, 3))]
+    pages4 = pages1 + [(keys4[3], _page_data((1, 3)))]
+    assert boot.offer(b"p2deep", 4, pages4, _snap("deep"))
+    assert boot.snapshot()["extents_shared"] >= 1
+    hit = boot.probe(keys4)
+    assert boot.restore(hit[1]) == ([data for _, data in pages4], [_snap("deep")])
+
+
+def test_extent_discard_frees_only_unique_and_shared_span_survives(tmp_path):
+    """Discard of a record holding shared extents frees ONLY its private bytes and
+    decrements the shared refcounts; the sharer keeps serving byte-exact. When the last
+    referrer goes, the shared span's bytes become dead exactly once."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 2, "a"), (2, 4, "b")])
+    assert store._ssd_used == 2 * 4096
+    store.evict_store(1)                        # discards the LRU b1
+    snap = store.snapshot()
+    # b1's snap extent died with it (128 + its 3456 pad share); the pages extent stays
+    # LIVE - b2 still references it (512 bytes remain counted in capacity)
+    assert snap["ssd_used"] == 512 + 4096
+    assert snap["dead_bytes"] == 128 + 3456
+    hit = store.probe(segs[1][1])
+    assert store.restore(hit[1]) == ([data for _, data in segs[1][2]], [segs[1][3]])
+    store.evict_store(1)                        # b2: private + the now-lone shared span
+    snap = store.snapshot()
+    assert snap["ssd_used"] == 0
+    assert snap["dead_bytes"] == 2 * 4096       # everything b1+b2 ever appended
+    assert store._extents == {}
+
+
+def test_extent_compact_keeps_shared_span_and_dedupes_copy(tmp_path):
+    """Compaction with extents: the shared span survives while ANY referencing record
+    survives, is copied exactly once (dense file == unique live volume), and the
+    resurrected-two-records-per-path identity rule still holds byte-exactly."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 2, "a"), (2, 4, "b")])
+    b2_seg = store._segments[max(store._segments)]
+    store.evict_store(1)                        # b1 dead (tombstoned), shared span stays
+    assert store.compact() == 1
+    # dense == unique live volume: the shared 512 B page span copies to its own
+    # aligned block (4096) plus b2's private tail+snap run (4096)
+    assert (d / "blob.bin").stat().st_size == 2 * 4096
+    assert store._ssd_used == 2 * 4096
+    hit = store.probe(segs[1][1])
+    assert store.restore(hit[1]) == ([data for _, data in segs[1][2]], [segs[1][3]])
+    final = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert final.replay_journal() == 1
+    hit = final.probe(segs[1][1])
+    assert final.restore(hit[1]) == ([data for _, data in segs[1][2]], [segs[1][3]])
+
+
+def test_extent_flush_shares_across_groups(tmp_path, monkeypatch):
+    """The shutdown flush (the measured 23.81 GiB seam) shares too: every boundary
+    after the first appends only its private span even when each segment is its own
+    volume group; boot replays and restores byte-exact at every depth."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1), (7, 2), (7, 3)])
+    want = []
+    for i, tag in ((1, "a"), (2, "b"), (4, "c")):
+        assert store.offer(f"p{i}".encode(), i, pages[:i], _snap(tag))
+        want.append((f"p{i}".encode(), keys[:i], pages[:i], _snap(tag)))
+    assert store.flush_live() == 3
+    snap = store.snapshot()
+    assert snap["extents_shared"] == 3          # b2 -> 1 share, b3 -> 2 page extents
+    assert snap["ssd_used"] == 3 * 4096         # unique bytes only
+    boot = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=d))
+    assert boot.replay_journal() == 3
+    assert boot._ssd_used == 3 * 4096
+    for name, kws, pgs, s in want:
+        hit = boot.probe(kws)
+        assert hit is not None and hit[0] == len(kws)
+        assert boot.restore(hit[1]) == ([data for _, data in pgs], [s])
+
+
+def test_extent_flush_dep_failure_keeps_dependent_in_l1(tmp_path, monkeypatch):
+    """A flush entry whose extent SOURCE failed its write is not journaled either (its
+    reference would point at a hole): both segments keep their L1 residency and the
+    retried flush converges byte-exact."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_FLUSH_GROUP_BYTES", 1)   # every segment = own group
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1), (7, 2)])
+    assert store.offer(b"p1", 1, pages[:1], _snap("a"))
+    assert store.offer(b"p2", 2, pages[:2], _snap("b"))
+
+    real = st_mod.os.pwritev
+    state = {"n": 0}
+
+    def fail_first(fd, buffers, offset):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError(5, "simulated write failure")
+        return real(fd, buffers, offset)
+
+    monkeypatch.setattr(st_mod.os, "pwritev", fail_first)
+    assert store.flush_live() == 0              # b1 failed; b2 dep-skipped
+    monkeypatch.undo()
+    assert len([s for s in store._segments.values() if s.in_l1]) == 2
+    assert store._ssd_used == 0
+    assert store.flush_live() == 2              # clean retry
+    boot = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=d))
+    assert boot.replay_journal() == 2
+    hit = boot.probe(keys[:2])
+    assert boot.restore(hit[1]) == ([data for _, data in pages[:2]], [_snap("b")])
+
+
+def test_extent_capacity_gauges_and_stats(tmp_path):
+    """Capacity gauges stay exact across offer/discard/compact with sharing and the
+    extents_shared counter is pre-seeded and rendered in the stats line."""
+    d = tmp_path / "tier"
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert store.snapshot()["extents_shared"] == 0
+    assert "ext=0" in store.stats_line()
+    keys, pages = _chain([(7, 0), (7, 1), (7, 2), (7, 3)])
+    assert store.offer(b"p1", 2, pages[:2], _snap("a"))
+    assert store.offer(b"p2", 4, pages, _snap("b"))
+    line = store.stats_line()
+    assert "ext=1" in line
+    snap = store.snapshot()
+    assert snap["ssd_used"] == 2 * 4096 and snap["dead_bytes"] == 0
+    store.evict_store(1)
+    snap = store.snapshot()
+    # p1's snap extent died (128 + 3456 pad share); the shared pages extent stays
+    # live via p2 (512) plus p2's private span (4096)
+    assert snap["ssd_used"] == 512 + 4096 and snap["dead_bytes"] == 128 + 3456
+    assert snap["dead_records"] == 1 and snap["dead_record_bytes"] == 128 + 3456
+    assert store.compact() == 1
+    snap = store.snapshot()
+    # dense: aligned shared span + p2's private run
+    assert snap["ssd_used"] == 2 * 4096 and snap["dead_bytes"] == 0
+    assert snap["dead_records"] == 0 and snap["dead_record_bytes"] == 0
+
+
+def test_extent_eviction_under_cap_frees_private_only(tmp_path):
+    """Cap pressure with shared records: evictions free only unique bytes but victims
+    always leave the candidate list - no livelock, offers keep succeeding, and the
+    accounting never claims more freed space than the blob actually gave up."""
+    d = tmp_path / "tier"
+    store = SessionTierStore(_cfg(ram=0, ssd=6 * 4096, d=str(d)))
+    keys, pages = _chain([(7, 0), (7, 1), (7, 2), (7, 3)])
+    assert store.offer(b"p1", 2, pages[:2], _snap("a"))
+    assert store.offer(b"p2", 4, pages, _snap("b"))
+    assert store._ssd_used == 2 * 4096
+    # a same-chain even deeper boundary still fits within the cap by sharing
+    assert store.offer(b"p3", 3, pages[:3], _snap("c"))
+    assert store._ssd_used == 3 * 4096
+    assert store.snapshot()["extents_shared"] >= 2   # b2 and b3 share b1's page extent
+    # divergent chains have nothing to share and push the cap: the oldest L2 records
+    # are truly discarded (only their unique bytes count as freed)
+    for i in range(10, 14):
+        fk, fp = _chain([(i, 0), (i, 1)])
+        assert store.offer(f"q{i}".encode(), 2, fp, _snap(f"q{i}"))
+    assert store._ssd_used <= 6 * 4096
+    assert store.probe(keys[:1]) is None or store.probe(keys) is not None
