@@ -173,6 +173,24 @@ def test_probe_boundary_exact_without_candidate_misses_once_and_counts(tmp_path)
     assert snap["probe_midspan_only"] == 1
 
 
+def test_probe_boundary_exact_skips_snapshot_free_serves_shallower_bearer(tmp_path):
+    """W2 fails-before: a snapshot-FREE boundary-exact segment (a KV-only tip/spare
+    offer left by a restore-finish adoption) used to win the boundary-exact walk and be
+    refused at the tail's snap gate, masking the shallower snapshot-bearing candidate
+    below it. The KV-only default walk still serves the deep snapshot-free segment."""
+    store = SessionTierStore(_cfg(ram=1 << 12))
+    keys, pages = _chain([(7, i) for i in range(5)])
+    assert store.offer(b"path-bare", 5, pages)          # snapshot-free tip: no snap arg
+    assert store.offer(b"path-bear", 3, pages[:3], _snap("bear"))
+    hit = store.probe(keys, boundary_exact=True)
+    assert hit is not None and hit[0] == 3 and hit[1].path_key == b"path-bear"
+    got, snaps = store.restore(hit[1])
+    assert got == [data for _, data in pages[:3]] and snaps == [_snap("bear")]
+    bare = store.probe(keys)                            # KV-only regression: walk unchanged
+    assert bare is not None and bare[0] == 5 and bare[1].path_key == b"path-bare"
+    assert store.restore(bare[1])[1] == []              # restorable, just snapshot-free
+
+
 def test_restore_returns_byte_identical_pages_and_snapshots(tmp_path):
     store = SessionTierStore(_cfg())
     keys, pages = _chain([(2, 0), (2, 1), (2, 2)])

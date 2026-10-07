@@ -970,6 +970,48 @@ def test_session_tier_adaptive_set_excludes_stale_grid_points():
     assert held == {k[1]}
 
 
+def test_tier_offer_exception_rolls_back_under_slot():
+    """W2 fails-before: an exception from store.offer left st[3] dangling at the just
+    committed value, and the >= st[3] rule then blocked every shallower snapshot bearer
+    until the next deep offer. The rollback must fire on the raise path too; the
+    exception still propagates."""
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+    from freetoken.kvcache.utils import chain_page_key
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    k = [chain_page_key(None, (1,))]
+    for t in (2, 3, 4):
+        k.append(chain_page_key(k[-1], (t,)))
+    slot = pool.alloc(1)[0]
+
+    def vp(depth_pages, bl_tokens):
+        return VictimPath(k[depth_pages - 1], bl_tokens, tuple(k[:depth_pages]),
+                          torch.arange(depth_pages, dtype=torch.int32), slot)
+
+    real_offer = cm.tier_store.offer
+    offered = []
+
+    def spy(path_key, boundary, kv_pages, snapshot_slot=None):
+        offered.append(boundary)
+        return real_offer(path_key, boundary, kv_pages, snapshot_slot)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("store offer exploded")
+
+    cm._tier_sessions[k[0]] = [8, 2, 0, None]    # tip 8 tok, divergence 2 tok
+    cm.tier_store.offer = boom
+    with pytest.raises(RuntimeError, match="store offer exploded"):
+        cm._tier_offer([vp(2, 2)])               # commits st[3]=2, then the offer raises
+    assert cm._tier_sessions[k[0]][3] is None    # rolled back, not dangling at 2
+    cm.tier_store.offer = spy
+    cm._tier_offer([vp(1, 1)])                   # the shallower bearer must be admitted
+    assert offered == [1]
+
+
 def test_tier_offers_across_turns_collapse_nested_plain_segments(tmp_path):
     """Manager-level offer supersede: per-turn cumulative snapshot-free boundaries of one
     session collapse to the deepest store segment, a re-offer of an already contained

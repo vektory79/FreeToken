@@ -1029,7 +1029,7 @@ class CacheManager:
     def _tier_offer(self, victims) -> None:
         """Keep/drop each evicted victim against the adaptive set of its tracked session:
         hybrid keeps {tip, the DEEPEST snapshot-bearing boundary <= divergence depth (a
-        failed offer rolls the slot back), newest non-tip}; a
+        failed or raising offer rolls the slot back), newest non-tip}; a
         KV-only manager keeps {tip} only - without snapshots the tip segment serves every
         shallower resume (probe matches the common chain prefix; restore depth-truncates
         its pages), while the hybrid under-divergence slot exists because a snapshot must
@@ -1067,7 +1067,15 @@ class CacheManager:
                         for i, key in enumerate(vp.chain_keys)]
             snaps = (_SlotSnapshot(self.linear_state_pool, vp.mamba_slot)
                      if vp.mamba_slot is not None else None)
-            ok = self.tier_store.offer(vp.path_key, len(vp.chain_keys), kv_pages, snaps)
+            try:
+                ok = self.tier_store.offer(vp.path_key, len(vp.chain_keys),
+                                           kv_pages, snaps)
+            except BaseException:
+                if under_commit:
+                    st[3] = under_prev  # rollback: a dangling slot blocks smaller bearers
+                logger.warning(
+                    "session tier offer raised; under-divergence slot rolled back")
+                raise
             if ok and snaps is not None:
                 self._tier_snap_bound[vp.path_key] = len(vp.chain_keys)   # pages
             elif not ok:

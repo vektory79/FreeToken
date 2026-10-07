@@ -547,8 +547,11 @@ class SessionTierStore:
         boundary_exact=True (hybrid managers) serves only segments whose boundary sits
         EXACTLY at d: a mid-span match has no live GDN snapshot at d, so the restore tail
         would refuse it and mask shallower servable boundaries - the walk skips those
-        depths instead. Snapshots are still the tail gate's call (state can change
-        between probe and restore). Candidate depths are the live segments' boundary
+        depths instead. A boundary-exact segment with no snapshot bytes (a KV-only
+        tip/spare offer left by a restore-finish adoption) is skipped for the same
+        reason - the presence-only snapshot predicate _tier_offer's under-divergence
+        guard uses. Snapshots are still the tail gate's call (state can change between
+        probe and restore). Candidate depths are the live segments' boundary
         lengths descending, not every page depth: nothing else can win, so the walk
         jumps straight over the mid-span interior. A walk that saw mid-span matches but
         no boundary-exact candidate counts one miss plus probe_midspan_only (the
@@ -582,6 +585,8 @@ class SessionTierStore:
                     if boundary_exact and seg.boundary_len != d:
                         saw_midspan = True     # servable for KV-only, never for hybrid
                         continue
+                    if boundary_exact and not any(seg.snap_lens):
+                        continue  # snapshot-free: the snap gate would refuse it anyway
                     if best is None or (seg.boundary_len == d, seg.last_validation) > \
                             (best[0].boundary_len == d, best[0].last_validation):
                         best = (seg, d)
