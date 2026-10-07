@@ -328,11 +328,13 @@ class _GroupEntry:
     released: bool = False          # pipeline-claims guard, see _release_stage
     # L2 extent dedup: skip = page count covered by shared extents (no iovecs, no
     # bytes); shares = [(off, n, src_seg_id)] (src None = committed in_l2 ancestor);
-    # deps = same-flush source seg ids (their failed write skips this record too);
-    # extents = finalized [(off, n, crc, alg), ...] for the journal record.
+    # deps = share-source seg ids, committed + same-flush (a failed source skips this
+    # record too); pins = those sources' refs pins, taken at build and released by
+    # _release_stage; extents = finalized [(off, n, crc, alg), ...] for the record.
     skip: int = 0
     shares: list = field(default_factory=list)
     deps: set = field(default_factory=set)
+    pins: list = field(default_factory=list)
     extents: list | None = None
 
 
@@ -888,13 +890,15 @@ class SessionTierStore:
             return n + ent[3]
         return 0
 
-    def _plan_share(self, seg: _Segment) -> tuple[list, list]:
+    def _plan_share(self, seg: _Segment) -> tuple[list, list, int | None]:
         """Deepest prefix-proven same-chain in_l2 ancestor whose page region is extent
         aligned: its page extents are byte-identical to this segment's pages [0:M) (an
         equal chain key at depth d implies an equal page prefix - probe's store
         invariant), so they are REFERENCED instead of re-appended. Returns (shares,
-        covered page count) with shares as (off, n, src_seg_id=None) - the crc is
-        resolved from the extent table at journal time. Legacy mixed spans (pages and
+        covered page count, source seg id) with shares as (off, n, src_seg_id=None) -
+        the crc is resolved from the extent table at journal time, and the source seg
+        id lets the flush builder pin the ancestor for the build->journal window.
+        Legacy mixed spans (pages and
         snaps in one extent), crc-less ancestors and page_lens mismatches contribute
         nothing: an extent is never split, and a reference must carry a verifiable crc."""
         try:
@@ -912,7 +916,7 @@ class SessionTierStore:
             if best is None or len(s.page_keys) > len(best.page_keys):
                 best = s
         if best is None or seg.page_lens[:best.boundary_len] != best.page_lens:
-            return [], 0
+            return [], 0, None
         region = sum(best.page_lens)
         shares: list[tuple[int, int, int | None]] = []
         covered = 0
@@ -920,15 +924,15 @@ class SessionTierStore:
             if covered >= region:
                 break
             if covered + ext[1] > region or ext[2] is None:
-                return [], 0          # pages|snaps seam not extent-aligned / no crc
+                return [], 0, None     # pages|snaps seam not extent-aligned / no crc
             shares.append((ext[0], ext[1], None))
             covered += ext[1]
         if covered != region:
-            return [], 0
+            return [], 0, None
         extra = 1 + (1 if sum(seg.snap_lens) else 0)   # tail-pages extent + snaps extent
         if len(shares) + extra > _MAX_RECORD_EXTENTS:
-            return [], 0              # safety valve: private copy above the cap
-        return shares, best.boundary_len
+            return [], 0, None           # safety valve: private copy above the cap
+        return shares, best.boundary_len, best.seg_id
 
     @staticmethod
     def _chain_pool_crc(pool, offs, lens, alg: str) -> int:
@@ -1072,7 +1076,7 @@ class SessionTierStore:
         + snapshots are appended; a referenced span is already durable (its owner's
         record was journaled after an fsync)."""
         payload = payload if payload is not None else b""
-        shares, skip = self._plan_share(seg)
+        shares, skip, _src = self._plan_share(seg)
         private = payload[sum(seg.page_lens[:skip]):]
         need = len(private)
         r = self._reserve_blob_span(need)
@@ -1154,15 +1158,38 @@ class SessionTierStore:
                        pending: _PendingVolume) -> None:
         """Release a built stage's pipeline claims exactly once per entry: the pending
         volume returns to the cap budget, the refs pin comes off (a segment between
-        reserve and journal looks in_l2 to the evictor). Idempotent via the entry's
-        released flag: the writer's finally and a BaseException sweep in _flush_groups
-        can both reach the same stage."""
+        reserve and journal looks in_l2 to the evictor) and the share-source pins come
+        off (they kept the sources un-evictable from build to journal). Idempotent via
+        the entry's released flag: the writer's finally and a BaseException sweep in
+        _flush_groups can both reach the same stage."""
         for en in stage:
             if en.released:
                 continue
             en.released = True
             pending.release(en.padded)
             en.seg.refs -= 1
+            self._drop_share_pins(en.pins)
+            en.pins = []
+
+    def _pin_share_sources(self, deps: set) -> list:
+        """refs-pin every share source of a pending stage entry: the journal runs on
+        the writer thread AFTER this build, so an unpinned refs==0 source can be
+        discarded by the builder's own cap eviction in between - its extent entries
+        get released and the dependent's journal silently re-creates them (capacity
+        drift, lost extents_shared, unverifiable extents). The pin makes the source
+        invisible to the refs==0 victim scan for exactly the build->journal window.
+        Released by _release_stage (or _drop_share_pins on non-admission)."""
+        pins = []
+        for sid in deps:
+            src = self._segments.get(sid)
+            if src is not None:
+                src.refs += 1
+                pins.append(src)
+        return pins
+
+    def _drop_share_pins(self, pins: list) -> None:
+        for src in pins:
+            src.refs -= 1
 
     def _plan_share_flush(self, seg: _Segment,
                           plan: dict) -> tuple[list, int, set]:
@@ -1173,10 +1200,14 @@ class SessionTierStore:
         referencing them keeps the crash contract. A planned-but-failed source is
         handled by the dep gate in _write_group (the dependent record is skipped too).
         Returns (shares as (off, n, src_seg_id), covered page count, source seg ids).
-        The deepest ancestor wins: a committed ancestor shallower than the deepest
-        plan-mate is dropped, a deeper committed one keeps the plan-mate out."""
-        shares, skip = self._plan_share(seg)
+        The committed ancestor's id rides in deps too: the builder pins every source
+        for the build->journal window. The deepest ancestor wins: a committed ancestor
+        shallower than the deepest plan-mate is dropped, a deeper committed one keeps
+        the plan-mate out."""
+        shares, skip, committed_src = self._plan_share(seg)
         deps: set = set()
+        if committed_src is not None:
+            deps.add(committed_src)
         best = None
         for pe in plan.values():
             if not self._is_prefix(pe["page_keys"], seg.page_keys):
@@ -1203,7 +1234,7 @@ class SessionTierStore:
         extra = 1 + (1 if sum(seg.snap_lens) else 0)
         if len(shares) + extra > _MAX_RECORD_EXTENTS:
             return [], 0, set()
-        deps = {src for _, _, src in shares if src is not None}
+        deps.update(src for _, _, src in shares if src is not None)
         return shares, skip, deps
 
     def _build_group_stage(self, group: list[_Segment], pending: _PendingVolume,
@@ -1223,10 +1254,15 @@ class SessionTierStore:
         stage: list[_GroupEntry] = []
         plan = plan if plan is not None else {}
         cur_seg, cur_need = group[0], 0
+        cur_pins: list = []                  # pinned sources of the in-flight seg
         try:
             for seg in group:
                 cur_seg, cur_need = seg, sum(seg.page_lens) + sum(seg.snap_lens)
                 shares, skip, deps = self._plan_share_flush(seg, plan)
+                # Pin the share sources BEFORE the reserve: the reserve's eviction
+                # sweep and every later build's sweep must see them pinned, or the
+                # journal on the writer thread re-creates their released extents.
+                cur_pins = self._pin_share_sources(deps)
                 private_need = cur_need - sum(seg.page_lens[:skip])
                 r = self._reserve_blob_span(private_need, pending.value())
                 if r is None and not stage and pending.value():
@@ -1247,11 +1283,14 @@ class SessionTierStore:
                 if r is None:
                     logger.warning("session tier: L2 cap reached, cannot demote seg %d",
                                    seg.seg_id)
+                    self._drop_share_pins(cur_pins)
+                    cur_pins = []
                     continue
                 pending.add(r[1])
                 seg.refs += 1                     # evictor guard, released in _write_group
                 en = _GroupEntry(seg, r[0], cur_need, r[1])
                 en.skip, en.shares, en.deps = skip, shares, deps
+                en.pins, cur_pins = cur_pins, []
                 stage.append(en)
                 # Plan entry: geometry + extent slots for later entries' share walks.
                 # The extent (off, n) list is final here (offsets are reserved); crc
@@ -1285,11 +1324,13 @@ class SessionTierStore:
                 index, cur_seg.seg_id, cur_need, len(stage), len(group), e)
             for en in stage:                      # doomed spans must not be shareable
                 plan.pop(en.seg.seg_id, None)
+            self._drop_share_pins(cur_pins)
             self._release_stage(stage, pending)
             return None
         except BaseException:                     # KI/SystemExit: unpin, then propagate
             for en in stage:
                 plan.pop(en.seg.seg_id, None)
+            self._drop_share_pins(cur_pins)
             self._release_stage(stage, pending)
             raise
         return stage
@@ -1362,9 +1403,9 @@ class SessionTierStore:
         (segments stay in L1 in a process that survives). The pipeline-wide pending
         volume stays counted until this group settles, so a concurrent builder always
         sees a conservative cap budget. failed_sids accumulates the seg ids whose
-        record did not land (failed write, or a dep gate skip): a record referencing a
-        same-flush source that never became durable+journaled is skipped too - its
-        segment keeps its L1 residency for the next flush instead of journaling a
+        record did not land (failed write, failed journal append, or a dep gate skip):
+        a record referencing a source that never became durable+journaled is skipped -
+        its segment keeps its L1 residency for the next flush instead of journaling a
         reference replay would have to drop. Returns the demoted count."""
         if not stage:
             return 0
@@ -1396,6 +1437,10 @@ class SessionTierStore:
                     ov = self._flush_overflow
                     if ov is not None:            # the Y of the overflow log line
                         ov.admitted += en.need
+                else:
+                    # the record did not land: block this seg's own dependents too,
+                    # or they journal references to a never-journaled source span
+                    failed_sids.add(en.seg.seg_id)
         finally:
             # Release the pipeline's claims whatever happened above (journaled, aborted
             # or raised): the pending volume returns to the cap budget, the refs pin
@@ -2511,7 +2556,11 @@ class SessionTierStore:
         # Merge physically adjacent units into RUNS (extents of one original private
         # span that all survived together): one padded copy per run preserves the
         # original contiguous layout and its single block padding - no block growth.
-        # Private spans are block-reserved, so adjacency can only mean same-span.
+        # Distinct pad-free spans can abut too (adjacency alone is not same-span proof),
+        # but the merged run stays byte-correct regardless: each member keeps its
+        # relative offset and the run owns only the last member's padding - and a
+        # cross-span merge requires the earlier span's pad to be zero, so the copied
+        # total is unchanged.
         runs: list[list] = []       # [src_off, total_n, members, pad]
         for u in units:
             if runs and runs[-1][0] + runs[-1][1] == u[0]:
@@ -2887,9 +2936,10 @@ class SessionTierStore:
     def stats_line(self) -> str:
         """Compact one-liner for the scheduler's periodic batch log AND the shutdown
         final line ("session tier final: <this>"); "" when off. Stable field order:
-        l1, l2, offers=ok/rej, dedup, probes=hit/miss, midsn (probe_midspan_only),
-        snapfree (probe_snapfree_skip), restore=l1/l2, ok, refused, evict, demote,
-        discard, tomb, dead, holes, pf=begin/adopt/abandon, prej (prefetch_rej_cap)."""
+        l1, l2, offers=ok/rej, dedup, ext (extents_shared), probes=hit/miss, midsn
+        (probe_midspan_only), snapfree (probe_snapfree_skip), restore=l1/l2, ok,
+        refused, evict, demote, discard, tomb, dead, holes, pf=begin/adopt/abandon,
+        prej (prefetch_rej_cap)."""
         snap = self.snapshot()
         if not snap:
             return ""

@@ -3861,3 +3861,147 @@ def test_extent_eviction_under_cap_frees_private_only(tmp_path):
         assert store.offer(f"q{i}".encode(), 2, fp, _snap(f"q{i}"))
     assert store._ssd_used <= 6 * 4096
     assert store.probe(keys[:1]) is None or store.probe(keys) is not None
+
+
+def test_extent_share_source_pinned_against_builder_eviction(tmp_path):
+    """F1 regression (builder-evict vs journal): between the stage build and the
+    journal, the builder thread's lock-free cap eviction can pick the refs==0 share
+    source; _discard releases its extent entries and the dependent's journal then
+    silently re-creates them - _ssd_used loses the shared span's bytes (can go
+    negative on the dependent's later discard) and extents_shared misses the event.
+    The build-time pin keeps the source out of the refs==0 victim scan; it is
+    released with the stage. Pre-fix the victim scan below finds the source and
+    the journal drifts: ssd_used 4096 instead of 8192, extents_shared 0."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    d = tmp_path / "tier"
+    store = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=str(d)))
+    keys, pages = _chain([(7, 0), (7, 1), (7, 2), (7, 3)])
+    assert store.offer(b"p1", 2, pages[:2], _snap("a"))
+    assert store.offer(b"p2", 4, pages, _snap("b"))
+    seg1 = store._by_path(b"p1")
+    seg2 = store._by_path(b"p2")
+    assert store._demote_one_lru()             # deterministic clock: p1 goes to L2
+    assert seg1.in_l2 and seg1.refs == 0 and seg2.in_l1
+    # build the flush stage for the dependent exactly as the builder thread does
+    pending = st_mod._PendingVolume()
+    stage = store._build_group_stage([seg2], pending, 0, {})
+    assert stage is not None and stage[0].shares
+    # the builder's lock-free victim scan, exactly as _evict_oldest_l2 runs it
+    for v in [s for s in store._segments.values() if s.in_l2 and s.refs == 0]:
+        store._discard(v)
+    assert store._write_group(stage, pending, 1, set()) == 1
+    assert seg1.refs == 0                      # pin released with the stage
+    snap = store.snapshot()
+    # (i) byte truth: p1's span (4096) + p2's private span (4096), no eviction drift
+    assert snap["ssd_used"] == 2 * 4096
+    # (ii) the share event is counted
+    assert snap["extents_shared"] == 1
+    # (iii) every consumed extent carries a verifiable crc - no unverified extents
+    recs, whole = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    assert whole and len(recs) == 2            # no tombstone: the source survived
+    assert all(e[2] is not None for e in recs[1]["extents"])
+    # both boundaries still serve byte-exact
+    hit = store.probe(keys[:2])
+    assert store.restore(hit[1]) == ([data for _, data in pages[:2]], [_snap("a")])
+    hit = store.probe(keys)
+    assert store.restore(hit[1]) == ([data for _, data in pages], [_snap("b")])
+
+
+def test_extent_flush_journal_failure_blocks_dependents(tmp_path, monkeypatch):
+    """F2 regression: a journal-append failure for a share source must land the
+    source in failed_sids, or the dependent's record is journaled referencing a
+    span no journal record owns (boot-safe - replay drops it - but the in-memory
+    unique-byte accounting misses the span until replay/compact, contradicting the
+    dep-gate contract). The dependent is skipped and both segments keep their L1
+    residency for the retried flush."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1), (7, 2)])
+    assert store.offer(b"p1", 1, pages[:1], _snap("a"))
+    assert store.offer(b"p2", 2, pages[:2], _snap("b"))
+    seg1 = store._by_path(b"p1")
+
+    armed = {"on": True}
+
+    def fail_source_journal(seg, crc, crc_alg=None):
+        if armed["on"] and seg is seg1:
+            armed["on"] = False
+            return False
+        return True
+
+    monkeypatch.setattr(store, "_journal_append", fail_source_journal)
+    assert store.flush_live() == 0             # p1's record failed; p2 dep-skipped
+    assert all(s.in_l1 for s in store._segments.values())
+    assert store._ssd_used == 0
+    recs, _ = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert recs == []
+    monkeypatch.undo()
+    assert store.flush_live() == 2             # clean retry: both land, p2 shares
+    assert store._ssd_used == 2 * 4096         # unique bytes only
+    boot = SessionTierStore(_cfg(ram=16384, ssd=1 << 20, d=d))
+    assert boot.replay_journal() == 2
+    for kw, pgs, s in ((keys[:1], pages[:1], _snap("a")),
+                       (keys[:2], pages[:2], _snap("b"))):
+        hit = boot.probe(kw)
+        assert hit is not None and hit[0] == len(kw)
+        assert boot.restore(hit[1]) == ([data for _, data in pgs], [s])
+
+
+def test_extent_crc_mismatch_drops_all_consumers_only(tmp_path):
+    """G1: one corrupted shared span drops EVERY record consuming it (per-extent
+    validation is cached per distinct span) while records on untouched spans
+    survive - the drop is scoped by extent consumption, not by record."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 2, "a"), (2, 4, "b")])
+    ik, ip = _chain([(9, 0), (9, 1)])
+    assert store.offer(b"q", 2, ip, _snap("q"))   # independent chain, own extents
+    recs, _ = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    shared = recs[0]["extents"][0]             # b1's page span, consumed by b2 too
+    with open(d / "blob.bin", "r+b") as f:
+        f.seek(shared[0])
+        f.write(b"\\xde\\xad\\xbe\\xef")          # corrupt the shared bytes
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 1          # both b1 and b2 dropped, q survives
+    assert boot.probe(segs[0][1]) is None
+    assert boot.probe(segs[1][1]) is None
+    hit = boot.probe(ik)
+    assert hit is not None and hit[0] == len(ik)
+    assert boot.restore(hit[1]) == ([data for _, data in ip], [_snap("q")])
+    assert (shared[0], shared[1]) not in boot._extents
+
+
+def test_extent_beyond_blob_eof_dropped_no_crash(tmp_path):
+    """G2: a truncated blob makes a consumed extent's pread come up short - treated
+    exactly like a crc mismatch (drop, no crash); extents entirely below the cut
+    still verify and their records serve byte-exact."""
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 2, "a"), (2, 4, "b")])
+    recs, _ = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    # cut inside b2's LAST extent (its snapshot): b1's bytes all lie below the cut
+    last = recs[1]["extents"][-1]
+    os.truncate(d / "blob.bin", last[0] + last[1] // 2)
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
+    assert boot.replay_journal() == 1
+    hit = boot.probe(segs[0][1])
+    assert boot.restore(hit[1]) == ([data for _, data in segs[0][2]], [segs[0][3]])
+    assert boot._by_path(segs[1][0]) is None    # b2's record dropped (short pread)
+
+
+def test_extent_cap_overflow_falls_back_to_private_copy(tmp_path, monkeypatch):
+    """G3: a tiny _MAX_RECORD_EXTENTS makes every share walk exceed the cap - the
+    planners return empty and the record lands as an honest FULL private copy (no
+    truncation, no crash, nothing shared)."""
+    import freetoken.scheduler.session_tier as st_mod
+
+    monkeypatch.setattr(st_mod, "_MAX_RECORD_EXTENTS", 1)
+    d = tmp_path / "tier"
+    store, segs = _extent_chain_store(d, [(1, 2, "a"), (2, 4, "b")])
+    snap = store.snapshot()
+    assert snap["extents_shared"] == 0
+    assert snap["ssd_used"] == 2 * 4096        # both spans privately padded in full
+    recs, _ = _journal_records_raw(os.path.join(str(d), "journal.log"))
+    assert recs[1]["extents"][0][:2] != recs[0]["extents"][0][:2]   # no reference
+    for seg in segs:                           # full payloads restore byte-exact
+        hit = store.probe(seg[1])
+        assert store.restore(hit[1]) == ([data for _, data in seg[2]], [seg[3]])
