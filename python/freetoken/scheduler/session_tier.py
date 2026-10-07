@@ -457,6 +457,7 @@ class SessionTierStore:
         self._counters: Counter = Counter(offers_ok=0, offers_rej=0, offers_dedup=0,
                                           probe_hit=0,
                                           probe_miss=0, probe_midspan_only=0,
+                                          probe_snapfree_skip=0,
                                           note_match=0, restore_l1=0,
                                           restore_l2=0, restore_ok=0, restore_refused=0,
                                           evictions=0, demotions=0,
@@ -550,8 +551,9 @@ class SessionTierStore:
         depths instead. A boundary-exact segment with no snapshot bytes (a KV-only
         tip/spare offer left by a restore-finish adoption) is skipped for the same
         reason - the presence-only snapshot predicate _tier_offer's under-divergence
-        guard uses. Snapshots are still the tail gate's call (state can change between
-        probe and restore). Candidate depths are the live segments' boundary
+        guard uses; each such skip counts probe_snapfree_skip. Snapshots are still
+        the tail gate's call (state can change between probe and restore). Candidate
+        depths are the live segments' boundary
         lengths descending, not every page depth: nothing else can win, so the walk
         jumps straight over the mid-span interior. A walk that saw mid-span matches but
         no boundary-exact candidate counts one miss plus probe_midspan_only (the
@@ -586,7 +588,9 @@ class SessionTierStore:
                         saw_midspan = True     # servable for KV-only, never for hybrid
                         continue
                     if boundary_exact and not any(seg.snap_lens):
-                        continue  # snapshot-free: the snap gate would refuse it anyway
+                        # snapshot-free: the snap gate would refuse it anyway
+                        self._counters["probe_snapfree_skip"] += 1
+                        continue
                     if best is None or (seg.boundary_len == d, seg.last_validation) > \
                             (best[0].boundary_len == d, best[0].last_validation):
                         best = (seg, d)
@@ -2385,7 +2389,11 @@ class SessionTierStore:
             return snap
 
     def stats_line(self) -> str:
-        """Compact one-liner for the scheduler's periodic batch log; "" when off."""
+        """Compact one-liner for the scheduler's periodic batch log AND the shutdown
+        final line ("session tier final: <this>"); "" when off. Stable field order:
+        l1, l2, offers=ok/rej, dedup, probes=hit/miss, midsn (probe_midspan_only),
+        snapfree (probe_snapfree_skip), restore=l1/l2, ok, refused, evict, demote,
+        discard, tomb, dead, holes, pf=begin/adopt/abandon, prej (prefetch_rej_cap)."""
         snap = self.snapshot()
         if not snap:
             return ""
@@ -2394,6 +2402,8 @@ class SessionTierStore:
                 f"offers={snap['offers_ok']}/{snap['offers_rej']}, "
                 f"dedup={snap['offers_dedup']}, "
                 f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
+                f"midsn={snap['probe_midspan_only']}, "
+                f"snapfree={snap['probe_snapfree_skip']}, "
                 f"restore={snap['restore_l1']}(l1)/{snap['restore_l2']}(l2), "
                 f"ok={snap['restore_ok']}, refused={snap['restore_refused']}, "
                         f"evict={snap['evictions']}, demote={snap['demotions']}, "
@@ -2403,4 +2413,5 @@ class SessionTierStore:
                         # display clamp: crash-window compact leaves dead spans above the truncated blob_eof
                         f"holes={max(0, snap['dead_bytes'] - snap['dead_record_bytes']) / 2**20:.1f}MiB, "
                         f"pf={snap['prefetch_adopt']}/{snap['prefetch_begin']}/"
-                        f"{snap['prefetch_abandon']}")
+                        f"{snap['prefetch_abandon']}, "
+                        f"prej={snap['prefetch_rej_cap']}")

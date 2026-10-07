@@ -2618,6 +2618,67 @@ def test_restore_refusal_log_line_carries_divergence_fields():
     assert "depth_pg=4" in res
 
 
+def test_shutdown_final_line_renders_probe_and_prefetch_rejection_counters():
+    """W3 (brief item 4 + review 1298048 addendum): the shutdown final line renders the
+    rejection counters - midsn= (probe_midspan_only), snapfree= (probe_snapfree_skip, the
+    W2 snapshot-free boundary-exact skip shape) and prej= (prefetch_rej_cap) - with
+    preseeded zeros included. Counter semantics are unit-tested in test_session_tier.py;
+    this pins the rendering seam: the final line IS stats_line(), no separate format."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    with _cache_log_capture() as cap:            # no events: preseeded zeros still render
+        cm.shutdown_tier()
+    final = next(m for m in cap.messages if "session tier final:" in m)
+    assert "midsn=0" in final and "snapfree=0" in final and "prej=0" in final
+
+    pool, kvpool = _pool(), _FakeKVPool()        # fresh manager for the events leg
+    cm = _tiered_cm(pool, kvpool, pt)
+    store = cm.tier_store
+    k = cm._chain_keys(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32))
+    kpages = [(key, b"x" * 64) for key in k]
+    snap16 = b"s" * 16
+
+    # snapshot-free boundary-exact segment alone on its chain: the walk skips it (counted)
+    assert store.offer(b"path-a", 4, kpages[:4])
+    assert store.probe(k[:4], boundary_exact=True) is None
+    assert store.snapshot()["probe_snapfree_skip"] == 1
+
+    # a snapshot-bearing seg sharing pages 0-1 (e2 diverges at depth 3) + an own-chain
+    # bearer: handles for two live tickets
+    from freetoken.scheduler.session_tier import chain_page_key
+
+    e2 = chain_page_key(k[1], (9, 9))
+    assert store.offer(b"path-e", 3, [(k[0], b"x" * 64), (k[1], b"x" * 64), (e2, b"e" * 64)],
+                       snap16)
+    b0 = chain_page_key(None, (30,))
+    b1 = chain_page_key(b0, (31,))
+    assert store.offer(b"path-b", 2, [(b0, b"b" * 64), (b1, b"b" * 64)], snap16)
+    h_e = store.probe([k[0], k[1], e2], boundary_exact=True)[1]
+    h_b = store.probe([b0, b1], boundary_exact=True)[1]
+    t0, t1 = store.begin_restore(h_e), store.begin_restore(h_b)
+    assert store.begin_restore(h_e) is None      # ticket cap: rejected and counted
+    assert store.snapshot()["prefetch_rej_cap"] == 1
+    deadline = time.monotonic() + 5.0
+    while not store._tickets_settled():
+        assert time.monotonic() < deadline, "prefetch worker did not settle"
+        time.sleep(0.001)
+    store.abandon_ticket(t0)
+    store.abandon_ticket(t1)
+
+    # mid-span-only sighting: k2 is crossed inside path-a (boundary 4) at the visited
+    # boundary depth 3; no boundary-exact candidate matches the request
+    request = k[:3] + [chain_page_key(k[2], (8, 8))]
+    assert store.probe(request, boundary_exact=True) is None
+    snap = store.snapshot()
+    assert snap["probe_midspan_only"] == 1 and snap["probe_snapfree_skip"] == 1
+
+    with _cache_log_capture() as cap:
+        cm.shutdown_tier()
+    final = next(m for m in cap.messages if "session tier final:" in m)
+    assert "midsn=1" in final and "snapfree=1" in final and "prej=1" in final
+
+
 def test_prefetch_adopt_refusal_deduped_at_sync_fall_through():
     """TP1 fails-before: when an adopt-leg snap-gate refusal falls through to the sync
     path, the SAME gate refuses again on the same probe (one probe, one handle, identical

@@ -191,6 +191,36 @@ def test_probe_boundary_exact_skips_snapshot_free_serves_shallower_bearer(tmp_pa
     assert store.restore(bare[1])[1] == []              # restorable, just snapshot-free
 
 
+def test_probe_snapfree_skip_counts_only_snapshot_free_skips(tmp_path):
+    """W3 (review 1298048): the snapshot-free boundary-exact skip has its own preseeded
+    counter - it counts ONLY that skip: a plain boundary-exact hit, the KV-only walk and
+    a mid-span-only sighting (no snapshot-free candidate involved) leave it untouched."""
+    store = SessionTierStore(_cfg(ram=1 << 12))
+    keys, pages = _chain([(7, i) for i in range(5)])
+    assert store.offer(b"path-bare", 5, pages)          # snapshot-free tip: no snap arg
+    assert store.offer(b"path-bear", 3, pages[:3], _snap("bear"))
+    hit = store.probe(keys[:3], boundary_exact=True)    # plain exact hit: no skip
+    assert hit is not None and hit[0] == 3 and hit[1].path_key == b"path-bear"
+    assert store.snapshot()["probe_snapfree_skip"] == 0
+    hit = store.probe(keys, boundary_exact=True)        # the W2 shape: depth-5 snapshot-free
+    assert hit is not None and hit[0] == 3              # candidate skipped (counted once),
+    assert store.snapshot()["probe_snapfree_skip"] == 1 # the shallower bearer still wins
+    bare = store.probe(keys)                            # KV-only walk serves the bare tip
+    assert bare is not None and bare[0] == 5            # itself - no skip counted there
+    assert store.snapshot()["probe_snapfree_skip"] == 1
+    # mid-span-only sighting with NO snapshot-free candidate: probe_midspan_only owns it
+    store2 = SessionTierStore(_cfg(ram=1 << 12))
+    d_keys, d_pages = _chain([(7, i) for i in range(5)])
+    assert store2.offer(b"path-deep", 5, d_pages, _snap("deep"))
+    s_keys, s_pages = _chain([(7, 0), (7, 1), (9, 2)])
+    assert store2.offer(b"path-side", 3, s_pages, _snap("side"))
+    request = d_keys[:4] + [chain_page_key(d_keys[3], (8, 8))]
+    assert store2.probe(request, boundary_exact=True) is None
+    snap = store2.snapshot()
+    assert snap["probe_midspan_only"] == 1
+    assert snap["probe_snapfree_skip"] == 0
+
+
 def test_restore_returns_byte_identical_pages_and_snapshots(tmp_path):
     store = SessionTierStore(_cfg())
     keys, pages = _chain([(2, 0), (2, 1), (2, 2)])
@@ -408,7 +438,10 @@ def test_offers_dedup_metric_preseeded_and_in_stats_line(tmp_path):
     store = SessionTierStore(_cfg(d=str(tmp_path)))
     assert store.snapshot()["offers_dedup"] == 0
     assert store.snapshot()["probe_midspan_only"] == 0   # pre-seeded before any sighting
-    assert "dedup=0" in store.stats_line()
+    assert store.snapshot()["probe_snapfree_skip"] == 0  # W3: pre-seeded like its neighbor
+    line = store.stats_line()
+    assert "dedup=0" in line
+    assert "midsn=0" in line and "prej=0" in line and "snapfree=0" in line
     keys, pages = _chain([(9, 0), (9, 1)])
     assert store.offer(b"path", 2, pages)
     assert store.offer(b"path", 1, pages[:1])
