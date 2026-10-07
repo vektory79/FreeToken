@@ -612,3 +612,26 @@ def test_evict_victim_path_keys_default_empty():
     assert er.kv_indices.numel() == 0 and er.mamba_slots == [1]
     er2 = cache.evict_full(2)
     assert er2.victim_path_keys == () and er2.victim_paths == ()
+
+
+# ------------------------------------------- P0 telemetry: owned_prefix divergence signal
+def test_owned_prefix_holds_tombstoned_span_when_match_collapses_to_zero():
+    """P0 core signal: the request ends at a boundary whose snapshot FIFO-died (deeper
+    snapshots stay live but out of reach), so match_prefix truncates to cached_len == 0
+    while owned_prefix still reports the full tree-owned KV span - the true divergence
+    depth the restore-refusal telemetry carries. This pins the existing owned_prefix
+    contract the telemetry reads; the refusal log itself is pinned scheduler-side."""
+    from freetoken.kvcache.hybrid_radix_cache import HybridRadixCache
+
+    cache = HybridRadixCache(torch.device("cpu"), 1)
+    cache.insert(torch.tensor([1, 2], dtype=torch.int32),
+                 torch.tensor([10, 11], dtype=torch.int32), 1)          # X + mx
+    cache.insert(torch.tensor([1, 2, 3, 4], dtype=torch.int32),
+                 torch.tensor([10, 11, 12, 13], dtype=torch.int32), 2)  # Y + my (X internal)
+    cache.evict_mamba(1)                     # LRU = X's snapshot: tombstone, KV kept
+    req = torch.tensor([1, 2], dtype=torch.int32)
+    m = cache.match_prefix(req)
+    assert m.cached_len == 0 and m.mamba_value is None    # nothing resumable at depth 2
+    node, owned_len, owned_pages = cache.owned_prefix(req, stamp=False)
+    assert owned_len == 2 and owned_pages.tolist() == [10, 11]
+    cache.check_integrity()

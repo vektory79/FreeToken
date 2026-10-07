@@ -1089,17 +1089,21 @@ class CacheManager:
         if depth == 0:
             return None
         entry = self._tier_prefetch.get(chain[0])
+        prior_refusal = None
         if (entry is not None and entry.path_key == handle.path_key
                 and entry.ticket.boundary >= depth):
             # Prefetch adopt: the staged bytes replace the store read; the reservation
             # made at prefetch START replaces the free-list gate. A refusal drops the
             # ticket (nothing consumed) and falls through to the sync path below.
-            res = self._adopt_prefetch(entry, depth, handle, owned_pg, fresh,
-                                       owned_node, owned_pages)
+            res, prior_refusal = self._adopt_prefetch(entry, depth, handle, owned_pg,
+                                                      fresh, owned_node, owned_pages,
+                                                      cached_len, chain[0])
             if res is not None:
                 return res
         if (fresh > len(self.free_slots)
                 or (self.is_hybrid and self.linear_state_pool.num_free_slots < 1)):
+            self._log_restore_refusal("resources", depth, cached_len, owned_pg,
+                                      handle, chain[0], prior=prior_refusal)
             return None
         res = self.tier_store.restore(handle)
         if res is None:
@@ -1108,8 +1112,9 @@ class CacheManager:
         allocated = self.free_slots[:fresh]
         self.free_slots = self.free_slots[fresh:]
         slot = self.linear_state_pool.alloc(1)[0] if self.is_hybrid else None
-        out = self._restore_tail(depth, handle, pages, snaps, owned_node, owned_pg,
-                                 owned_pages, allocated, slot)
+        out, _ = self._restore_tail(depth, handle, pages, snaps, owned_node, owned_pg,
+                                    owned_pages, allocated, slot, cached_len, chain[0],
+                                    prior=prior_refusal)
         if out is None:
             if slot is not None:
                 self.linear_state_pool.free(slot)
@@ -1117,30 +1122,61 @@ class CacheManager:
             return None
         return out
 
+    def _log_restore_refusal(self, reason: str, depth: int, cached_len: int, owned_pg: int,
+                             handle, chain0, prior: str | None = None) -> None:
+        """P0 telemetry for the tier-loss case: one line per refused restore, plus the
+        restore_refused count (served restores count restore_ok at the tail). depth is the
+        probe depth in PAGES, cached_len the tree's TOKEN match, owned_pg the tree-owned
+        prefix in pages (the true divergence frontier, live snapshots or not), snap_bound
+        the offer-time boundary (rendered '-' when none remembered) and chain0 the
+        session key's short hash. mgr tags the family: KV-only restores cannot hit the
+        snap gate. prior dedups the adopt->sync fall-through: within ONE try_restore call
+        the sync path re-runs the same gates on the same probe (same fields by
+        construction), so an identical reason is neither re-counted nor re-logged; a
+        different reason always is."""
+        if reason == prior:
+            return
+        bound = self._tier_snap_bound.get(handle.path_key)
+        self.tier_store.count_restore_outcome(ok=False)
+        logger.info(
+            "session tier restore refused: reason=%s mgr=%s depth_pg=%d cached_tok=%d "
+            "owned_pg=%d snap_bound=%s chain0=%s",
+            reason, "hybrid" if self.is_hybrid else "kv", depth, cached_len, owned_pg,
+            "-" if bound is None else bound,
+            chain0[:4].hex() if chain0 is not None else "-")
+
     def _restore_tail(self, depth, handle, pages, snaps, owned_node, owned_pg,
-                      owned_pages, allocated, slot) -> MatchResult | None:
+                      owned_pages, allocated, slot, cached_len=0, chain0=None,
+                      prior=None) -> tuple[MatchResult | None, str | None]:
         """Shared restore tail of the sync path and the prefetch adopt: the bytes are in
         hand (a sync restore() result or a consumed staging); run the boundary gates,
-        write the fresh pages and unpack the boundary snapshot. Any refusal or write
-        failure returns None - the CALLER returns `allocated` (and the slot, if it was a
-        reservation) to the pools, so both paths share gate order and byte semantics by
-        construction."""
+        write the fresh pages and unpack the boundary snapshot. Returns (match, reason):
+        any refusal or write failure yields (None, reason) - the CALLER returns
+        `allocated` (and the slot, if it was a reservation) to the pools, so both paths
+        share gate order and byte semantics by construction. prior dedups a repeated
+        identical refusal (the adopt -> sync fall-through re-runs the same gate)."""
         if len(pages) != depth:
-            return None
+            self._log_restore_refusal("bytes", depth, cached_len, owned_pg, handle,
+                                      chain0, prior=prior)
+            return None, "bytes"
         if self.is_hybrid and (self._tier_snap_bound.get(handle.path_key) != depth
                                or not snaps):
             # Hybrid reuse needs the GDN state AT the matched boundary: a KV-only restore
             # would hand the continuation a prefix it cannot resume from (no checkpointed
             # boundary). A KV-only manager has no such state: the restored pages feed the
             # normal insert path and the continuation prefill computes on top of them.
-            return None
+            self._log_restore_refusal("snap_gate", depth, cached_len, owned_pg,
+                                      handle, chain0, prior=prior)
+            return None, "snap_gate"
         try:
             for i, data in enumerate(pages[owned_pg:]):
                 self._page_bytes.write_page(int(allocated[i]) // self.page_size, data)
             if self.is_hybrid:
                 _unpack_slot(self.linear_state_pool, slot, snaps[0])
         except Exception:
-            return None
+            self._log_restore_refusal("write", depth, cached_len, owned_pg, handle,
+                                      chain0, prior=prior)
+            return None, "write"
         kv_indices = torch.cat([owned_pages, self._page_to_token(allocated)])
         if self.is_hybrid:
             from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
@@ -1149,26 +1185,33 @@ class CacheManager:
                 depth * self.page_size, owned_node, kv_indices, tier_restored=True)
             self._tier_restore_slots.add(slot)          # no tree owner: scheduler frees post-COW
             self._tier_pending_restore[id(handle_h)] = (handle_h, allocated, slot)
-            return MatchResult(handle_h, mamba_value=slot)
-        from freetoken.kvcache.radix_cache import RestoredRadixHandle
+            out = MatchResult(handle_h, mamba_value=slot)
+        else:
+            from freetoken.kvcache.radix_cache import RestoredRadixHandle
 
-        handle_h = RestoredRadixHandle(
-            depth * self.page_size, owned_node, kv_indices, tier_restored=True)
-        # No slot rides a KV-only restore; abandon_restore skips the slot free (None is
-        # never in _tier_restore_slots) and returns exactly this handle's fresh pages.
-        self._tier_pending_restore[id(handle_h)] = (handle_h, allocated, None)
-        return MatchResult(handle_h)
+            handle_h = RestoredRadixHandle(
+                depth * self.page_size, owned_node, kv_indices, tier_restored=True)
+            # No slot rides a KV-only restore; abandon_restore skips the slot free (None is
+            # never in _tier_restore_slots) and returns exactly this handle's fresh pages.
+            self._tier_pending_restore[id(handle_h)] = (handle_h, allocated, None)
+            out = MatchResult(handle_h)
+        self.tier_store.count_restore_outcome(ok=True)  # P0: served; attempts count at the read
+        return out, None
 
     def _adopt_prefetch(self, entry, depth, handle, owned_pg, fresh,
-                        owned_node, owned_pages) -> MatchResult | None:
+                        owned_node, owned_pages, cached_len=0, chain0=None
+                        ) -> tuple[MatchResult | None, str | None]:
         """Consume a staged ticket at admission through the shared tail. Reservation
         accounting: pages beyond the tree's current owned prefix go back (surplus), a
         tree that SHRANK since the idle prefetch tops up from the free list, and ANY
-        refusal releases the whole reservation (drop = the abandon_restore mirror)."""
+        refusal releases the whole reservation (drop = the abandon_restore mirror).
+        Returns (match, refusal reason): (None, reason) when the tail refused (the caller
+        dedups the sync fall-through's repeat of it), (None, None) on a silent drop
+        (failed staging or top-up shortage: nothing was logged)."""
         got = self.tier_store.consume_ticket(entry.ticket)
         if got is None:
             self._tier_prefetch_drop(entry.key)      # failed staging: reservation back
-            return None
+            return None, None
         pages, snaps = got
         pages = pages[:depth]                        # staging holds the full boundary
         surplus = None
@@ -1178,22 +1221,23 @@ class CacheManager:
             extra = fresh - entry.res_fresh          # the tree shrank since the prefetch
             if extra > len(self.free_slots):
                 self._tier_prefetch_drop(entry.key)
-                return None
+                return None, None
             allocated = torch.cat([entry.reserved, self.free_slots[:extra]])
             self.free_slots = self.free_slots[extra:]
             entry.reserved = allocated               # the drop path returns what is held
             # res_fresh stays the ORIGINAL reservation: it is the ledger currency (the
             # topped-up pages were spent from free_slots, never charged to the ledger).
-        out = self._restore_tail(depth, handle, pages, snaps, owned_node, owned_pg,
-                                 owned_pages, allocated, entry.res_slot)
+        out, reason = self._restore_tail(depth, handle, pages, snaps, owned_node, owned_pg,
+                                         owned_pages, allocated, entry.res_slot,
+                                         cached_len, chain0)
         if out is None:
             self._tier_prefetch_drop(entry.key)
-            return None
+            return None, reason
         self._tier_prefetch.pop(entry.key, None)     # consumed; the store ticket is spent
         self._tier_reserved_pages -= entry.res_fresh
         if surplus is not None and len(surplus) > 0:
             self.free_slots = torch.cat([self.free_slots, surplus])
-        return out
+        return out, None
 
     def abandon_restore(self, handle) -> None:
         """Return a restored-but-refused admission's pages and slot to their pools.

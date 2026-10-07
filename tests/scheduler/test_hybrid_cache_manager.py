@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import logging
 import time
 from types import SimpleNamespace
 
@@ -2461,6 +2462,209 @@ def test_bug3_refused_restore_leaves_tree_ledger_and_store_intact():
     assert hit_a is not None and hit_a[0] == 8   # A recoverable from the store
     got, snaps = cm.tier_store.restore(hit_a[1])
     assert len(got) == 8 and len(snaps) == 1     # A's span + snapshot intact in the store
+
+
+# ------------------------------------------------- P0 telemetry: restore_ok / restore_refused
+class _CacheLogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _cache_log_capture():
+    """The module logger does not propagate (init_logger), so caplog cannot see it."""
+    lg = logging.getLogger("freetoken.scheduler.cache")
+    cap = _CacheLogCapture()
+    lg.addHandler(cap)
+    try:
+        yield cap
+    finally:
+        lg.removeHandler(cap)
+
+
+def test_restore_telemetry_counters_ok_refused_and_stats_line():
+    """P0 fails-before: restore_ok counts served restores, restore_refused counts refusals
+    (snap gate AND resources); the attempt counter (restore_l1) is unchanged, and both new
+    counters surface in the stats_line fragment (the batch log and the shutdown final line
+    render the same string via tier_stats_line)."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)        # tree empty, store warm (snapshot bound=4)
+
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))    # served restore
+    assert mr.cuda_handle.cached_len == 4 and mr.mamba_value is not None
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
+    assert snap["restore_l1"] == 1               # attempts as before
+
+    # snap-gate refusal: probe serves a mid-span depth the offer's snapshot bound misses
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    cm._tier_sessions[chain4[0]][1] = 2          # divergence below the tip
+    cm._tier_offer([VictimPath(chain4[1], 2, tuple(chain4[:2]),
+                               torch.arange(2, dtype=torch.int32), None)])
+    mr = cm.match_req(_pend([1, 2, 9]))          # probe depth 2, snapshot bound 4
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 1
+    assert snap["restore_l1"] == 2               # the refused attempt still counted
+
+    # resource refusal: free-page shortage, refused BEFORE the store read (no new attempt)
+    saved = cm.free_slots
+    cm.free_slots = saved[:2]
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    cm.free_slots = saved
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_refused"] == 2 and snap["restore_l1"] == 2
+
+    # slot shortage is the same resources refusal (hybrid needs one live slot)
+    held = pool.alloc(pool.num_free_slots)
+    mr = cm.match_req(_pend([1, 2, 3, 4, 9]))
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    pool.free(held)
+    assert cm.tier_store.snapshot()["restore_refused"] == 3
+
+    line = cm.tier_store.stats_line()
+    assert "ok=1" in line and "refused=3" in line
+    assert "restore=2(l1)/0(l2)" in line         # attempt counters unchanged by the split
+
+
+def test_restore_refusal_log_line_carries_divergence_fields():
+    """P0 fails-before: every refusal logs ONE line with the probe depth (pages), the tree's
+    cached_len, the owned_prefix frontier, the offer's snap_bound and the session key's
+    short hash - the fields the tier-loss case needs for its divergence verdict."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _donate_one_snapshot(cm, pool, kvpool, pt)
+    cm.ensure_mamba_slots(pool.num_slots)
+
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    cm._tier_sessions[chain4[0]][1] = 2
+    cm._tier_offer([VictimPath(chain4[1], 2, tuple(chain4[:2]),
+                               torch.arange(2, dtype=torch.int32), None)])
+
+    with _cache_log_capture() as cap:
+        cm.match_req(_pend([1, 2, 9]))           # snap-gate refusal: depth 2 vs bound 4
+        saved = cm.free_slots
+        cm.free_slots = saved[:2]
+        cm.match_req(_pend([1, 2, 3, 4, 9]))     # resource refusal: depth 4, 4 pages needed
+        cm.free_slots = saved
+
+    assert len(cap.messages) == 2
+    gate = next(m for m in cap.messages if "reason=snap_gate" in m)
+    res = next(m for m in cap.messages if "reason=resources" in m)
+    for msg in (gate, res):
+        assert "mgr=hybrid" in msg and "cached_tok=0" in msg and "owned_pg=0" in msg
+        assert f"chain0={chain4[0][:4].hex()}" in msg
+        assert "snap_bound=4" in msg             # the demoted tip's offer-time boundary
+    assert "depth_pg=2" in gate                  # mid-span probe depth (pages)
+    assert "depth_pg=4" in res
+
+
+def test_prefetch_adopt_refusal_deduped_at_sync_fall_through():
+    """TP1 fails-before: when an adopt-leg snap-gate refusal falls through to the sync
+    path, the SAME gate refuses again on the same probe (one probe, one handle, identical
+    fields). The old code counted restore_refused twice and logged two identical lines
+    for one request - the E1-E5 episode shape (idle prefetch staged the tip)."""
+    cm, pool, kvpool, _original = _washed_hybrid_cm()
+    key = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))[0]
+    cm.prefetch_tier_idle()                      # idle hook stages the session tip
+    _settle_tier(cm)
+    assert cm._tier_prefetch[key].ticket.state == "ready"
+
+    with _cache_log_capture() as cap:
+        mr = cm.match_req(_pend([1, 2, 9]))      # mid-span probe depth 2 vs snap bound 4
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    assert cm._tier_prefetch == {} and cm._tier_reserved_pages == 0
+    refusals = [m for m in cap.messages if "session tier restore refused:" in m]
+    assert len(refusals) == 1                    # was 2 identical lines (adopt + sync)
+    assert "reason=snap_gate" in refusals[0] and "depth_pg=2" in refusals[0]
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_refused"] == 1          # was 2
+    assert snap["restore_ok"] == 0
+    assert snap["restore_l1"] == 1               # the sync re-read still counts its attempt
+
+
+def test_restore_refusal_log_nonzero_divergence_fields():
+    """TP2: the mid-history signature the HW classifier matches - the tree owns a live
+    snapshot prefix (cached_tok > 0, owned_pg > 0) while the store's snapshot bound sits
+    deeper than the probe depth (snap_bound > depth_pg)."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    _, _, _ = _donate_one_snapshot(cm, pool, kvpool, pt, ids=(1, 2), boundary=1, uid=0)
+    _original, donated4, _req = _donate_one_snapshot(
+        cm, pool, kvpool, pt, ids=(1, 2, 3, 4, 5), boundary=4, uid=1)
+    from freetoken.kvcache.hybrid_radix_cache import VictimPath
+
+    chain4 = cm._chain_keys(torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    vp = VictimPath(chain4[-1], 4, tuple(chain4), pt[1, :4].clone(), donated4)
+    cm._tier_offer([vp])                         # store holds the deeper bound-4 segment
+
+    with _cache_log_capture() as cap:
+        mr = cm.match_req(_pend([1, 2, 9]))      # probe depth 2, tree cached 1
+    assert mr.cuda_handle.cached_len == 1
+    (line,) = [m for m in cap.messages if "session tier restore refused:" in m]
+    assert "reason=snap_gate" in line and "mgr=hybrid" in line
+    assert "cached_tok=1" in line and "owned_pg=2" in line
+    assert "depth_pg=2" in line and "snap_bound=4" in line
+
+
+def test_kvonly_restore_refusal_line_mgr_kv():
+    """TP4a: the plain-radix manager's resource refusal tags mgr=kv and carries no snap
+    bound (KV-only offers set none): the snap gate is unreachable there by construction."""
+    kvpool = _FakeKVPool()
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = _kvonly_cm(kvpool, pt)
+    ids = list(range(1, 13))
+    cm.match_req(_pend(ids + [99]))              # track the session (cold admission)
+    pages, _originals = _fill_pages(cm, kvpool, pt, ids)
+    cm.prefix_cache.insert_prefix(torch.tensor(ids, dtype=torch.int32), pages)
+    evicted, victims = cm.prefix_cache.evict_paths(1)
+    cm._free(evicted[::cm.page_size])
+    cm._tier_offer(victims)                      # wash: tree empty, store warm (KV-only)
+    saved = cm.free_slots
+    cm.free_slots = saved[:2]                    # the 12-page restore cannot fit
+    with _cache_log_capture() as cap:
+        mr = cm.match_req(_pend(ids + [99]))
+    cm.free_slots = saved
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    (line,) = [m for m in cap.messages if "session tier restore refused:" in m]
+    assert "reason=resources" in line and "mgr=kv" in line
+    assert "snap_bound=-" in line                # TP3: no bound renders as "-", not None
+    assert "cached_tok=0" in line and "owned_pg=0" in line and "depth_pg=12" in line
+    assert cm.tier_store.snapshot()["restore_refused"] == 1
+
+
+def test_restore_bytes_mismatch_refusal_reason_bytes(monkeypatch):
+    """TP4b: a store result whose page count misses the probe depth (len(pages) != depth)
+    refuses at the shared tail with reason=bytes."""
+    cm, pool, kvpool, _original = _washed_hybrid_cm()
+    real_restore = cm.tier_store.restore
+
+    def short_restore(handle):
+        pages, snaps = real_restore(handle)
+        return pages[:-1], snaps
+
+    monkeypatch.setattr(cm.tier_store, "restore", short_restore)
+    with _cache_log_capture() as cap:
+        mr = cm.match_req(_pend([1, 2, 3, 4, 9]))
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    (line,) = [m for m in cap.messages if "session tier restore refused:" in m]
+    assert "reason=bytes" in line
+    assert "depth_pg=4" in line and "snap_bound=4" in line
+    assert cm.tier_store.snapshot()["restore_refused"] == 1
 
 
 if __name__ == "__main__":

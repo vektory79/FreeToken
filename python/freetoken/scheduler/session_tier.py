@@ -457,7 +457,8 @@ class SessionTierStore:
         self._counters: Counter = Counter(offers_ok=0, offers_rej=0, offers_dedup=0,
                                           probe_hit=0,
                                           probe_miss=0, note_match=0, restore_l1=0,
-                                          restore_l2=0, evictions=0, demotions=0,
+                                          restore_l2=0, restore_ok=0, restore_refused=0,
+                                          evictions=0, demotions=0,
                                           discards=0, tombstones=0, prefetch_begin=0,
                                           prefetch_adopt=0,
                                           prefetch_abandon=0, prefetch_fail=0,
@@ -1235,6 +1236,12 @@ class SessionTierStore:
         finally:
             with self._lock:
                 seg.refs -= 1
+
+    def count_restore_outcome(self, ok: bool) -> None:
+        """P0 telemetry seam for cache.py's restore tail: served vs refused outcomes.
+        The attempt counters (restore_l1/l2) stay in restore() - they count store reads."""
+        with self._lock:
+            self._counters["restore_ok" if ok else "restore_refused"] += 1
 
     def _blob_read(self, blob: str, off: int, nbytes: int) -> bytes:
         """O_DIRECT blob read (buffered IO caps ~1.5 GB/s) over a block-aligned window;
@@ -2355,6 +2362,7 @@ class SessionTierStore:
                 f"dedup={snap['offers_dedup']}, "
                 f"probes={snap['probe_hit']}/{snap['probe_miss']}, "
                 f"restore={snap['restore_l1']}(l1)/{snap['restore_l2']}(l2), "
+                f"ok={snap['restore_ok']}, refused={snap['restore_refused']}, "
                         f"evict={snap['evictions']}, demote={snap['demotions']}, "
                         f"discard={snap['discards']}, tomb={snap['tombstones']}, "
                         f"dead={snap['dead_records']}rec/"
