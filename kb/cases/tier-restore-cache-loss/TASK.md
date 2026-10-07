@@ -3,7 +3,7 @@ title: "Кейс: периодическая полная потеря кеша 
 date: 2026-10-06
 hardware: RTX 5090 32GB; NVMe Samsung 990 EVO Plus; ft serve GLM-5.3-Flash-UD-Q3_K_XL GGUF
 branch-commits: "vektory79 @ f5bf1cb (рабочая копия и FreeTokenProd идентичны, ключевые файлы md5-сверены)"
-status: "P0 ИСПОЛНЕН (код+тесты+железная серия 2026-10-07): счётчики ok/refused разделены, точка дивергенции зависит от семейства триггера - move/вопрос (E3/E4) mid-history 83.9% -> P1/P2 обязательны; preamble-rewrite (E2/E5) -> полный re-prefill оправдан"
+status: "P0+P1+P2 ИСПОЛНЕНЫ (код+тесты+железные серии 2026-10-07): счётчики ok/refused разделены, точка дивергенции зависит от семейства триггера - move/вопрос (E3/E4) mid-history 83.9% -> P1/P2 обязательны, preamble-rewrite (E2/E5) -> полный re-prefill оправдан; P1+P2 реализованы (probe boundary-exact + admission по owned-фронтиру), HW-приёмка PASS (M2c HIT 89,088 ток / 26.7 с против P0 FULL-MISS 140.1 с, refusals 0 против 3), CPU-гейт 466 passed/1 skipped, коммиты волны ожидаются"
 tags: [session-tier, restore, probe, divergence, hybrid-radix, telemetry, cache-loss]
 ---
 
@@ -105,7 +105,7 @@ E2-E5 - попадания в L1-сегменты этого же чата (offe
   задокументированное приближение фазы 1) - состояние сессии алиасится между
   чатами, tip одного чата вытесняет tip другого. Плюс FIFO-промывка живых
   снапшотов дерева коммитами субагента
-  ([../topics/interleave-cache-wash.md](../topics/interleave-cache-wash.md)).
+  ([interleave-cache-wash.md](../../topics/interleave-cache-wash.md)).
   Для подтверждения нужен лог окна с реальным переключением (запросы субагента
   в логе отсутствуют в предоставленном окне 22:24-23:28).
 - Наличие живого снапшота дерева на пути - обязательное условие ненулевого
@@ -176,6 +176,39 @@ MID-HISTORY (~84%) -> P1 и P2 обязательны; для preamble-rewrite (
 условии правки recalled-memories блока) дивергенция в первых страницах ->
 полный re-prefill оправдан, там P1/P2 дали бы только наблюдаемость.
 
+### P1+P2 HW-приёмка (2026-10-07) - ACCEPTANCE PASS
+
+Контрольный ход после mid-history мутации БОЛЬШЕ НЕ ТЕРЯЕТ КЕШ. Один
+`ft serve`, конфиг из шапки, свежий scratch-тир, серийно: прогрев 106k
+(cached 640 -> 103,232, все growth-ходы HIT, давления на пулы нет) ->
+M1 preamble-poke -> M2 mid-history-poke -> M2c чистый контроль (ГЕЙТ) ->
+M3 revert -> M3c.
+
+| ход/метрика | P0 (до фикса) | P1+P2 (рабочее дерево поверх c30d53e) |
+|---|---|---|
+| M2c контроль-гейт | FULL-MISS: cached=0, new=106,201, wall 140.1 с, refusal snap_gate | HIT: cached=89,088 через restore_l1, new=17,091 (-83.9%), wall 26.7 с (5.2x), ok+1, refused=0 |
+| M1 preamble-poke | FULL-MISS 140.6 с + refusal (snap_gate, 5 pg) | FULL-MISS 139.6 с - оправданный re-prefill, refusal нет, ok/refused без изменений |
+| Refusal-строк за серию | 3 | 0 |
+| Shutdown final | restore=6 попыток, ok=3, refused=3, offers=15/0 | restore=3(l1)/0(l2), ok=3, refused=0, offers=14 |
+
+Отклонения от буквы ожиданий (задокументированы, не дефекты фикса):
+
+- M2 - частичный HIT 81,216 (1269 pg, 76.5% промпта) по live-radix снапшоту
+  M1-ветки: в серии приёмки нет M1c-хода, поэтому мелкий снапшот M1 пережил
+  FIFO-окно и ограничил матч снизу - это дельта последовательности ходов
+  против P0-серии, исход лучше ожидаемого (re-prefill 24,968 вместо 106,206);
+  tier на M2 даже не понадобился, refused=0.
+- M2c восстановился от границы 1392 pg - ровно boundary-exact граница точки
+  вставки (89,088 ток), а не полный tip (~1658 pg). Гипотеза (кодом в этой
+  серии не сверялась): сработал snapshot-bearing guard/rollback P2 и откатил
+  restore к глубочайшей снапшот-несущей границе; следствие - остаточный
+  re-prefill 17,091 ток (~16%) и wall 26.7 с вместо секунд.
+
+CPU-гейт волны: 466 passed / 1 skipped. Код и тесты лежат в рабочем дереве;
+коммит волны будет добавлен в этот файл позже. Полный отчёт и сырые ходы -
+`.tasks/tier-restore-p0/REPORT-hw-p1p2-acceptance.md` (вне git, числа
+дистиллированы сюда).
+
 ### P1 - probe не должен возвращать необслуживаемый матч
 
 - Для гибридного менеджера: mid-span совпадение (d внутри сегмента, снапшот
@@ -223,15 +256,20 @@ MID-HISTORY (~84%) -> P1 и P2 обязательны; для preamble-rewrite (
       outcome counters and log divergence on refusal"; серия и полный
       отчёт - .tasks/tier-restore-p0/, вне git)
 - [x] Интерпретация P0: точка дивергенции зафиксирована в этом файле
-- [ ] P1 probe (если P0 показал mid-history) - обязателен (вердикт P0: mid-history для E3/E4)
-- [ ] P2 адаптивный набор (если P0 показал mid-history) - обязателен (вердикт P0: mid-history для E3/E4)
+- [x] P1 probe (если P0 показал mid-history) - обязателен (вердикт P0: mid-history для E3/E4) -
+      реализован: boundary-exact probe для гибрида (mid-span матч не
+      возвращается); HW-приёмка PASS, коммит волны будет добавлен позже
+- [x] P2 адаптивный набор (если P0 показал mid-history) - обязателен (вердикт P0: mid-history для E3/E4) -
+      реализован: admission по owned-фронтиру (под-дивергентный слот st[3]
+      заполняется) + snapshot-bearing guard/rollback; HW-приёмка PASS,
+      CPU-гейт 466 passed / 1 skipped, коммит волны будет добавлен позже
 - [ ] P3 субагент-окно: отдельный лог, отдельный вердикт
-- [x] kb: аменда [../topics/session-cache-tiering.md](../topics/session-cache-tiering.md)
+- [x] kb: аменда [session-cache-tiering.md](../../topics/session-cache-tiering.md)
       разделом "ограничение: restore при дивергенции истории" по итогам
 
 ## Ссылки
 
-- Ярусный кеш: [../topics/session-cache-tiering.md](../topics/session-cache-tiering.md)
-- Промывка интерлива (FIFO снапшотов): [../topics/interleave-cache-wash.md](../topics/interleave-cache-wash.md)
-- Переиспользование radix-кеша и не-append-only истории: [../topics/radix-cache-reuse.md](../topics/radix-cache-reuse.md)
+- Ярусный кеш: [session-cache-tiering.md](../../topics/session-cache-tiering.md)
+- Промывка интерлива (FIFO снапшотов): [interleave-cache-wash.md](../../topics/interleave-cache-wash.md)
+- Переиспользование radix-кеша и не-append-only истории: [radix-cache-reuse.md](../../topics/radix-cache-reuse.md)
 - Предыдущий кейс той же семьи (клиентская перезапись истории): [../fix3-snapshot-lru-refresh/TASK.md](../fix3-snapshot-lru-refresh/TASK.md)

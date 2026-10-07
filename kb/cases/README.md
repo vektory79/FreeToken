@@ -35,9 +35,11 @@ Specification / Acceptance / Checklist.
   считает попытки, гейт снапшота отказывает mid-span матч, probe маскирует
   boundary-exact сегмент, дивергенция в адаптивном наборе пишется нулём.
   Бриф фикса P0-P3 (P0 телеметрия закрывает точку дивергенции). Вход:
-  [TASK.md](tier-restore-cache-loss/TASK.md). Статус: P0 исполнен
-  (телеметрия ok/refused + железная серия 2026-10-07), P1/P2 обязательны
-  для семейства move/вопрос.
+  [TASK.md](tier-restore-cache-loss/TASK.md). Статус: P0+P1+P2 исполнены
+  (телеметрия ok/refused + probe boundary-exact + admission по owned-фронтиру;
+  железные серии 2026-10-07), HW-приёмка P1+P2 PASS - контрольный ход после
+  мутации HIT (89,088 ток / 26.7 с против FULL-MISS 140.1 с), refusals 0;
+  коммиты волны ожидаются.
 - [session-cache-tiering/](session-cache-tiering/) — бриф ярусного кеша сессий
   (L0 VRAM -> L1 RAM 30 GiB -> L2 SSD 100 GiB): pull-on-evict с адаптивной
   селекцией, контент-адресный стор, журнал-персистентность; фазы 1/2, приёмка
