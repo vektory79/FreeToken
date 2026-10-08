@@ -82,6 +82,6 @@
 - [ft-tier-restore-attempt-counter](ft-tier-restore-attempt-counter-dfcbfd7380a1.md) — Tier restore case closed P0-P3 (sim H2: aliasing healed by P1/P2, no grouping needed); follow-ups brief in .tasks
 - [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-0270361228f3.md) — HybridRadixCache test integrity: vacuous fails-before, single-revert probes, det-clock in both scheduler tier tests
 - [ft-l2-extent-dedup](ft-l2-extent-dedup-7e424d42274e.md) — L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79
-- [ft-tier-restore-followups](ft-tier-restore-followups-858fc8fef287.md) — Tier-restore follow-up waves: W1 staging HW NO-GO; W2 probe snapshot-filter + st\[3\] rollback commit 1298048
 - [ft-tier-phase2-swave](ft-tier-phase2-swave-709c47569b69.md) — Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-817c76e69b3a.md) — gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)
+- [ft-tier-restore-followups](ft-tier-restore-followups-c41b934cdd4d.md) — Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625

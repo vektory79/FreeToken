@@ -3,7 +3,7 @@ name: "ft-gguf-native-serving-skill"
 description: "gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)"
 type: project
 lastUpdated: 2026-10-08T00:36
-lastRecall: 2026-10-08T00:23
+lastRecall: 2026-10-08T09:57
 ---
 
 # GGUF native serving skill: reusable methodology for any model family

@@ -3,7 +3,7 @@ name: "ft-tier-phase2-swave"
 description: "Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)"
 type: project
 lastUpdated: 2026-10-08T00:33
-lastRecall: 2026-10-08T00:23
+lastRecall: 2026-10-08T01:51
 ---
 
 # Session-tier phase-2 S-wave (metrics, scheduled compaction, safety guards)

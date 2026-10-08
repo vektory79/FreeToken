@@ -3,7 +3,7 @@ name: "hybrid-radix-lru-test-integrity"
 description: "HybridRadixCache test integrity: vacuous fails-before, single-revert probes, det-clock in both scheduler tier tests"
 type: project
 lastUpdated: 2026-10-07T20:50
-lastRecall: 2026-10-07T20:25
+lastRecall: 2026-10-08T02:00
 ---
 
 # Test integrity for hybrid radix LRU tests (Fix-3 wave lessons, 2026-09-21)

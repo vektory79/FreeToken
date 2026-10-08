@@ -1,9 +1,9 @@
 ---
 name: "ft-tier-restore-followups"
-description: "Tier-restore follow-up waves: W1 staging HW NO-GO; W2 probe snapshot-filter + st[3] rollback commit 1298048"
+description: "Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625"
 type: project
-lastUpdated: 2026-10-08T00:33
-lastRecall: 2026-10-08T00:02
+lastUpdated: 2026-10-08T10:04
+lastRecall: 2026-10-08T09:42
 ---
 
 # Tier-restore follow-ups (fast-follow za 577d79c): 7 items, .tasks/tier-restore-followups/TASK.md
@@ -28,3 +28,7 @@ T76-T77 self-update (TRAPS.md/SKILL.md/ORCHESTRATION.md, 3 files 34+/3-) committ
 
 ## Post-campaign dispositions (2026-10-08)
 Residual #1 (admission-adjacent staging trigger) formalized as kb case tier-staging-admission-trigger, commit 88ba376 (blocking prereq recorded: pin/neutralize the FIFO-fragile M2 shape first). L2-snapshot-dedup residual EXECUTED - see memory ft-l2-extent-dedup (23.81 -> 8.17 GiB HW). Skill traps T76-T77 committed (5b64d6c); T78-T79 applied uncommitted.
+
+## UPDATE 2026-10-09: residual case tier-staging-admission-trigger CLOSED NO-GO
+
+Executed via waves W0-W4 (.tasks/tier-staging-admission-trigger/, skill ORCHESTRATION). Built: harness tripwire (M2 81216+-5% + mamba gauge 4/8-vs-5/8, classify_snaponly.py, w3_run_arm.sh trap-safe stash) + inline snapshot-only restore in try_restore (condition is_hybrid and fresh==0, counter restore_snaponly, render sonly=; review x2 SHIP; gate 502/1). HW A/B: arms IDENTICAL (M2c 89088/17091, wall 26.84 vs 26.91s, zero refusals), sonly=0 - structurally non-engaging. [w3dbg] instrumented probe: seam tree is COLD - owned 5/1392 pages, fresh=1387; restore genuinely needs pages+snap (568+148 MB from L1); case premise fresh==0 REFUTED; W1 root cause CORRECTED (idle-staging gate fresh<=0 would have blocked even with idle passes). Generalized incremental-read void too (5/1392 pages; M3 fresh=263/1657 marginal). W2 diff reverted bit-for-bit (gate back 493/1); kb closed: docs commit 5623625 (case TASK.md + topic section + hooks; table_lint OK, links 98/0). Leads unverified: restore-read path speed (716 MB read, ~21s by log timestamps only); warm-tree shape (fresh==0: pages alive, snapshot dead) is the ONLY applicability of snapshot-only - absent on this rig/series. Skill self-update: new trap T80 (premise probe before lever implementation; distinct from T78 code-drift reconciliation), uncommitted per section 8.

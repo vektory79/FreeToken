@@ -248,6 +248,12 @@ concurrent microbenches both leaked and invalidated their own numbers).
 - Stale-brief reconciliation (T78): before executing a brief, reconcile every
   load-bearing assumption against the current layer (the l2 dedup brief lost
   5 of 13 assumptions to intervening waves; P9 compact invalidated its plan).
+- Premise-probe (T80): a lever whose trigger is a runtime-state predicate
+  (e.g. fresh==0 at the seam) is verified on live hardware with a cheap
+  instrumented probe run (D11) BEFORE the lever is written; unit shapes
+  construct unreachable premises.
+- Log-timestamp durations (intervals between lines) are LEADS for
+  attribution, not facts; verify before using them in a verdict.
 
 ## 8. Commit discipline
 
@@ -310,7 +316,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T79 + recipes D01-D10; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T80 + recipes D01-D11; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),
