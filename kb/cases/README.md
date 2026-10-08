@@ -52,7 +52,10 @@ Specification / Acceptance / Checklist.
   руках обслужен sync-чтением всего сегмента); рычаг перенесён в точку
   вовлечения - admission-adjacent триггер snapshot-only стейджинга (до старта
   обязателен пин FIFO-гонки M2). Вход:
-  [TASK.md](tier-staging-admission-trigger/TASK.md). Статус: OPEN.
+  [TASK.md](tier-staging-admission-trigger/TASK.md). Статус: CLOSED
+  2026-10-09 - NO-GO по премисе: на шве дерево холодное (владеет 5 из 1392
+  страниц ниже границы матча), снапшот-онли нечего экономить; A/B руки
+  идентичны (ноль регрессии, ноль вовлечения), код откатан до бита.
 - [session-cache-tiering/](session-cache-tiering/) — бриф ярусного кеша сессий
   (L0 VRAM -> L1 RAM 30 GiB -> L2 SSD 100 GiB): pull-on-evict с адаптивной
   селекцией, контент-адресный стор, журнал-персистентность; фазы 1/2, приёмка
