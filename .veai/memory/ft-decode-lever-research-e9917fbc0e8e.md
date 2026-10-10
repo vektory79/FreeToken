@@ -3,7 +3,7 @@ name: "ft-decode-lever-research"
 description: "GGUF glm5next hybrid decode lever study: R1-R3 hypothesis closures, FA N/A for GDN+DSA arch, user-config gotcha"
 type: project
 lastUpdated: 2026-09-29T23:01
-lastRecall: 2026-10-08T01:01
+lastRecall: 2026-10-10T13:46
 ---
 
 # Декод GGUF glm5next hybrid: рычаги оптимизации (research, 2026-09-26)

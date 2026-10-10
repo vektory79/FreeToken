@@ -85,3 +85,4 @@
 - [ft-tier-phase2-swave](ft-tier-phase2-swave-709c47569b69.md) — Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-817c76e69b3a.md) — gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)
 - [ft-tier-restore-followups](ft-tier-restore-followups-c41b934cdd4d.md) — Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625
+- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-0ce0a112cef5.md) — Spec-decode GLM-5.3-Flash: case kb/cases/glm53flash-spec-decode (W0 gate), MTP blk.45 in GGUF, FreeToken-only scope

@@ -178,6 +178,14 @@ Specification / Acceptance / Checklist.
   (hardware acceptance, обе ft-секции) приняты; код W2-W4 в рабочем дереве.
   Входы: [TASK.md](serve-llama-swap-metrics/TASK.md),
   [REPORT.md](serve-llama-swap-metrics/REPORT.md). Статус: W5 DONE.
+- [glm53flash-spec-decode/](glm53flash-spec-decode/) — research 2026-10-09 +
+  бриф: спекулятивный декод для GLM-5.3-Flash GGUF в ft serve (только FreeToken,
+  llama.cpp не трогать). В файле есть MTP-блок blk.45 (DSA+MoE, Q3_K/Q4_K ~3.6 GB),
+  FreeToken его пропускает; verify-батч дорожает по уникальным парам (слой,эксперт)
+  в CPU-ноге. W0-гейт: зонд step_cost(M) без кода; варианты: MTP self-draft (основной),
+  n-gram drafter (первая волна), draft-модель отклонена.
+  Вход: [TASK.md](glm53flash-spec-decode/TASK.md). Статус: RESEARCH COMPLETE,
+  реализация не начата (W0-гейт впереди).
 
 ## Навигация
 
