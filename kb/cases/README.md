@@ -184,8 +184,12 @@ Specification / Acceptance / Checklist.
   FreeToken его пропускает; verify-батч дорожает по уникальным парам (слой,эксперт)
   в CPU-ноге. W0-гейт: зонд step_cost(M) без кода; варианты: MTP self-draft (основной),
   n-gram drafter (первая волна), draft-модель отклонена.
-  Вход: [TASK.md](glm53flash-spec-decode/TASK.md). Статус: RESEARCH COMPLETE,
-  реализация не начата (W0-гейт впереди).
+  Вход: [TASK.md](glm53flash-spec-decode/TASK.md). Статус: CLOSED
+  2026-10-10 - NO-GO по W0-замеру: R_2 = 1.90-1.96 выше порога 1.79 даже при
+  идеальном acceptance (реалистичный greedy - замедление 0.83-0.91x), R_4 =
+  3.76-4.89 против порога 1.61-2.32; verify M>=4 на 64k в 32 GiB нереализуем
+  (slot-floor + OOM + wedge). Таблица чисел и вердикт -
+  [RESULTS.md](glm53flash-spec-decode/RESULTS.md).
 
 ## Навигация
 
