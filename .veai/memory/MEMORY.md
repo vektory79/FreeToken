@@ -85,4 +85,4 @@
 - [ft-tier-phase2-swave](ft-tier-phase2-swave-709c47569b69.md) — Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-817c76e69b3a.md) — gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)
 - [ft-tier-restore-followups](ft-tier-restore-followups-c41b934cdd4d.md) — Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625
-- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-3e75ad9cc659.md) — Spec-decode GLM-5.3-Flash case closed NO-GO by W0 probe (R4=3.76 vs gate 2.32); scheduler wedge bug M>=4; kb RESULTS.md
+- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-e83fbe2f3920.md) — Spec-decode GLM-5.3-Flash case closed NO-GO by W0 probe (R4 3.76 vs gate 2.32); wedge = DSA OOM + frontend hang

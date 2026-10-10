@@ -1,8 +1,8 @@
 ---
 name: "ft-spec-decode-glm53-case"
-description: "Spec-decode GLM-5.3-Flash case closed NO-GO by W0 probe (R4=3.76 vs gate 2.32); scheduler wedge bug M>=4; kb RESULTS.md"
+description: "Spec-decode GLM-5.3-Flash case closed NO-GO by W0 probe (R4 3.76 vs gate 2.32); wedge = DSA OOM + frontend hang"
 type: project
-lastUpdated: 2026-10-10T21:18
+lastUpdated: 2026-10-10T22:01
 lastRecall: 2026-10-10T21:49
 ---
 
@@ -31,6 +31,17 @@ ik_llama.cpp #1513 2x LOSS при acceptance 0.573).
    multi-chunk prefill -> ровно один чанк и вечная тишина без Decode batch; 4x
    repro (overlap on/off, stagger 12s, холодные L2); N=1/2 и N=6+single-chunk
    работают.
+
+УТОЧНЕНИЕ механизма wedge (вскрыто при подготовке issue, 2026-10-10): в логах ВСЕХ
+репродукций воркер freetoken-TP0-scheduler КРАШИТСЯ с torch.OutOfMemoryError в DSA
+sparse-attention префилле (glm_dsa_sparse.py:471, запрос 256 MiB при 287 MiB свободных)
+после ровно одного префилл-чанка; фронтенд не сообщает о смерти бэкенда и держит
+стрим-коннекты открытыми -> клиент видит вечное зависание (известный gotcha
+backend-death hang). Баг двухчастный: (1) OOM DSA-префилла при cap>=4 + multi-chunk,
+(2) fail-fast фронтенда. "Тишина без traceback" в артефактах не существует - это
+поздняя интерпретация. Драфт issue: .tasks/glm53-spec-decode-w0/issue-wedge-draft.md
+(gh issue create пользователь запускает сам).
+
 3. offload N=1 @64k 14.18 tok/s против якоря 12.97-13.72 (+3-8%) - дрейф эры
    T2/C-L1, якоря TASK.md по offload устарели.
 4. Структурно: verify M>=4 на 64k в 32 GiB нереализуем - целевой профиль 64k+
@@ -38,5 +49,5 @@ ik_llama.cpp #1513 2x LOSS при acceptance 0.573).
 
 Артефакты: kb/cases/glm53flash-spec-decode/RESULTS.md (+ шапка TASK.md, строка в
 cases/README.md); сырые руки и харнес .tasks/glm53-spec-decode-w0/ (вне git).
-Scope-решение прежнее: только ft serve, llama.cpp не трогать. Коммитов нет -
-kb-правки ждут решения пользователя.
+Scope-решение прежнее: только ft serve, llama.cpp не трогать.
+Коммиты 2026-10-10: b361268 (kb closure), b9bb3d8 (memory sync) на vektory79.
