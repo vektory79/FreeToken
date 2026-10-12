@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-mmproj-vision-brief"
-description: "mmproj GGUF vision: кейс ЗАКРЫТ (Фазы 1-5, e35577d..f67449b), 347/347 exact, HW PASS, TRAPS T68-T75"
+description: "mmproj GGUF vision case CLOSED phases 1-5 (e35577d..f67449b), 347/347 tensors exact, HW PASS, TRAPS T68-T75"
 type: project
-lastUpdated: 2026-10-06T21:52
-lastRecall: 2026-10-06T21:47
+lastUpdated: 2026-10-11T20:22
+lastRecall: 2026-10-11T20:19
 ---
 
 # GGUF glm5next vision (mmproj) support - research done, brief ready
@@ -55,3 +55,5 @@ UPDATE (2026-10-06, реализация-сессия): Фазы 1-2 ЗАКРЫ�
 UPDATE (2026-10-06, финал CPU-фаз): ФАЗЫ 1-4 ЗАКРЫТЫ полностью: e35577d (--mmproj флаг+спека), fae88c8+747f658 (ридер+верификация 347/347 exact), d864578 (image-процессор из clip.*; chat-шаблон и image_token_id=154854 из ОСНОВНОГО GGUF, в mmproj их нет), 2b91236 (vision в FTW: carrier source_metadata.gguf extra_kvs, бут без --mmproj, старые FTW бит-в-бит), d8dee13 (kb-дистиллят phases-1-2.md+phases-3-4.md+phase-3-notes.md, TRAPS T72-T75, статус кейса). Каждая фаза: Test->Review->Triage->Fix->STOP GATE->commit. HW-волна (фаза 5): boot+e2e raw .gguf (--mmproj) и GGUF-FTW, отдельный заход по VRAM-протоколу - сценариев пока НЕ упаковано.
 
 FINAL (2026-10-06): Фаза 5 HW ПРОЙДЕНА, кейс ЗАКРЫТ (kb f67449b, phase-5-hw.md, README "ЗАКРЫТ ПОЛНОСТЬЮ", все 7 чекбоксов Acceptance [x]). Прогоны: raw+--mmproj TTFT 4.70s / 19.62 tok/s; FTW-vision без флага 3.22s / 20.29; NVFP4 4.21s / 11.64; text-only бут 105s в коридоре. Ответы на тестовую картинку совпали на всех трёх путях. Новый чекпойнт GLM-5.3-Flash-UD-Q3_K_XL-FTW-vision (136G, 18 шардов, 347 visual.*) рядом со старым FTW. Наблюдения: think-блок не убирается enable_thinking=false на всех путях (не vision); usage нет в streaming; +62s boot за башню на host.
+
+

@@ -75,14 +75,17 @@
 - [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-4af8a5b1be10.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
 - [ft-merge-round4-closed](ft-merge-round4-closed-acbf7277ce25.md) — Round 4 aa0e71c fully CLOSED: boot-smoke PASS, GPU 103/0, F1 fixed by 9ac8830 (guard in load_ftw_banks_to_device)
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-13c8c4a0d708.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
-- [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-1bf2a8037367.md) — mmproj GGUF vision: кейс ЗАКРЫТ (Фазы 1-5, e35577d..f67449b), 347/347 exact, HW PASS, TRAPS T68-T75
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-ec9bd17c625b.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [cuda-debug-tool-strategy](cuda-debug-tool-strategy-9f1351479310.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; kineto aborts ft serve scheduler
 - [ft-p12-read-tempo-brief](ft-p12-read-tempo-brief-11eefbaf5632.md) — P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ pool=8 < 10% gate; case P1-P13 closed 2026-10-05
 - [ft-tier-restore-attempt-counter](ft-tier-restore-attempt-counter-dfcbfd7380a1.md) — Tier restore case closed P0-P3 (sim H2: aliasing healed by P1/P2, no grouping needed); follow-ups brief in .tasks
 - [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-0270361228f3.md) — HybridRadixCache test integrity: vacuous fails-before, single-revert probes, det-clock in both scheduler tier tests
-- [ft-l2-extent-dedup](ft-l2-extent-dedup-7e424d42274e.md) — L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79
 - [ft-tier-phase2-swave](ft-tier-phase2-swave-709c47569b69.md) — Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-817c76e69b3a.md) — gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)
 - [ft-tier-restore-followups](ft-tier-restore-followups-c41b934cdd4d.md) — Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625
-- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-e83fbe2f3920.md) — Spec-decode GLM-5.3-Flash case closed NO-GO by W0 probe (R4 3.76 vs gate 2.32); wedge = DSA OOM + frontend hang
+- [call-agent-payload-truncation](call-agent-payload-truncation-7b696292cbe0.md) — Oversized call_code_agent payload fails 'Field task required'; write spec to .tasks file, delegate compact call
+- [hybrid-moe-pair-split-mechanics](hybrid-moe-pair-split-mechanics-82a7ba957be8.md) — Hybrid MoE split per (layer,expert) pair via -1 marker not per layer; LRU pool ~3 steps; CPU GEMV reads RAM weights
+- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-16648fd8b72a.md) — Spec-decode GLM-5.3-Flash case CLOSED NO-GO (W0 R4 3.76; W0.5 cW 0.50); stage0 ngram p 0.95 -> W1-narrow justified
+- [ft-l2-extent-dedup](ft-l2-extent-dedup-7f8282705f11.md) — L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79
+- [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-75d61a728aa1.md) — mmproj GGUF vision case CLOSED phases 1-5 (e35577d..f67449b), 347/347 tensors exact, HW PASS, TRAPS T68-T75
+- [ft-w1narrow-ngram-wave](ft-w1narrow-ngram-wave-60722281b1c8.md) — W1-narrow CLOSED: A/B NO-GO on target profile (ngram acceptance 0); stage0 method flaw; scaffold uncommitted

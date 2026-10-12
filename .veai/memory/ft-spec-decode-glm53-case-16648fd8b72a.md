@@ -1,9 +1,9 @@
 ---
 name: "ft-spec-decode-glm53-case"
-description: "Spec-decode GLM-5.3-Flash case closed NO-GO by W0 probe (R4 3.76 vs gate 2.32); wedge = DSA OOM + frontend hang"
+description: "Spec-decode GLM-5.3-Flash case CLOSED NO-GO (W0 R4 3.76; W0.5 cW 0.50); stage0 ngram p 0.95 -> W1-narrow justified"
 type: project
-lastUpdated: 2026-10-10T22:01
-lastRecall: 2026-10-10T21:49
+lastUpdated: 2026-10-11T18:56
+lastRecall: 2026-10-12T14:05
 ---
 
 # Спек-декод GLM-5.3-Flash: кейс ЗАКРЫТ NO-GO по W0-замеру (2026-10-10)
@@ -51,3 +51,19 @@ backend-death hang). Баг двухчастный: (1) OOM DSA-префилла
 cases/README.md); сырые руки и харнес .tasks/glm53-spec-decode-w0/ (вне git).
 Scope-решение прежнее: только ft serve, llama.cpp не трогать.
 Коммиты 2026-10-10: b361268 (kb closure), b9bb3d8 (memory sync) на vektory79.
+
+## W0.5 (2026-10-10): гипотеза "draft-токены в уже кешированные эксперты" проверена измерением
+- Метод: bs=1 eager hybrid, якорный конфиг; env-инструментация `_route` мерила c1/cW на 42 MoE-слоях (патч временный, откачен; CUDA-graph replay обходит host-роутинг - хук живёт только с --cuda-graph-max-bs 0).
+- Числа: cW med 0.50 (p25 0.25 / p75 0.625), c1 med 0.25-0.375, одинаково @64k и @32k; шум независимых маршрутов 0.028/0.11 - корреляция реальна, но умеренная.
+- Вердикт: глубокий draft подтверждён мёртвым (0.50 < порога 0.65-0.78); K=1 ровно на грани полосы 0.40-0.54, но с ценой draft-шага медиана ниже гейта (+2..10% CPU-q8_0 банки, +7..17% VRAM-банки; p75-кварталь +18-30%). Кейс остаётся CLOSED NO-GO (W0+W0.5), запись в kb RESULTS.md + cases/README.md (незакоммичено).
+- Дешёвая живая проверка грани при желании пользователя: W1-narrow (n-gram drafter K=1..2 + verify-каркас, ноль VRAM/весов).
+- Caveat: алиасинг layer_id слоёв 39-41 в route-статах (keys слились в 0/1; похоже, модули шарят experts-объект) - возможный отдельный follow-up.
+- Артефакты: .tasks/glm53-spec-decode-w0/w05_{64k,32k}(_route).json, W05_SUMMARY.md, run_w05.py, summarize_w05.py.
+
+## Stage 0 (2026-10-10): офлайн n-gram acceptance - PASS, W1-narrow оправдан
+- Метод: симуляция по токенстриму filler (lookup до вставки, прогрев 1000, 64572 позиций); токенизатор канонический ft serve: freetoken.models.gguf.tokenizer.load_gguf_tokenizer(); filler -> 65573 токенов (ожидалось 65585, 0.018%).
+- Числа (N - порядок ключа): p(K=1)=0.907/0.954/0.933/0.912 для N=1/2/3/4; A_1 1.91-1.95; A_2 2.73-2.89 (лучший N=2); A_4 до 4.69; полные каскады N=2 0.954/0.933/0.912/0.891; c_pass(K=1)=0.199-0.244 - гейт проходит при c вдвое меньше измеренной 0.50.
+- Пороги: K=1 p>=0.65 при c_W=0.50 (все N выше в 1.4-1.5x); K=2 A>=2.16 (в спеке опечатка 2.09) - min A_2=2.731 проходит.
+- Оговорки: filler повторяющийся - верхняя оценка этого контента (совпадает с профилем A/B; acceptance на реальной нагрузке неизвестен); R(c) - экстраполяция, реальный R мерит только W1 A/B; temp 1.0 потребует W3. У n-gram НЕТ цены draft-шага - оценка +30% для K=1 на целевом профиле. Wedge не мешает: verify K+1 = один запрос, cap=1.
+- Артефакты: .tasks/glm53-spec-decode-w0/{ngram_offline.py, ngram_offline_results.json, NGRAM_OFFLINE.md, NGRAM_STAGE0_SPEC.md}.
+- Состояние: ждётся решение пользователя о запуске W1-narrow (2026-10-10). Волна: verify-каркас в scheduler (K+1 в один forward, argmax, откат GDN-состояния через проводку intermediate_states_buffer + KV/radix trim + DSA-kpool watermark, метрики в /status), fixture-тесты, парный A/B против 18.04-18.65 @64k temp 0, гейт +12-15%. Главный риск - проводка GDN-отката.
