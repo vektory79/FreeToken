@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple
 
 import torch
@@ -69,6 +69,8 @@ def _warn_gpu_only_nvfp4(entry: str, strategy: str, cpu_layers: str | None) -> N
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
     server_port: int = 1919
+    # kept out of repr: parse_args logs the whole ServerArgs
+    api_key: str | None = field(default=None, repr=False)
     num_tokenizer: int = 0
     silent_output: bool = False
     # The terminal shell is attached to this server (ft shell --model / ft serve --shell-mode).
@@ -90,6 +92,7 @@ class ServerArgs(SchedulerConfig):
     # prompt_tokens_details.cached_tokens, Anthropic cache_read_input_tokens, Responses
     # input_tokens_details.cached_tokens). Mirrors sglang's --enable-cache-report.
     enable_cache_report: bool = False
+    anthropic_inline_system: str = "auto"
     # Comma-separated hostname allowlist for client-supplied image URLs; empty admits any domain.
     allowed_media_domains: str = ""
     # Directory file:// image refs may be read from; empty rejects local files.
@@ -162,6 +165,7 @@ def parse_args(
     from freetoken.attention import validate_attn_backend
     from freetoken.kvcache import SUPPORTED_CACHE_MANAGER
     from freetoken.moe import MOE_STRATEGIES
+    from freetoken.moe.pool_policy import SCOPES
 
     def _parse_quant_backend(value: str) -> str:
         from freetoken.layers.quantization import QuantBackend
@@ -180,6 +184,27 @@ def parse_args(
         if not 0 <= rate <= 1:
             raise argparse.ArgumentTypeError("must be in [0, 1]")
         return rate
+
+    def _parse_mem_size(value: str) -> int:
+        units = {
+            "b": 1, "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10, "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+            "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+        }
+        text = value.strip().lower()
+        number = text.rstrip("abgikm")
+        unit = text[len(number):]
+        try:
+            size = int(float(number) * units[unit])
+        except (KeyError, ValueError, OverflowError) as exc:
+            raise argparse.ArgumentTypeError("must be a size with a unit, e.g. 12GiB or 800MiB") from exc
+        if size <= 0:
+            raise argparse.ArgumentTypeError("must be positive")
+        return size
+
+    def _parse_cache_split(value: str) -> str:
+        if value == "equal" or (value.startswith("profile:") and len(value) > len("profile:")):
+            return value
+        raise argparse.ArgumentTypeError("must be equal or profile:<path>")
 
     def _positive_int(value: str) -> int:
         try:
@@ -234,6 +259,8 @@ def parse_args(
             return "qwen3_coder"
         if "qwen" in marker:
             return "qwen25"
+        if "deepseek_v41" in marker or "deepseekv41" in marker:
+            return "deepseekv41"
         if "deepseek" in marker and ("v4" in marker or "deepseek_v4" in marker):
             return "deepseekv32"
         if "deepseek" in marker and ("v3.2" in marker or "v32" in marker):
@@ -425,6 +452,15 @@ def parse_args(
         dest="server_port",
         default=ServerArgs.server_port,
         help="The port number for the server to listen on.",
+    )
+
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=ServerArgs.api_key,
+        help="Require this key on every route except /health, sent as "
+        "'Authorization: Bearer <key>' or 'x-api-key: <key>'. Defaults to $FREETOKEN_API_KEY; "
+        "unset serves without authentication.",
     )
 
     parser.add_argument(
@@ -627,6 +663,14 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--anthropic-inline-system",
+        choices=("auto", "preserve", "fold"),
+        default=ServerArgs.anthropic_inline_system,
+        help="Preserve inline system instructions when supported by the renderer, "
+        "or fold them into nearby user/tool content without hoisting the prompt prefix.",
+    )
+
+    parser.add_argument(
         "--sampling-defaults",
         type=str,
         default=ServerArgs.sampling_defaults,
@@ -658,6 +702,7 @@ def parse_args(
             "qwen3_coder",
             "mistral",
             "deepseekv32",
+            "deepseekv41",
             "gemma4",
             "glm47",
             "minimax",
@@ -728,6 +773,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--swa-decoder-replay",
+        default=ServerArgs.swa_decoder_replay,
+        choices=["bounded", "exact"],
+        help=(
+            "DeepSeek-V4.1 Decoder SWA Bounded Replay. 'bounded' (default) runs the 20 decoder layers "
+            "on each prompt's last 128 tokens with their sliding window truncated there, as in the "
+            "tech report; 'exact' runs them on every prompt token (the reference numerics)."
+        ),
+    )
+
+    parser.add_argument(
         "--nvfp4-backend",
         action=_DeprecatedAlias,
         new_flag="--quant-backend moe.nvfp4=<marlin|b12x|triton>",
@@ -763,6 +819,12 @@ def parse_args(
         help="The fraction of all MoE experts to keep in GPU cache.",
     )
     moe_cache_group.add_argument(
+        "--moe-cache-mem",
+        type=_parse_mem_size,
+        default=ServerArgs.moe_cache_mem,
+        help="GPU memory for the MoE expert slot cache, e.g. 12GiB or 800MiB (G, GB and GiB all mean GiB); the slot count is this over the bytes per slot.",
+    )
+    moe_cache_group.add_argument(
         "--moe-cache-auto",
         action="store_true",
         default=ServerArgs.moe_cache_auto,
@@ -777,6 +839,27 @@ def parse_args(
         type=int,
         default=ServerArgs.kv_reserve_tokens,
         help="KV-cache token floor reserved before --moe-cache-auto fills experts.",
+    )
+
+    parser.add_argument(
+        "--moe-cache-scope",
+        choices=SCOPES,
+        default=ServerArgs.moe_cache_scope,
+        help=(
+            "How MoE layers share the GPU expert slot cache: unified = one LRU pool per expert quant "
+            "(all layers when they share one quant format); per-layer = each layer has its own pool. "
+            "Pools are sized by --moe-cache-split."
+        ),
+    )
+    parser.add_argument(
+        "--moe-cache-split",
+        type=_parse_cache_split,
+        default=ServerArgs.moe_cache_split,
+        help=(
+            "How pools share the slots: equal (by layer count), or profile:<path> = by expert use from a "
+            "profile file. With --moe-strategy offload, a pool smaller than the expert count limits the "
+            "decode batch to its slots / top_k."
+        ),
     )
 
     parser.add_argument(
@@ -810,7 +893,7 @@ def parse_args(
             "only, where CUDA pinned memory is capped: it locks just enough head+tail layers "
             "for the banks over the pin budget. Any value, 'auto' included, commits to CPU "
             "decode before the model is built, so the expert format must have a CPU executor "
-            "path (bf16, nvfp4, mxfp4); do not pass it on Linux. Unset = every layer on the "
+            "path (bf16, fp8_block, nvfp4, mxfp4); do not pass it on Linux. Unset = every layer on the "
             "GPU; a boot whose banks exceed a known pin budget stops and asks for this flag."
         ),
     )
@@ -913,6 +996,13 @@ def parse_args(
             kwargs["quant_backend"] = entry
             _warn_gpu_only_nvfp4(entry, kwargs["moe_strategy"], kwargs["moe_cpu_layers"])
 
+    # an empty flag usually means an unset shell variable; refuse it rather than serve open
+    if kwargs["api_key"] == "":
+        parser.error("--api-key is empty; omit it to serve without authentication")
+    from freetoken.launch import resolve_api_key
+
+    kwargs["api_key"] = resolve_api_key(kwargs["api_key"])
+
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])
 
@@ -945,6 +1035,7 @@ def parse_args(
     _no_cache_flag = (
         kwargs["moe_cache_size"] == 0
         and not kwargs["moe_cache_auto"]
+        and kwargs["moe_cache_mem"] is None
         and (kwargs["moe_cache_rate"] is None or kwargs["moe_cache_rate"] == 0)
     )
     if is_offload_moe_strategy(kwargs["moe_strategy"]) and _no_cache_flag:

@@ -56,31 +56,15 @@ from freetoken.gpu_select import (
     single_gpu_arg,
 )
 from freetoken.kernel.pinned import alloc_pinned_tensor
-from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K
+from freetoken.moe.bench_profile import PROFILE_VERSION
 from freetoken.moe.cpu_executor import physical_core_cpus, resolve_threads_and_affinity
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
 
 # Formats the CPU MoE C++ kernel can compute AND this bench can build banks for; anything
-# else is offload-only here. "gguf" is the executor-level alias for the glm5next K-quant
-# family: the cache stub built by _build_cpu_moe_executor carries the representative
-# gguf_types triple that resolves it (see _GGUF_CPU_BANK_TYPES); q4_0 reads the same
-# packed banks the offload path streams.
-_CPU_MOE_FORMATS = frozenset(
-    {"bf16", "nvfp4", "mxfp4_triton", "ds_fp4", "q4_0", "iq3_xxs", "iq4_xs", "q6_k", "gguf"}
-)
-# Per-role (gate, up, down) ggml type ids for the gguf-family CPU-MoE bench banks.
-# "gguf" (the alias) benches glm5next's representative signature -- IQ3_XXS gate/up
-# rows, Q6_K down rows, the exact rows _offload_bank_specs("gguf") sizes -- so the CPU
-# and PCIe gather legs read the same per-expert bytes; a concrete type benches that
-# K-quant on all three roles.
-_GGUF_CPU_BANK_TYPES = {
-    "gguf": (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_Q6_K),
-    "iq3_xxs": (GGML_IQ3_XXS,) * 3,
-    "iq4_xs": (GGML_IQ4_XS,) * 3,
-    "q6_k": (GGML_Q6_K,) * 3,
-}
+# else is offload-only here.
+_CPU_MOE_FORMATS = frozenset({"bf16", "nvfp4", "mxfp4_triton", "ds_fp4", "fp8_block"})
 # Formats this bench can build synthetic (correctly-sized) banks for.
 _BUILDABLE_FORMATS = frozenset({"bf16", "nvfp4", "fp8_block", "mxfp4_triton", "ds_fp4"})
 # Friendlier CLI/display aliases for the internal quant_format strings.
@@ -125,6 +109,7 @@ class Workload:
     activation: str = "silu"
     swiglu_alpha: float = 1.702
     swiglu_limit: float | None = None
+    act_block: int | None = None  # ds_fp4 W4A8 activation quant block
 
 
 # Preset workloads. Dims from the model configs / benchmarks/bench_offload_cache_copy.py.
@@ -137,7 +122,8 @@ WORKLOADS: dict[str, Workload] = {
                              activation="gpt_oss_swiglu", swiglu_limit=7.0),
     "gpt-oss-20b": Workload("gpt-oss-20b", 2880, 2880, 32, 4, ("mxfp4_triton",),
                             activation="gpt_oss_swiglu", swiglu_limit=7.0),
-    "dsv4": Workload("dsv4", 4096, 2048, 256, 6, ("ds_fp4",), swiglu_limit=7.0),
+    "dsv4": Workload("dsv4", 4096, 2048, 256, 6, ("ds_fp4",), swiglu_limit=7.0, act_block=128),
+    "dsv4.1-flash": Workload("dsv4.1-flash", 5120, 2304, 384, 6, ("ds_fp4",), swiglu_limit=10.0, act_block=32),
     "glm4.7-nvfp4": Workload("glm4.7-nvfp4", 5120, 1536, 160, 8, ("nvfp4",)),
     "glm5.3-flash-nvfp4": Workload(
         "glm5.3-flash-nvfp4", 4096, 2048, 288, 8, ("nvfp4",),
@@ -159,12 +145,7 @@ DTYPE_WORKLOADS: dict[str, Workload] = {
     "fp8_block": Workload("dtype:fp8", 2048, 512, 128, 8, ("fp8_block",)),
     "mxfp4_triton": Workload("dtype:mxfp4", 2880, 2880, 128, 4, ("mxfp4_triton",),
                              activation="gpt_oss_swiglu", swiglu_limit=7.0),
-    "ds_fp4": Workload("dtype:ds_fp4", 4096, 2048, 128, 6, ("ds_fp4",), swiglu_limit=7.0),
-    # glm5next native-GGUF banks (glm5.3-flash geometry): the CPU MoE leg runs the
-    # gguf K-quant GEMV through the executor's "gguf" alias (representative IQ3_XXS
-    # gate/up + Q6_K down rows, see _GGUF_CPU_BANK_TYPES).
-    "gguf": Workload("dtype:gguf", 4096, 2048, 288, 8, ("gguf",),
-                     activation="swiglu_clamp", swiglu_alpha=1.0, swiglu_limit=10.0),
+    "ds_fp4": Workload("dtype:ds_fp4", 4096, 2048, 128, 6, ("ds_fp4",), swiglu_limit=7.0, act_block=128),
 }
 
 
@@ -331,14 +312,6 @@ def _offload_bank_specs(fmt: str, H: int, I: int) -> dict[str, tuple[int, torch.
             "gate_up_packed": (2 * I * (H // 2), u8), "gate_up_scale": (2 * I * (H // 32), u8),
             "down_packed": (H * (I // 2), u8), "down_scale": (H * (I // 32), u8),
         }
-    if fmt == "gguf":
-        # glm5next native-GGUF banks at the representative widths of
-        # offload_cache._BANK_BYTES_PER_EXPERT["gguf"] (IQ3_XXS gate/up rows, Q6_K
-        # down rows); the per-layer type mix does not change the gathered bytes.
-        return {
-            "gate": (I * (H // 256) * 98, u8), "up": (I * (H // 256) * 98, u8),
-            "down": (H * (I // 256) * 210, u8),
-        }
     raise NotImplementedError(fmt)
 
 
@@ -370,6 +343,22 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
         gate_up.fill_(0.02)  # uninitialized bf16 can be denormal -> x86 FP slowdown
         down.fill_(0.02)
         return {"gate_up": gate_up, "down": down}
+    if fmt == "fp8_block":
+        def nb(n):
+            return (n + 127) // 128
+        b = {
+            "gate_up": pin(E, 2 * I, H, dtype=torch.float8_e4m3fn),
+            "gate_up_scale": pin(E, nb(2 * I), nb(H), dtype=torch.bfloat16),
+            "down": pin(E, H, I, dtype=torch.float8_e4m3fn),
+            "down_scale": pin(E, nb(H), nb(I), dtype=torch.bfloat16),
+        }
+        # e4m3 0x00 is a clean zero and the scales are unit-ish, so nothing lands in
+        # the fp32 denormal range (which would slow the GEMV and skew the timing).
+        b["gate_up"].view(torch.uint8).fill_(0x38)  # 1.0
+        b["down"].view(torch.uint8).fill_(0x38)
+        b["gate_up_scale"].fill_(1.0)
+        b["down_scale"].fill_(1.0)
+        return b
     if fmt == "nvfp4":
         b = {
             "gate_up_packed": pin(E, 2 * I, H // 2, dtype=torch.uint8),
@@ -406,33 +395,6 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
         b["gate_up_scale"].fill_(127)  # e8m0 unit exponent
         b["down_scale"].fill_(127)
         return b
-    if fmt == "q4_0":
-        # Native GGUF Q4_0 (gemma4): the SAME packed gate_up/down banks the offload
-        # path streams -- per-32 blocks of fp16 scale + 16 nibble bytes, row-major.
-        # Zero-filled like the gguf family below: uninitialized fp16 block scales
-        # could be subnormal/NaN and skew the GEMV timing.
-        b = {
-            "gate_up": pin(E, 2 * I, (H // 32) * 18, dtype=torch.uint8),
-            "down": pin(E, H, (I // 32) * 18, dtype=torch.uint8),
-        }
-        for bank in b.values():
-            bank.zero_()
-        return b
-    if fmt in _GGUF_CPU_BANK_TYPES:
-        # glm5next per-role K-quant banks (CpuMoeExecutor._resolve_gguf_banks schema):
-        # three separate uint8 banks -- gate/up are I rows over K = H, down is H rows
-        # over K = I, each row (K // 256) blocks at the role's packed byte width.
-        # Zero-filled: uninitialized pinned memory would put arbitrary (subnormal or
-        # NaN) fp16 block scales on the dequant path and skew the GEMV timing.
-        gate_t, up_t, down_t = _GGUF_CPU_BANK_TYPES[fmt]
-        b = {
-            "gate": pin(E, I, (H // 256) * BLOCK_SHAPE[gate_t][1], dtype=torch.uint8),
-            "up": pin(E, I, (H // 256) * BLOCK_SHAPE[up_t][1], dtype=torch.uint8),
-            "down": pin(E, H, (I // 256) * BLOCK_SHAPE[down_t][1], dtype=torch.uint8),
-        }
-        for bank in b.values():
-            bank.zero_()
-        return b
     raise NotImplementedError(fmt)
 
 
@@ -451,14 +413,11 @@ def _build_gather_rig(fmt: str, wl: Workload, device: torch.device):
     specs = _offload_bank_specs(fmt, H, I)
     cache = OffloadMoeCache(num_layers=1, num_experts=E, cache_size=E, device=device, quant_format=fmt)
     total_bytes = 0
+    sources = {}
     for name, (elems, dtype) in specs.items():
-        src = alloc_pinned_tensor(E, elems, dtype=dtype)  # cudaHostAlloc (mapped) like the loaders
-        dst = torch.empty(E, elems, dtype=dtype, device=device)
-        cache.bank_sources[name] = [src]
-        cache.bank_caches[name] = dst
-        cache.banks.append(([src], dst))
+        sources[name] = [alloc_pinned_tensor(E, elems, dtype=dtype)]  # cudaHostAlloc (mapped) like the loaders
         total_bytes += E * elems * dtype.itemsize
-    cache._build_copy_plan()  # enable the fused path (production default) when aligned
+    cache.set_bank_sources(sources)  # builds the fused copy plan (production default) when aligned
 
     cache.evict_slots[:E].copy_(torch.arange(E, dtype=torch.int32, device=device))
     cache.src_indices[:E].copy_(torch.randperm(E, device=device).to(torch.int32))
@@ -513,15 +472,11 @@ def _build_cpu_moe_executor(fmt: str, wl: Workload, banks: dict, num_threads: in
         num_layers=1, num_experts=E,
         decode_target="cpu", cpu_executor=None,
     )
-    if fmt == "gguf":
-        # CpuMoeExecutor resolves the "gguf" alias through cache.gguf_types: one
-        # role-ordered (gate, up, down) triple per layer, uniform in a partition.
-        cache.gguf_types = (_GGUF_CPU_BANK_TYPES["gguf"],) * cache.num_layers
     return CpuMoeExecutor(
         cache, top_k=wl.top_k, activation=wl.activation,
         apply_router_weight_on_input=False, num_threads=num_threads, max_tokens=1,
         device=torch.device("cuda"), swiglu_alpha=wl.swiglu_alpha,
-        swiglu_limit=wl.swiglu_limit,
+        swiglu_limit=wl.swiglu_limit, layer_formats=[(fmt, {"act_block": wl.act_block} if wl.act_block is not None else {})] * cache.num_layers,
     )
 
 
@@ -532,17 +487,16 @@ def _cpu_moe_step_fns(ex, wl: Workload, E: int):
     disjoint experts (working set >> LLC) -- the DRAM-bound regime hybrid decode actually
     runs in; ``run()`` executes one step (releases the GIL inside the extension)."""
     bs, top_k = 1, wl.top_k
-    io = ex._io_for(bs)
+    io = ex._io
     io["x"].copy_(torch.randn(bs, wl.hidden, dtype=torch.bfloat16) * 0.1)
     io["w"].copy_(torch.rand(bs, top_k, dtype=torch.float32))
-    task = ex._task_for(0, bs)
     base = torch.arange(top_k, dtype=torch.int32)
 
     def set_ids(i: int) -> None:
         io["ids"].copy_((((i * top_k) + base) % E).view(bs, top_k))
 
     def run() -> None:
-        ex._ext.run_task(task)
+        ex._ext.run(0, bs)
 
     return set_ids, run
 
@@ -608,7 +562,7 @@ def measure_overlap_bw(fmt: str, wl: Workload, device: torch.device,
     backend its bandwidth-matched fetch split: fetched : cpu-computed = pcie_ov : cpu_ov.
 
     Both sides hammer their own pinned banks flat out for ``seconds`` from a shared
-    barrier: a worker thread loops bs=1 CPU decode steps (``run_task`` releases the GIL)
+    barrier: a worker thread loops bs=1 CPU decode steps (``run`` releases the GIL)
     while the main thread loops full-layer ``copy_missing`` gathers (synchronized per copy
     so the DMA is really in flight, not just enqueued). Each side reports bytes / its own
     elapsed; the two windows differ by at most one CPU step + one gather.
@@ -705,10 +659,10 @@ def _bench_format(fmt: str, wl: Workload, device: torch.device, threshold: float
                 entry["isa_sweep"] = c["isa_sweep"]
                 # The tier label comes from the bf16 dot chooser, so it can over-report tiers
                 # the actual per-format kernel doesn't distinguish. Disclose the real story.
-                if fmt == "nvfp4":  # WF_NVFP4 is the only use_vnni format
+                if fmt == "nvfp4":  # nvfp4 is the only use_vnni format
                     _note(entry, "isa tier labels are nominal: this W4A8 kernel rides AVX-VNNI "
                                  "regardless of the forced tier")
-                elif fmt in ("mxfp4_triton", "ds_fp4"):
+                elif fmt in ("mxfp4_triton", "ds_fp4", "fp8_block"):
                     _note(entry, "isa tier labels are nominal: avx512bf16 == avx512f here "
                                  "(3 real kernels: scalar/avx2/avx512, no bf16/VNNI variant)")
             entry["expert_bytes"] = entry["expert_bytes"] or c["expert_bytes"]
@@ -840,7 +794,7 @@ def run_benchbw(
     _prog("done")
 
     result = {
-        "version": 4,
+        "version": PROFILE_VERSION,
         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "epoch": int(time.time()),
         "host": socket.gethostname(),

@@ -34,6 +34,9 @@ class EngineConfig:
     quant_backend: str | None = None
     # PLE table backend: "disk" (default) reads rows from the checkpoint files per fill, "pinned" preloads the table into page-locked host RAM.
     ple_backend: str = "disk"
+    # DeepSeek-V4.1 Decoder SWA Bounded Replay: "bounded" (default) runs the decoder layers on each
+    # prompt's last window; "exact" runs them on every token.
+    swa_decoder_replay: str = "bounded"
     # Expert-bank host load (--expert-load): auto|serial|parallel. "auto" reads scattered
     # experts in parallel but falls back to serial when free RAM can't cover the banks + the
     # parallel reader's extra (non-reclaimable) whole-shard buffer; "serial" forces the
@@ -42,6 +45,12 @@ class EngineConfig:
     moe_cache_size: int = 0
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False
+    # --moe-cache-mem: slot-cache budget in bytes, turned into a slot count once the expert banks are loaded
+    moe_cache_mem: int | None = None
+    # --moe-cache-scope: unified (one LRU pool per expert quant) or per-layer (one pool per layer)
+    moe_cache_scope: str = "unified"
+    # --moe-cache-split: how pools share the slots; equal or profile:<path> (by expert use from a profile file)
+    moe_cache_split: str = "equal"
     kv_reserve_tokens: int = 8192  # KV floor for --moe-cache-auto; small by design (MoE-priority)
     moe_cache_policy: str = "lru"
     moe_prefill_overlap: bool = True
@@ -51,8 +60,8 @@ class EngineConfig:
     moe_prefill_hit_d2d: bool = False
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
     # CPU decode expert threads (--moe-strategy cpu/hybrid, or offload with
-    # --moe-cpu-layers): 0 = auto (one per physical core). Split across per-partition
-    # executor pools on disjoint cores when the banks have multiple signature partitions.
+    # --moe-cpu-layers): 0 = auto (one per physical core, pinned). One executor
+    # pool serves every expert format, so the budget is global, not per partition.
     moe_cpu_threads: int = 0
     # Hybrid CPU/GPU decode (--moe-strategy offload only): which MoE layers decode on
     # the CPU executor instead of the GPU offload/PCIe path. Spec is an explicit id
@@ -148,7 +157,7 @@ class EngineConfig:
         hf_config = copy.copy(self.hf_config)
         built = {e.config_key for e in self.active_encoders}
         for key in set(ENCODER_SECTIONS) | {e.config_key for e in self.model_spec.encoders}:
-            if key not in built and hasattr(hf_config, key):
+            if key not in built and getattr(hf_config, key, None) is not None:
                 try:
                     setattr(hf_config, key, None)
                 except FrozenInstanceError:

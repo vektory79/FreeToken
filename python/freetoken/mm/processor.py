@@ -214,8 +214,8 @@ def get_mm_processor(
     served = [e for e in spec.encoders if getattr(config, e.config_key, None) is not None and e.kind not in mm.disabled_encoders]
     if spec.mm_processor is None or not served:
         return None
-    # HF multimodal configs nest the vocab under text_config; the GGUF shim carries
-    # it at the top level
+    # HF multimodal configs nest the vocab under text_config; flat checkpoints
+    # (deepseek_v4) and the GGUF shim carry vocab_size at the top level
     text_config = getattr(config, "text_config", None)
     check_mm_pad_shift((text_config if text_config is not None else config).vocab_size)
     module, _, cls = spec.mm_processor.partition(":")

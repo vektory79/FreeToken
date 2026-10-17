@@ -25,10 +25,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import gguf
 import numpy as np
 import pytest
 import torch
+
+gguf = pytest.importorskip("gguf", reason="D1: branch gguf CUDA/CPU kernel wins (grouped MMQ, m-tile, q8_0 N-split) removed by main's vendored-ggml re-platform (#690); port deferred")
+
+pytest.importorskip(
+    "freetoken.models.gguf.dequant",
+    reason="D1: branch gguf CUDA/CPU kernel wins (grouped MMQ, m-tile, q8_0 N-split) removed by main's vendored-ggml re-platform (#690); port deferred",
+)
 
 from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K
 

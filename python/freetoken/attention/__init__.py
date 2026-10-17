@@ -90,8 +90,8 @@ def create_fa_backend(config: ModelConfig):
     BackendInfo(
         supported_types=frozenset({AttnType.FULL, AttnType.SWA}),
         consumes_attn_spec=True,
-        supports_fp8_kv=True,
-        supports_nvfp4_kv=True,
+        supports_fp8_kv=False,
+        supports_nvfp4_kv=False,
     ),
 )
 def create_triton_backend(config: ModelConfig):
@@ -108,6 +108,16 @@ def create_dsv4_sparse_backend(config: ModelConfig):
     from .dsv4_sparse import DSV4SparseAttnBackend
 
     return DSV4SparseAttnBackend(config)
+
+
+@SUPPORTED_ATTENTION_BACKENDS.register(
+    "dsv41_sparse",
+    BackendInfo(supported_types=frozenset({AttnType.DSV41})),
+)
+def create_dsv41_sparse_backend(config: ModelConfig):
+    from .dsv41_sparse import DSV41SparseAttnBackend
+
+    return DSV41SparseAttnBackend(config)
 
 
 @SUPPORTED_ATTENTION_BACKENDS.register(

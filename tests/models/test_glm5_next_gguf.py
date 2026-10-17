@@ -15,10 +15,12 @@ import warnings
 
 from typing import TYPE_CHECKING
 
-import gguf
 import numpy as np
 import pytest
 import torch
+gguf = pytest.importorskip("gguf", reason="D4: glm5next GGUF loader re-land deferred - main removed models/gguf/dequant.py + kernel/gguf (vendored ggml re-platform)")
+
+pytestmark = pytest.mark.skip(reason="D4: glm5next GGUF loader re-land deferred - main removed models/gguf/dequant.py + kernel/gguf (vendored ggml re-platform)")
 
 from freetoken.attention.base import AttnType
 from freetoken.models.config import FullAttentionGroupConfig, LinearGatedDeltaGroupConfig

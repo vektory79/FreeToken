@@ -21,6 +21,16 @@ from .reader import _reader, gguf_architecture, load_gguf_metadata, gguf_tensor_
 GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "gemma4": "Gemma4GGUFForCausalLM",
     "glm5next": "Glm5NextGGUFForCausalLM",
+    "llama": "LlamaGGUFForCausalLM",
+    "minimax-m2": "MiniMaxM2GGUFForCausalLM",
+    "minimax-m3": "MiniMaxM3GGUFForCausalLM",
+    "muse-glimmer": "MuseGlimmerGGUFForCausalLM",
+    "qwen2": "Qwen2GGUFForCausalLM",
+    "qwen3": "Qwen3GGUFForCausalLM",
+    "qwen3moe": "Qwen3MoeGGUFForCausalLM",
+    "qwen35": "Qwen3_5GGUFForCausalLM",
+    "qwen35moe": "Qwen3_5MoeGGUFForCausalLM",
+    "qwen4exp": "Qwen4ExpGGUFForCausalLM",
 }
 
 # Registry key when an mmproj file is supplied (--mmproj): a key here opts the arch

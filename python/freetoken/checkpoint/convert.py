@@ -66,7 +66,7 @@ _SKIP_NAMES = ("model.safetensors.index.json",)  # indexes shards the FTW replac
 _SKIP_DIRS = (".git", ".cache", ".freetoken_expert_cache")
 
 
-def _copy_metadata(model_path: str, out_dir: str, *, extra_kvs: dict | None = None) -> list[str]:
+def _copy_metadata(model_path: str, out_dir: str) -> list[str]:
     """Copy all non-weight files (config, tokenizer, remote-code, nested model configs)
     preserving directory structure, so the FTW dir is a self-contained checkpoint."""
     if os.path.isfile(model_path):
@@ -82,7 +82,7 @@ def _copy_metadata(model_path: str, out_dir: str, *, extra_kvs: dict | None = No
 
         if is_gguf_path(model_path):
             os.makedirs(out_dir, exist_ok=True)
-            write_metadata_gguf(model_path, os.path.join(out_dir, FTW_METADATA_GGUF), extra_kvs=extra_kvs)
+            write_metadata_gguf(model_path, os.path.join(out_dir, FTW_METADATA_GGUF))
             return [FTW_METADATA_GGUF]
         return []
 
@@ -171,7 +171,6 @@ def convert_checkpoint(
     quant_backend: str | None = None,
     shard_limit: int = DEFAULT_SHARD_LIMIT,
     device: str | None = None,
-    mmproj_path: str | None = None,
 ) -> dict:
     """Write ``model_path`` as an FTW checkpoint at ``out_dir``. Returns the index dict.
 
@@ -195,29 +194,23 @@ def convert_checkpoint(
             f"but TP is already set to size={tp.size}"
         )
     dev = torch.device(device or "cuda:0")
-    if dev.type == "cpu":
-        # CPU conversion exists for the test fixtures only; production always
-        # converts on GPU (nvfp4 backend pick / pinned host staging)
-        pass
-    else:
-        torch.cuda.set_device(dev)
-        torch.zeros(1, device=dev)  # init CUDA context (needed by nvfp4 backend pick / pinning)
+    torch.cuda.set_device(dev)
+    torch.zeros(1, device=dev)  # init CUDA context (needed by nvfp4 backend pick / pinning)
 
     cfg = EngineConfig(model_path=model_path, tp_info=DistributedInfo(tp.rank, tp.size),
-                       dtype=dtype, moe_strategy=moe_backend, quant_backend=quant_backend,
-                       mmproj_path=mmproj_path)
+                       dtype=dtype, moe_strategy=moe_backend, quant_backend=quant_backend)
     mc = cfg.model_config
     # every MoE strategy reads the routed experts from the banks, fused included
     offload = getattr(mc, "is_moe", False)
     include_moe_experts = not offload
-    method = None
+    method = layer_methods = None
     if offload:
-        from freetoken.engine.engine import offload_expert_method
+        from freetoken.engine.engine import offload_expert_methods
         from freetoken.layers import set_rope_device
 
         set_rope_device(dev)
         object.__setattr__(cfg, "moe_strategy", "offload")
-        method = offload_expert_method(cfg)
+        method, layer_methods = offload_expert_methods(cfg)
 
     from freetoken.utils.progress import byte_bar, count_bar
 
@@ -228,8 +221,7 @@ def convert_checkpoint(
     _progress("dense", 0, 0)  # phase start; per-tensor cumulative bytes follow (total unknown)
     dense_bytes = 0
     for name, tensor in count_bar(load_weight(model_path, torch.device("cpu"),
-                                              include_moe_experts=include_moe_experts,
-                                              mmproj_path=mmproj_path),
+                                              include_moe_experts=include_moe_experts),
                                   "Converting dense weights"):
         writer.add_tensor(name, tensor, kind="weight")
         n_weight += 1
@@ -247,8 +239,8 @@ def convert_checkpoint(
 
     # 2) offload expert banks (post-repack) + alpha scales (slow path auto-picks parallel/serial)
     quant_format = None
+    layer_quant_formats = None
     num_layers = None
-    gguf_types = None
     if offload:
         # every method-packed format streams each layer to its own FTW entry as it completes (via the sink); the GGUF provider reports through ExpertBanks.streamed whether it engaged the sink or materialized the whole bank set first
         from freetoken.moe.legacy_format import legacy_bank_names, legacy_format_for
@@ -256,10 +248,11 @@ def convert_checkpoint(
         names = legacy_bank_names(legacy_format_for(method.kind, method.kernel.name)) if method is not None else {}
         sink = _ConvertSink(writer, names=names)
         banks = load_expert_banks(
-            model_path, mc, method=method, device=dev, dtype=dtype, layer_sink=sink
+            model_path, mc, method=method, device=dev, layer_sink=sink, layer_methods=layer_methods
         )
         quant_format = banks.quant_format
-        gguf_types = banks.gguf_types
+        layer_quant_formats = banks.layer_formats
+        assert layer_quant_formats is None or banks.streamed, "experts of several formats always stream to the sink"
         if banks.streamed:
             sink.close()
             num_layers = sink.num_layers  # however many distinct layers the sink actually saw
@@ -307,17 +300,7 @@ def convert_checkpoint(
             bar.close()
 
     _progress("finalize")  # writing shard index + copying config/tokenizer
-    # A raw-GGUF source with --mmproj: merge the mmproj's clip.* tower facts into the
-    # metadata-only carrier, so the FTW boot rebuilds tower config + image processor
-    # with no --mmproj and never opens the source .gguf (USER DECISION 4).
-    extra_kvs = None
-    if mmproj_path is not None:
-        from freetoken.models.gguf.reader import load_gguf_metadata
-
-        extra_kvs = {
-            k: v for k, v in load_gguf_metadata(mmproj_path).items() if k.startswith("clip.")
-        }
-    copied = _copy_metadata(model_path, out_dir, extra_kvs=extra_kvs)
+    copied = _copy_metadata(model_path, out_dir)
 
     try:
         fingerprint = _source_fingerprint(model_path, mc, device=dev)
@@ -333,9 +316,9 @@ def convert_checkpoint(
         # read back at load (ftw.load_ftw_banks). dtype/moe_backend were dropped: each
         # tensor already carries its own dtype, and nothing reads a model-level backend.
         "quant_format": quant_format,
-        # "gguf" only: role-ordered (gate, up, down) ggml type per bank layer; the
-        # serve-side loader restores it on ExpertBanks. None for every other format.
-        "gguf_types": gguf_types,
+        # Experts of several formats: each MoE layer's quant_format (quant_format above is the most common). A layer only
+        # stores the banks its kernel reads; the reader gives it zero-byte placeholders for the others.
+        "layer_quant_formats": layer_quant_formats,
         # The reader takes num_layers from the model config (copied into this
         # checkpoint); recording it here too gives load_ftw_banks a cross-check that
         # the banks match the config they ship with. None for non-offload checkpoints.

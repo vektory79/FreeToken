@@ -24,13 +24,19 @@ import torch
 
 from freetoken.layers.base import BaseOP
 from freetoken.models.glm5_next.args import DSA_LAYER, KDA_LAYER
-from freetoken.models.gguf.dequant import (
-    GGML_NAME,
-    GGML_Q6_K,
-    GGML_Q8_0,
-    dequantize,
-    row_bytes,
-)
+def _deferred_port(*_a):
+    raise ImportError(
+        "glm5next gguf loading needs models/gguf/dequant.py, removed by main's"
+        " vendored-ggml re-platform; re-landing the loader is deferred"
+    )
+
+
+def __getattr__(name):
+    # dequant helpers went away with the gguf re-platform; the loader raises the
+    # deferred-port error only when it actually runs, so the package stays importable
+    if name in ("GGML_NAME", "GGML_Q6_K", "GGML_Q8_0", "dequantize", "row_bytes"):
+        _deferred_port()
+    raise AttributeError(name)
 
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig

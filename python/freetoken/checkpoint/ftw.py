@@ -601,11 +601,18 @@ def _split_bank_entries(reader: FTWReader, path: str, num_layers: int):
 
     mixed = {e["name"] for e in flat_entries} & per_layer_groups.keys()
     assert not mixed, f"FTW bank(s) mix flat and per-layer row layouts: {sorted(mixed)}"
+    # experts of several formats: a layer stores only the banks its kernel reads
+    several = reader.meta("layer_quant_formats") is not None
+    assert not (several and flat_entries), "experts of several formats are stored per layer"
     for base, by_layer in per_layer_groups.items():
-        assert sorted(by_layer) == list(range(num_layers)), (
-            f"FTW bank {base!r} has per-layer entries for layers {sorted(by_layer)}, "
+        layers = sorted(by_layer)
+        assert (set(layers) <= set(range(num_layers))) if several else layers == list(range(num_layers)), (
+            f"FTW bank {base!r} has per-layer entries for layers {layers}, "
             f"expected exactly range({num_layers})"
         )
+    if several:
+        covered = set().union(*(by_layer.keys() for by_layer in per_layer_groups.values()))
+        assert covered == set(range(num_layers)), f"FTW expert banks have no entries for layers {sorted(set(range(num_layers)) - covered)}"
     return bank_entries, alpha_entries, flat_entries, per_layer_groups
 
 
@@ -672,35 +679,7 @@ def load_ftw_banks(
         reader.close()
         return None
     bank_entries, alpha_entries, flat_entries, per_layer_groups = split
-
-    # gguf banks: role-ordered (gate, up, down) ggml type per bank layer, persisted by
-    # the converter; absent -> None for every other format (nvfp4 loads exactly as before)
     quant_format = reader.meta("quant_format")
-    meta_gguf_types = reader.meta("gguf_types")
-    if quant_format == "gguf" and meta_gguf_types is None:
-        reader.close()
-        raise RuntimeError(
-            f"{path!r} packs gguf expert banks but its index has no gguf_types: it was "
-            "converted by an older build; re-convert with ft checkpoint"
-        )
-    if meta_gguf_types is not None:
-        if (
-            not isinstance(meta_gguf_types, list)
-            or len(meta_gguf_types) != num_layers
-            or not all(
-                isinstance(row, (list, tuple))
-                and len(row) == 3
-                and all(isinstance(t, int) for t in row)
-                for row in meta_gguf_types
-            )
-        ):
-            reader.close()
-            raise RuntimeError(
-                f"{path!r} records malformed gguf_types meta (one (gate, up, down) int "
-                f"triple per MoE layer expected, got {meta_gguf_types!r}); the checkpoint "
-                "does not match its config"
-            )
-        meta_gguf_types = tuple(tuple(int(t) for t in row) for row in meta_gguf_types)
 
     # Alphas: unchanged, one flat HostBank per entry.
     alpha_specs = {e["name"]: (tuple(e["shape"]), _dtype_of(e["dtype"])) for e in alpha_entries}
@@ -735,11 +714,16 @@ def load_ftw_banks(
             row_view_args[name].append((head_pad, layer_bytes, num_experts, tuple(row_shape), dtype))
             row_jobs.append((name, bank, win_off, win_end - win_off, layer_bytes, layer_id))
 
+    num_experts = next((e["shape"][0] for by_layer in per_layer_groups.values() for e in by_layer.values()), None)
     for base, by_layer in per_layer_groups.items():
         row_hb[base] = []
         row_view_args[base] = []
         for layer_id in range(num_layers):
-            e = by_layer[layer_id]
+            e = by_layer.get(layer_id)
+            if e is None:  # experts of several formats: this layer's kernel reads no such bank
+                row_hb[base].append(None)
+                row_view_args[base].append("placeholder")
+                continue
             assert e["global_off"] % ALIGN == 0, (base, layer_id, e["global_off"])  # writer invariant
             bank = HostBank(tuple(e["shape"]), _dtype_of(e["dtype"]), backing=_backing(layer_id))
             row_hb[base].append(bank)
@@ -786,10 +770,15 @@ def load_ftw_banks(
         bar.close()
         reader.close()
 
+    from freetoken.moe.offload_cache import placeholder_bank
+
     sources: dict[str, list] = {}
     for name, banks in row_hb.items():
         views = []
         for bank, view_args in zip(banks, row_view_args[name]):
+            if view_args == "placeholder":
+                views.append(placeholder_bank(num_experts))
+                continue
             if view_args is None:  # per-layer entry: already shaped [num_experts, ...]
                 views.append(bank.tensor)
                 continue
@@ -811,6 +800,8 @@ def load_ftw_banks(
     applied = list(residency)
     for banks in row_hb.values():
         for layer_id, bank in enumerate(banks):
+            if bank is None:
+                continue
             if (applied[layer_id] == HostResidency.LOCKED.value
                     and bank.residency is not HostResidency.LOCKED):
                 applied[layer_id] = HostResidency.PAGEABLE.value
@@ -819,7 +810,7 @@ def load_ftw_banks(
         by_layer = [0] * num_layers
         for name, banks in row_hb.items():
             for layer_id, bank in enumerate(banks):
-                by_layer[layer_id] += bank.nbytes
+                by_layer[layer_id] += bank.nbytes if bank is not None else 0
         locked = [i for i in unpinned if applied[i] == HostResidency.LOCKED.value]
         pageable = [i for i in unpinned if i not in set(locked)]
         pinned_b = sum(b for i, b in enumerate(by_layer) if i not in set(unpinned))
@@ -842,9 +833,11 @@ def load_ftw_banks(
     # alphas are the small per-expert scale vectors, distinguished by their reserved names
     # (not a separate kind); everything else under experts_bank is a weight source.
     alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
+    layer_formats = reader.meta("layer_quant_formats")
     return ExpertBanks(
         quant_format, sources, **alpha_kw,
-        layer_residency=applied, kind=kind, kernel=kernel, gguf_types=meta_gguf_types,
+        layer_residency=applied, kind=kind, kernel=kernel,
+        layer_tags=layer_formats, layer_formats=layer_formats,
     )
 
 
@@ -859,33 +852,11 @@ def load_ftw_banks_to_device(path: str, *, num_layers: int, device: torch.device
         split = _split_bank_entries(reader, path, num_layers)
         if split is None:
             return None
+        if reader.meta("layer_quant_formats") is not None:
+            raise ValueError(f"{path!r} holds experts of several formats, which are served from the offload slot cache only")
         bank_entries, alpha_entries, flat_entries, per_layer_groups = split
 
-        # gguf guard mirrored from load_ftw_banks: fail before any read/device op instead
-        # of silent kind=None banks; gguf_types stays unset (resident fused never reads it)
         quant_format = reader.meta("quant_format")
-        meta_gguf_types = reader.meta("gguf_types")
-        if quant_format == "gguf" and meta_gguf_types is None:
-            raise RuntimeError(
-                f"{path!r} packs gguf expert banks but its index has no gguf_types: it was "
-                "converted by an older build; re-convert with ft checkpoint"
-            )
-        if meta_gguf_types is not None:
-            if (
-                not isinstance(meta_gguf_types, list)
-                or len(meta_gguf_types) != num_layers
-                or not all(
-                    isinstance(row, (list, tuple))
-                    and len(row) == 3
-                    and all(isinstance(t, int) for t in row)
-                    for row in meta_gguf_types
-                )
-            ):
-                raise RuntimeError(
-                    f"{path!r} records malformed gguf_types meta (one (gate, up, down) int "
-                    f"triple per MoE layer expected, got {meta_gguf_types!r}); the checkpoint "
-                    "does not match its config"
-                )
 
         # (name, layer_id or None for an alpha, read offset, read length, head pad, shape, dtype)
         jobs = [(e["name"], None, e["global_off"], e["nbytes"], 0, tuple(e["shape"]), _dtype_of(e["dtype"])) for e in alpha_entries]

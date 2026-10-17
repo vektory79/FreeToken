@@ -3,12 +3,13 @@
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 import torch
 
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.kvcache.mha_pool import MHAKVCache
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 def _pool(dim=128, heads=2, slots=96, layer_ids=None):

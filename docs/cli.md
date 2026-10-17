@@ -41,6 +41,7 @@ parsers all resolve automatically from the checkpoint and the GPU.
 |---|---|---|
 | `--host` | 127.0.0.1 | Bind address |
 | `--port` | 1919 | Bind port |
+| `--api-key` | `$FREETOKEN_API_KEY`, else off | Require the key on every route except `/health`, as `Authorization: Bearer <key>` or `x-api-key: <key>`; other requests get a 401 |
 | `--gpu` | GPU 0 | GPU to run on: a UUID from `nvidia-smi -L` or an `nvidia-smi` index; see [below](#choosing-a-gpu) |
 | `--max-running-requests` | 4 | Max concurrently running requests |
 | `--max-output-tokens` | 32768 | Default output budget for requests that omit one |
@@ -112,10 +113,12 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--moe-strategy` | auto | `fused`/`offload`/`cpu`/`hybrid`; auto → offload, or hybrid with a `ft bench bw` profile; fused on unified-memory GPUs (GB10), see [models.md](models.md#unified-memory-gpus-gb10--dgx-spark). `--moe-backend` is the deprecated old spelling |
 | `--quant-backend` | auto | Kernel per quantized layer type, `layer[.kind]=name` entries: `linear=marlin,moe=b12x` or `moe.nvfp4=triton`. A layer-level entry applies to every kind whose table lists the name |
 | `--nvfp4-backend` | — | Deprecated: stands in for `--quant-backend moe.nvfp4=<marlin\|b12x\|triton>` (`flashinfer` means b12x); cannot be combined with `--quant-backend` |
-| `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family strategies) |
+| `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-mem` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / memory such as `12GiB` / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family strategies) |
+| `--moe-cache-scope` | unified | `unified`: one LRU pool of slots per expert quant (quant type and bank layout), so all MoE layers share one pool when they share a quant format; `per-layer`: each layer has its own pool. `per-layer` does not combine with `--moe-strategy cpu` or `--moe-cpu-layers` |
+| `--moe-cache-split` | equal | How the pools share the slots: `equal` (in proportion to their layer counts), or `profile:<path>`: every pool keeps `top_k` slots and the rest go to the most used experts in the profile's per-layer expert counts. With `offload`, a pool smaller than the expert count lowers `--max-running-requests` to its slots / top_k |
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
 | `--moe-cpu-threads` | physical cores | CPU worker threads for the cpu/hybrid executor |
-| `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, nvfp4, mxfp4), so fp8 experts cannot use it |
+| `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, fp8_block, nvfp4, mxfp4, GGUF on x86 CPUs) |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
@@ -128,6 +131,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--tool-call-parser` | auto | Tool-call format; auto-inferred from the model family |
 | `--reasoning-parser` | auto | Splits chain-of-thought into `reasoning_content`; auto-inferred; `off` disables |
 | `--enable-cache-report` | off | Report prefix-cache hits in each response's usage block |
+| `--anthropic-inline-system` | auto | Placement of late Anthropic system instructions: `auto`, `preserve`, or `fold` |
 
 ### Image input
 
@@ -159,13 +163,16 @@ ft shell --model ~/models/Qwen3.6-35B-A3B   # serve + chat in one process
 ```
 
 - Attach mode talks to `--server URL` (default `http://127.0.0.1:1919`)
+- `--api-key KEY` (default `$FREETOKEN_API_KEY`) attaches to a server started with `--api-key`; with `--model` the shell uses that server's own key
 - `/help` inside the shell lists the commands (`/think`, `/cache`, `/reset`).
 
 ## ft ctl
 
 ```bash
-ft ctl [--base-url http://127.0.0.1:1919] [--timeout 10] [--json] <subcommand>
+ft ctl [--base-url http://127.0.0.1:1919] [--api-key KEY] [--timeout 10] [--json] <subcommand>
 ```
+
+`--api-key` defaults to `$FREETOKEN_API_KEY`.
 
 | Subcommand | Endpoint | Purpose |
 |---|---|---|
@@ -196,6 +203,7 @@ Code and Hermes need no declaration.
 | Flag | Meaning |
 |---|---|
 | `--server URL` | Server to point the agent at (default `http://127.0.0.1:1919`) |
+| `--api-key KEY` | Key of a server started with `--api-key` (default `$FREETOKEN_API_KEY`). The agent gets it in its environment; Hermes and OpenClaw keep it in their config files |
 | `--dry-run` | Print the planned config changes and command, touch nothing |
 | `-y`, `--yes` | Approve install/config prompts |
 | `--config` | Configure without launching |
@@ -212,7 +220,7 @@ ft checkpoint --model <hf_dir> --out <ftw_dir> [--dtype bfloat16] [--moe-backend
 Converts an HF safetensors checkpoint to FTW, FreeToken's self-contained
 fast-load format; point `ft serve --model` at the output dir. MoE experts are
 always packed into expert banks, which serve the fused and the offload
-strategies alike (GGUF and DeepSeek-V4 experts serve offload only);
+strategies alike (DeepSeek-V4 experts serve offload only);
 `--moe-backend` is kept for compatibility. See the FTW caveats in
 [models.md](models.md#notes); FTW files from older builds can be repaired with
 [scripts/ftw_hotfix.py](ftw-hotfix.md) instead of reconverting.
@@ -235,16 +243,19 @@ profile that `ft serve --moe-strategy auto` and `--moe-hybrid-max-fetch -1` then
 - `--threshold` (default 2.0) sets the call: recommend hybrid when CPU bandwidth beats PCIe
   by that factor.
 
+On NVLink-C2C hosts, see [models.md](models.md#nvlink-c2c-hosts-gh200--gb200)
+for `FREETOKEN_H2D_BLOCKS_PER_BANK` if `PCIe-gather` sits well below the linear H2D ceiling.
 
 ### NVFP4 KV cache
 
-`ft serve --model <checkpoint> --kv-cache-dtype nvfp4 --attention-backend triton`
-opts into packed E2M1 KV storage. The initial implementation supports plain paged
-FULL attention (MHA/GQA), hybrid-SWA, and the full-attention portion of hybrid-linear
-models, QSA, and MLA/DSA (including GLM-5.3-Flash). Head dimensions must be
-divisible by 16. DSV4 and BSA pools are rejected at startup. `auto` selects
-Triton, QSA sparse, or DSA attention for supported models. For MLA/DSA use
-`--attention-backend auto` or `--attention-backend dsa`. Only the latent slab is
+`ft serve --model <checkpoint> --kv-cache-dtype nvfp4 --attention-backend dsa`
+opts into packed E2M1 KV storage. The backends that decode packed NVFP4 KV today
+are `dsa` (MLA/DSA models, including GLM-5.3-Flash) and `qsa_sparse` (QSA models);
+generic backends (`triton`, `fa`, `fi`, `trtllm`) reject `nvfp4` at startup until
+their quantized-KV kernels are re-landed. `auto` selects QSA sparse or DSA
+attention for supported models. For MLA/DSA use `--attention-backend auto` or
+`--attention-backend dsa`. Head dimensions must be divisible by 16. DSV4 and BSA
+pools are rejected at startup. Only the latent slab is
 quantized; indexer keys, kpool tails/gates, and recurrent states retain their
 existing precision. A 512-element latent row occupies 292 bytes instead of 1024
 bytes in BF16, excluding those other tiers.
