@@ -2,7 +2,7 @@
 title: "Регламент интеграции origin/main в приватную ветку: волны, прерванная волна, boot-smoke"
 date: 2026-09-22
 hardware: RTX 5090 32GB (boot-smoke)
-branch-commits: "vektory79; слияния: раунд 1 - merge-коммит 380e9eb (родители 6e673ab + afd99cb, 8 конфликтных файлов / 16 ханков), раунд 2 - afd99cb -> cac247a (ноль конфликтов), раунд 3 - merge 5001504 (родители 1445fc1 + 6410c97, ноль текстовых конфликтов, продолжен после прерывания), раунд 4 - merge aa0e71c (родители 41d3581 + 581fdca = upstream/main, 3 конфликта по 1 ханку); rebase-подход отклонён в пользу merge"
+branch-commits: "vektory79; слияния: раунд 1 - merge-коммит 380e9eb (родители 6e673ab + afd99cb, 8 конфликтных файлов / 16 ханков), раунд 2 - afd99cb -> cac247a (ноль конфликтов), раунд 3 - merge 5001504 (родители 1445fc1 + 6410c97, ноль текстовых конфликтов, продолжен после прерывания), раунд 4 - merge aa0e71c (родители 41d3581 + 581fdca = upstream/main, 3 конфликта по 1 ханку), раунд 5 - merge f0eed55 (родители b8c3794 + 11c1adb = upstream/main, один аменд после ревью); rebase-подход отклонён в пользу merge"
 status: validated
 tags: [merge, main, upstream, remotes, waves, discovery, adaptation-log, test-results, boot-smoke, provenance, merge-tree, stash, duplicates]
 ---
@@ -106,6 +106,49 @@ gguf-модели грузятся с method=None через gguf-провайд
 load_ftw_banks_to_device перед любыми чтениями (тот же re-convert контракт),
 тест test_ftw_gguf_types_meta_rejected_to_device - fails-before/passes-after,
 CPU-исполним.
+
+## Раунд 5 (2026-10-17): re-platform GGUF-стека, minimal green merge
+
+upstream/main (11c1adb) пере-платформировал весь GGUF-стек: e5d3bd3 (#690) удалил
+собственное CUDA-дерево csrc/gguf и python-клей, вместо них вендоренные ggml-ядра
+и квант-пакет layers/quantization/; плюс per-format слот-пулы offload-кэша
+(#689/#700) и переписанный CPU-MoE executor (#670/#662/#704). Merge-коммит
+f0eed55 (родители b8c3794 + 11c1adb), бэкап - backup/vektory79-pre-merge5-b8c3794,
+один аменд после ревью (docs и комментарии). Карта порт-долга D1-D5 - что именно
+пере-реализовывать на новых механиках - вынесена в статью
+[round5-ggml-replatform-deferred-ports.md](round5-ggml-replatform-deferred-ports.md).
+Процедурные уроки раунда:
+
+- **Рамка re-platform раунда - явное решение пользователя ДО волны.** Развилка:
+  "minimal green merge + отложенные порты" (один merge-коммит чинит только сборку
+  и тесты на механиках main'а, всё глубокое - в порт-долг) либо "полная адаптация
+  внутри merge-коммита". Выбирать до волны, а не по ходу конфликтов; раунд 5 шёл
+  по minimal green merge, глубокая адаптация вынесена в D1-D5.
+- **Skip-маркеры отложенной функциональности - легитимный способ удержать minimal
+  green merge зелёным**, если reason называет отложенный порт (пример раунда 5:
+  "D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention
+  rewrite; re-land deferred"). Ревьюер обязан ПРОБНО запускать скипнутые тесты:
+  скип, который проходит, - маскировка. Бухгалтерия обязана сходиться: счётчики
+  скипов в логах == фактическим маркерам (раунд 5: engine - 18, test_cache_budget
+  - 9 по D3 + 1 по D4).
+- **Падение boot-smoke рецепта может быть арифметикой конфига, а не merge-багом.**
+  В раунде 5 прогоны r1/r2 умерли на новом cache-budget assert main'а со старым
+  рецептом 786k; прошёл r3 на GLM-5.3-Flash-NVFP4-FTW с `--moe-strategy offload
+  --moe-cache-auto --disable-moe-prefill-overlap --kv-reserve-tokens 262144
+  --kv-cache-dtype nvfp4 --memory-ratio 0.85 --max-prefill-length 4096
+  --max-running-requests 1` (порт 18081, /ready 87 с, chat 200 @11.21 tok/s,
+  SIGTERM rc=143). Когда старый рецепт опирается на стратегию, ушедшую в
+  порт-долг, - валидируй дерево той стратегией, которая проверяет новые пути
+  main'а, и задокументируй отклонение от прежнего рецепта.
+- **Pathspec-stash и reconcile на посту - не слепой pop.** Если pop сталкивается
+  с заново созданными файлами: для каждого пути стэша проверить, что версия в
+  рабочем дереве равна или новее версии в стэше (каденс frontmatter/индекса);
+  отсутствующее в дереве восстановить и отдать в рабочую папку задачи; только
+  затем drop - поверх более новых файлов памяти не накатывать.
+- **engine.py auto-юнион после re-platform проверять на висящие хвосты.** Авто-слив
+  может оставить веточные хвосты со ссылками на неопределённые имена; резолв -
+  "ханки main'а + вплетение тел main'а", затем grep по каждому выброшенному имени
+  хелпера на живые ссылки по всему дереву.
 
 ## Правила разрешения конфликтов
 

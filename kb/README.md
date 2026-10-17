@@ -57,7 +57,9 @@ serving на RTX 5090): методики измерений, переиспол�
   radix-кэша ([radix-cache-reuse.md](topics/radix-cache-reuse.md)), стоимость
   гибридного MoE ([moe-hybrid-cost-model.md](topics/moe-hybrid-cost-model.md)),
   graceful-остановка ft serve ([ft-serve-shutdown-signals.md](topics/ft-serve-shutdown-signals.md)),
-  микрофьюжн GPU-цепочки декода ([decode-chain-microfusion.md](topics/decode-chain-microfusion.md)).
+  микрофьюжн GPU-цепочки декода ([decode-chain-microfusion.md](topics/decode-chain-microfusion.md)),
+  re-platform GGUF-стека в раунде 5 слияния и карта порт-долга D1-D5
+  ([round5-ggml-replatform-deferred-ports.md](topics/round5-ggml-replatform-deferred-ports.md)).
 - [glossary.md](glossary.md) — глоссарий терминов kb (mr, MTILE, step-0, MMQ,
   fail-fast gate, ...) с ссылками на основной документ по каждому термину.
 - [reports/](reports/README.md) - текстовые выжимки nsys-профилей кампаний
