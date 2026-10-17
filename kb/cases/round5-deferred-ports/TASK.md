@@ -1,0 +1,319 @@
+# TASK: round-5 - порты D1-D5: восстановление функциональности после ре-платформы ggml
+
+Status: PLANNED. Контекст слияния и карта портов -
+[round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);
+процедура интеграционных волн -
+[merge-wave-procedure](../../topics/merge-wave-procedure.md). Якоря
+файлов/символов/строк проверены против f0eed55 (vektory79); строчные якоря
+дрейфуют - перед правками перепроверить. Каждый порт - отдельная кампания со
+своими волнами, приёмкой и серией коммитов; push - только по явной команде
+пользователя.
+
+## 0. Контекст: что произошло
+
+- 2026-10-17 выполнен round-5 merge: upstream/main 11c1adb -> vektory79,
+  merge-коммит f0eed55 (parents b8c3794 + 11c1adb; следом docs-коммит
+  8a62625). Режим: "минимальный зелёный merge" по решению пользователя -
+  merge-коммит даёт зелёные сборку+тесты на новых механиках main, всё
+  остальное отложено в порты D1-D5 (карта:
+  [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md)).
+- Backup-ветка со СТАРЫМ стеком (все выигрыши ядер, старый загрузчик gguf,
+  старый offload-кэш): `backup/vektory79-pre-merge5-b8c3794`. Это основной
+  источник для портов: git show/diff против неё.
+- Что main сделал (коммиты #690 e5d3bd3, #689/#700, #670/#662/#704):
+  * удалил kernel/csrc/gguf/ (moe.cuh, mmq.cuh, mmvq.cuh, moe_vec.cuh,
+    vecdotq.cuh, dequantize.cuh, dispatch.h, ggml-common.h, gguf_kernel.cu)
+    и python-клей: kernel/gguf.py, layers/gguf.py, models/gguf/dequant.py,
+    moe/fused_q4_0.py;
+  * вендорил ggml/ggml-cuda + ggml-cpu; появились пакеты
+    layers/quantization/{configs,linear,moe,embedding}/, kernel/ggml.py +
+    kernel/ggml_cpu/, models/gguf/{experts,tensors}.py;
+  * offload-кэш экспертов переведён на per-format slot pools (новые ручки
+    EngineConfig: moe_cache_mem / moe_cache_scope / moe_cache_split;
+    layer_slot_bytes в engine/cache_budget.py);
+  * CPU-MoE executor переписан (kernel/csrc/cpu_moe/cpu_moe_ext.cpp +
+    moe/cpu_executor.py; один пул resolve_threads_and_affinity, бюджет
+    потоков глобальный, не per-partition);
+  * deps: torch 2.14.1, triton 3.8, sglang-kernel 0.4.9, flashlib 0.4.0,
+    transformers 5.18;
+  * новые архитектуры GGUF: DeepSeek V4/V4.1, линейка Qwen GGUF
+    (2/3/3.5/3-MoE/4_exp), Gemma 4, MiniMax-M2/M3, Muse-Glimmer.
+- Что ПЕРЕЖИЛО merge (восстанавливать НЕ надо): tier-хранилище сессий
+  (SessionTierStore) и QSA/KpoolDSA кодеки, L2 extent dedup, FTW-волны
+  P1-P13, kv_quant гейты, mmproj-kwargs, gguf strategy gates, ftw
+  kind-None guard, _cpu_moe_executor_viable, vision-реестры в
+  models/gguf/config.py (сам vision-путь - нет, это порт D2). W1-скаффолд
+  спек-декода никогда не был закоммичен - он не потерян, его нет
+  (кейс: [glm53flash-spec-decode](../glm53flash-spec-decode/TASK.md)).
+- Тест-базлайн merged-дерева: ~2441 passed / 6 failed (все известные
+  baseline/latent классы) / ~333 skipped (skip-марки называют отложенный
+  порт). 6 известных падений: 2x glm_dsa OutOfResources, qwen4_ple bitwise
+  (tests/models/qwen4_exp/test_ple.py, ~строка 421), pinned_tensor UVA,
+  qsa_fp8 флак, offload FakeGraph raw_cuda_graph_exec (upstream-латентный,
+  тест+стаб байт-идентичны main). Это фон: новые волны сравнивать по
+  FAILURE SET против него, а не по абсолютным числам.
+
+## 1. Опорные точки и базлайны
+
+- Производительность ДО мерджа (цели для сравнения, не для слепого
+  воспроизведения - числа надо заново мерить на новом стеке):
+  * hybrid glm5next-GGUF: 16.67 tok/s (эталон 63b9bff);
+  * offload: 12.97 tok/s;
+  * round-4 boot-smoke (offload, kv-reserve 786k): /ready 200,
+    decode 18.67 tok/s;
+  * round-5 smoke (offload, kv-reserve 262k): /ready 200 за 87 с,
+    11.21 tok/s - это базлайн УЖЕ нового стека.
+- Рабочий boot-smoke рецепт на merged-дереве (проверен; порт 18081,
+  т.к. дефолтный 18080 бывает занят; модель GLM-5.3-Flash-NVFP4-FTW):
+
+  ```
+  .venv/bin/ft serve --moe-strategy offload --moe-cache-auto \
+    --disable-moe-prefill-overlap --kv-reserve-tokens 262144 \
+    --kv-cache-dtype nvfp4 --memory-ratio 0.85 --max-prefill-length 4096 \
+    --max-running-requests 1
+  ```
+
+- Старый 786k гибридный рецепт (цель после фаз 1-2):
+  `--moe-cache-auto --kv-reserve-tokens 786432 --kv-cache-dtype nvfp4
+  --memory-ratio 0.89 --max-prefill-length 4096 --moe-strategy hybrid
+  --moe-cpu-threads 16`. ВНИМАНИЕ: на merged-дереве он падает на новом
+  cache-budget assert из main - это арифметика конфига, ожидаемо требует
+  пересчёта под slot pools (фаза 2), а не чинения assert-а.
+- Готовность сервера проверять реальным запросом, а не дешёвым эндпоинтом:
+  /v1/models отвечает до того, как движок дочитал веса (паттерн
+  wait-for-ready с реальным chat-запросом - в старых runner-скриптах
+  кампаний ft serve).
+
+## 2. Правила исполнения (обязательны для каждой фазы)
+
+- VRAM-протокол: GPU-волны (boot-smoke, CUDA-тесты, бенчи) - только в
+  cloud-LLM окне; попросить пользователя освободить VRAM; сериализованно,
+  по одному серверу/прогону. CPU-only работа (юнит-тесты без VRAM, разбор
+  логов, статанализ) - в любое время.
+- Process-hygiene: census до/после каждого прогона
+  (`pgrep -af 'pytest|ft serve|benchbw|ft_run'` с фильтром собственной
+  обёртки; `ls /dev/shm | grep -c "^sem\.mp-"`); runner-скрипты с
+  trap-on-EXIT + FAILPAT-часовой
+
+  ```
+  AssertionError|OutOfMemoryError|Backend worker is gone|backend worker .* exited|Traceback|CUDA error|ValueError
+  ```
+
+  hard timeout на каждый прогон; SIGTERM -> 30 с -> SIGKILL; чужие процессы
+  не убивать; stdout runner-а ОБЯЗАТЕЛЬНО tee в артефакт.
+- Тесты: ТОЛЬКО `uv run --extra dev python -m pytest` (консольный pytest
+  ломает import-mode); перед доверием результатам проверить
+  `freetoken.__file__` (uv editable-ловушка); сравнивать по FAILURE SET,
+  а не по числу собранных тестов (collection drift в test_quant_config.py
+  от glob-параметризации на этапе сбора).
+- Git: коммитить только по явным путям; перед коммитом сверять
+  `git diff --cached` с рабочим деревом (stale-index между параллельными
+  сессиями); conventional commits - одна строка, императив, lowercase,
+  без точки в конце; один PR = одно изменение; НЕ делать push; не трогать
+  служебные каталоги (.veai/). Полная процедура волн -
+  [merge-wave-procedure](../../topics/merge-wave-procedure.md).
+- Каждая фаза = отдельная кампания: измерение до/после (A/B против
+  f0eed55), обновление статуса порта в
+  [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md)
+  ("не начато" -> "в работе" / "готово <дата>, коммит <sha>, число
+  <результат>").
+- Порядок: Фаза 1 (D4) -> Фаза 2 (D3) -> Фаза 3 (D1). Микробенчи D1 можно
+  начинать параллельно с фазой 1 - они не требуют GGUF-модели. Фазы 4 (D2)
+  и 5 (D5) независимы - в любом свободном окне.
+
+## 3. Фаза 1 - порт D4: загрузчик glm5next GGUF (приоритет 1, блокирует весь GGUF-сервинг)
+
+Цель: ветка снова открывает и обслуживает glm5next в GGUF-формате.
+
+Что потеряно: в main загрузчика glm5next-GGUF НИКОГДА не было (это чисто
+веточная функциональность). Старая реализация ссылалась на удалённые файлы
+(models/gguf/dequant.py, kernel/gguf.py и др.), поэтому сейчас выбор
+glm5next-GGUF падает с сырым ImportError.
+
+Шаги:
+
+1. Изучить новый GGUF-конвейер на поддерживаемой main архитектуре
+   (ближайший аналог - линейка Qwen GGUF: тензоры и эксперты в
+   models/gguf/{tensors,experts}.py, регистрация в models/gguf/config.py;
+   moe-путь через layers/quantization/moe).
+2. Составить карту тензоров/весов glm5next по старой реализации:
+   `git show backup/vektory79-pre-merge5-b8c3794:python/freetoken/models/glm5_next/<файл>`
+   (там: __init__.py, args.py, attention.py, config.py, gguf.py) и старые
+   gguf-файлы той же ветки; маппинг перенести на новые
+   models/gguf/{experts,tensors}.py.
+3. Восстановить защиту gguf_types: эталон - `git show 9ac8830` (guard в
+   load_ftw_banks + зеркало в load_ftw_banks_to_device, контракты ошибок
+   "re-convert" / "does not match its config"); найти эквивалентные точки
+   нового конвейера.
+4. Заменить сырой ImportError при выборе неподдерживаемой gguf-архитектуры
+   на внятное сообщение (список поддерживаемых, hint про конвертацию).
+5. Тесты: юнит-тесты маппинга тензоров (фикстуры по методологии старых
+   gguf-тестов - аналитические фикстуры, сеяные допуски) + boot-smoke
+   glm5next-GGUF конфигом.
+
+Критерии приёмки:
+
+- boot-smoke glm5next-GGUF (offload-стратегия для начала): /ready 200,
+  чат 200 + usage, SIGTERM -> rc 143, VRAM к baseline, census чист;
+- тест-набор gguf-файлов зелёный; новые тесты падают-до/проходят-после
+  (bug-fix правило);
+- слот-гейт молчит на влезающем конфиге.
+
+Риски: маппинг тензоров поименован - ошибка в одном имени даёт молчаливую
+порчу весов, сверять поимённо; quant-форматы ветки (q8_0 / iq-линейка)
+могут отсутствовать в новых layers/quantization/configs - тогда
+минимальный набор форматов для старта модели + расширение в D1.
+
+## 4. Фаза 2 - порт D3: гибрид/offload поверх slot pools (включая возврат T2)
+
+Цель: гибридный MoE-режим (CPU+GPU сплит по парам (слой, эксперт)) снова
+работает на новом кэше; хост-доставка T2 возвращена.
+
+Что потеряно: main переписал offload-кэш на per-format slot pools и
+переписал CPU-executor. Из engine.py удалены веточные хелперы: partition
+gate, gguf hybrid rejection, T2 helpers, NS-knob, plural-cache state -
+каждый нужно ре-имплементить в новом виде или признать неактуальным;
+решение зафиксировать в kb.
+
+Шаги:
+
+1. Карта нового API: layer_slot_bytes (engine/cache_budget.py), пулы слотов
+   по форматам, один глобальный поток-бюджет executor-а.
+2. Переадаптировать сплит гибрида по парам (слой, эксперт) (механика
+   маркера -1, не по слоям), LRU-пул (~3 шага) и донесение кэша Fix-3
+   (кампания [fix3-snapshot-lru-refresh](../fix3-snapshot-lru-refresh/TASK.md):
+   не терять периодические полные промахи при повторных ходах - это была
+   главная боль, 5 коммитов фикс-волны) к пулам слотов.
+3. Вернуть T2-хост-доставку (кейс
+   [decode-t2-host-delivery](../decode-t2-host-delivery/TASK.md)): коммиты
+   227e7a3..d751511 в backup-ветке, ручка FREETOKEN_T2_POOL_THREADS;
+   проверить взаимодействие с новым однопульным executor-ом (бюджет
+   глобальный).
+4. NS-knob mhc (NS=64, db0f6b3, +3.4% paired) - вернуть как опцию, мерить
+   на новом стеке (см. фазу 3).
+5. Пересчитать арифметику старого 786k гибридного рецепта под slot pools
+   (с учётом moe_cache_mem / moe_cache_scope / moe_cache_split), чтобы
+   прошёл cache-budget assert.
+
+Критерии приёмки:
+
+- старый 786k гибридный рецепт проходит boot-smoke (после пересчёта
+  параметров);
+- decode tok/s гибрида сравним с базлайном 16.67 (замер A/B против
+  f0eed55-offload; точное число не гарантировано - фиксировать факт);
+- кэш-донесение: сценарий периодических повторов ходов не даёт полных
+  промахов (тест-паттерн Fix-3: 5/5 -> 0/5);
+- тесты moe/hybrid-набора зелёные.
+
+Риски: инварианты Fix-3 завязаны на старую структуру кэша - не переносить
+слепо, переписать поверх пулов; конкуренция за глобальный тред-бюджет с T2.
+
+## 5. Фаза 3 - порт D1: перенос выигрышей ядер на ggml-стек
+
+Цель: вернуть измеренные победы производительности ветки в новом виде.
+
+Что потеряно (все жили в удалённом kernel/csrc/gguf/):
+
+- grouped MMQ +16.4% @8128 (7f8c570);
+- m-tile sweep MoE +67.2% (1706aae; прод-дефолт MOE_MTILE=32 из 8e2e4c7);
+- q8_0 GEMM N-split +2.61% и tile64 +40.46% (кампания dense-q80-gemm,
+  HEAD 8e2e4c7);
+- mhc NS=64 +3.4% (db0f6b3).
+
+Шаги (по каждому ядру отдельно - своя кампания/PR):
+
+1. Взять реализацию из backup-ветки (`git show <sha>` или файл из
+   backup-дерева).
+2. Выбрать точку интеграции в новом стеке: либо внутри вендоренного ggml
+   (если структура допускает), либо параллельный путь (triton/CUDA) с
+   подключением в новый диспетчер. Решение фиксировать в kb (почему так).
+3. A/B-замер против f0eed55 ДО включения: микробенч (benchbw / микро-харнес
+   из старых кампаний) + сквозной декод после фаз 1-2. СТАРЫЕ ПРОЦЕНТЫ НЕ
+   ПЕРЕНОСЯТСЯ - считать заново.
+4. Включать дефолт (например MOE_MTILE=32) только при подтверждённом
+   выигрыше на новом стеке.
+
+Критерии приёмки (на каждое ядро): замер до/после на том же железе/конфиге,
+выигрыш >= порога шума (как в старых кампаниях), нет регрессий на остальных
+форматах, тесты ядра зелёные.
+
+Риски: ALU-bound потолок старого стека (~758 tok/s MMQ) мог сместиться;
+новый torch/triton меняют ландшафт; часть выигрышей может перекрыться
+оптимизациями main - решает замер.
+
+## 6. Фаза 4 - порт D2: возврат mmproj-зрения (независимая)
+
+Цель: мульти-модальный путь (изображения) снова работает.
+
+Что потеряно: веточный mmproj-конвейер трогался удалённых файлов
+(dequant.py и др.); реестры визионных архитектур уцелели в
+models/gguf/config.py, но кодовая база под ними ушла.
+
+Шаги:
+
+1. Эталон - кампания ветки e35577d..f67449b (кейс
+   [gguf-glm5next-vision](../gguf-glm5next-vision/TASK.md), файлы в
+   backup-ветке): конвертация mmproj-весов, сверка 347/347 тензоров точно,
+   аппаратный PASS; методология тест-фикстур и ловушки той кампании
+   применимы снова.
+2. Перенести конвертацию и обработку изображений на новые
+   layers/quantization/* и models/gguf/{experts,tensors}.py.
+3. e2e: запрос с изображением через chat API.
+
+Критерии приёмки: поэлементно точная загрузка mmproj-тензоров (сверка как
+в проверке 347/347), e2e-запрос с картинкой возвращает осмысленный ответ,
+юнит-тесты конвертации зелёные.
+
+## 7. Фаза 5 - порт D5: nvfp4-KV для generic attention-бэкендов (независимая)
+
+Цель: упакованный NVFP4 KV-кэш снова декодируют не только dsa/qsa_sparse.
+
+Текущее состояние merged-дерева: только dsa и qsa_sparse имеют
+supports_nvfp4_kv=True (attention/__init__.py); enforcement в engine
+(_backend_supports_kv_quant, _validate_attention_backend_choice); triton /
+fa / fi / trtllm отвергают nvfp4 на старте.
+
+Шаги:
+
+1. Ре-ленд квантованных KV-ядер для generic-бэкендов (реализация - в
+   backup-ветке; на merged-дереве store-стек частично жив:
+   kernel/triton/kv_nvfp4.py, kernel/triton/kv_quant.py, kvcache/mha_pool -
+   но без активного покрытия из-за blanket-skip в tests/kernels/test_kv_nvfp4.py).
+2. Реактивировать bsa-половины тестов: skip-маркеры в
+   tests/engine/test_kv_quant_config.py (строки ~176 и ~248,
+   параметризация kind="dsv4"|"bsa") - bsa-половины УЖЕ проходят на
+   merged-дереве (проверено прямым прогоном при ревью merge); падают
+   только dsv4-половины через duck-typing _adjust_dsv4_config.
+3. Закрыть дыру покрытия store-стека (сейчас 0 активных тестов).
+4. По мере готовности каждого бэкенда включать supports_nvfp4_kv точечно,
+   с тестом.
+
+Критерии приёмки: nvfp4-KV стартует на triton (затем остальных) без
+reject-а; качественный A/B (перплексия/ответы) без деградации; тесты
+kv_nvfp4/kv_quant зелёные и активные.
+
+## 8. Приложение: гигиена вне функциональности
+
+- 11 до-существующих битых markdown-ссылок в kb: часть указывает на файлы,
+  удалённые ре-платформой (в т.ч. из
+  [lever3-chain-anatomy](../decode-t2-host-delivery/lever3-chain-anatomy.md)
+  и [glm53flash-spec-decode/TASK.md](../glm53flash-spec-decode/TASK.md)),
+  плюс 2 псевдо-ссылки (kb/README.md и
+  [review-1.md](../skill-reviews/gguf-native-serving/review-1.md)).
+  Поправить при первом удобном docs-коммите; перед правкой прогнать
+  link-чек по kb/ и сверить список.
+- Upstream-латентный тест offload FakeGraph (raw_cuda_graph_exec,
+  engine/graph.py) - кандидат на upstream issue (по правилам репо - сначала
+  issue, обсуждение с мейнтейнерами).
+
+## 9. Определение готовности всего кейса
+
+- Старый 786k гибридный рецепт проходит boot-smoke; гибрид даёт измеренный
+  декод, сопоставимый с базлайном (фиксируем факт, не обещание).
+- Ядра D1 перенесены, каждое - с A/B-замером на новом стеке.
+- mmproj-зрение e2e работает.
+- nvfp4-KV доступен минимум на triton.
+- Статусы всех портов обновлены в
+  [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);
+  каждый порт - своя серия коммитов по правилам репо; push - только
+  пользователь.

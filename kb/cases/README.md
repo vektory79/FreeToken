@@ -195,6 +195,14 @@ Specification / Acceptance / Checklist.
   следует n-граммам fill-шаблона; Stage-0 self-intersection - невалидный
   прокси), каркас default-OFF остаётся некоммиченным. Таблица чисел и вердикт -
   [RESULTS.md](glm53flash-spec-decode/RESULTS.md).
+- [round5-deferred-ports/](round5-deferred-ports/) — план восстановления ветки
+  после round-5 ре-платформы ggml (merge f0eed55): пять отложенных портов
+  D1-D5 - загрузчик glm5next GGUF (D4), гибрид/offload поверх slot pools с
+  возвратом T2 (D3), выигрыши ядер на ggml-стеке (D1), mmproj-зрение (D2),
+  nvfp4-KV generic-бэкендов (D5) - с базлайнами, правилами исполнения волн и
+  приёмкой каждой фазы. Вход: [TASK.md](round5-deferred-ports/TASK.md).
+  Статус: PLANNED. Карта портов -
+  [../topics/round5-ggml-replatform-deferred-ports.md](../topics/round5-ggml-replatform-deferred-ports.md).
 
 ## Навигация
 
