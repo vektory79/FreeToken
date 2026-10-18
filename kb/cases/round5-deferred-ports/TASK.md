@@ -235,7 +235,7 @@ kernel/triton/mhc.py, db0f6b3, не в engine.py.)
 Риски: инварианты Fix-3 завязаны на старую структуру кэша - не переносить
 слепо, переписать поверх пулов; конкуренция за глобальный тред-бюджет с T2.
 
-## 5. Фаза 3 - порт D1: перенос выигрышей ядер на ggml-стек
+## 5. Фаза 3 - порт D1: перенос выигрышей ядер на ggml-стек - ЗАКРЫТО NO-GO 2026-10-21, замеры 415b84e
 
 Статус: закрыта NO-GO 2026-10-21 (волна 18, RTX 5090, пробы d1-stage*): grouped MMQ и
 m-tile перекрыты вендоренным ggml нативно (MoE-проба: все форматы 241-572 GB/s эффективных
@@ -382,12 +382,49 @@ kv_nvfp4/kv_quant зелёные и активные.
   (+32%; старый стек 16.67 = +66%);
 - ядра D1 измерены: NO-GO - не нужен ни один порт (фаза 3, статус в разделе 5);
 - mmproj-зрение e2e: PASS (фаза 4, 7bc68b0: e2e-картинка осмысленная,
-  verify 347/347 exact, boot --mmproj READY 142 с - статус в разделе 6).
-
-Сделано (дополнено финальной сверкой 2026-10-21):
-
+  verify 347/347 exact, boot --mmproj READY 142 с - статус в разделе 6);
 - nvfp4-KV доступен минимум на triton (фаза 5, D5, коммит 660c814: -p no:skipping
-  8 failed -> 36 passed, A/B Qwen3.8 3.46x без деградации, 11/12 byte-identical);
+  8 failed -> 36 passed, A/B Qwen3.8 3.46x без деградации, 11/12 byte-identical).
+
+Верификации закрытия (2026-10-21, облачное окно, HEAD eeceaf1, прогоны
+сериализованы; числа - из артефактов .tasks/round5-deferred-ports/
+{verification,audit}/):
+
+- SSD/IO пути (базлайны FTW P-волн и r3-смоука) - деградаций нет: FTW boot
+  /ready 66 с против 87 с; raw GGUF boot 133 с против 142-145 с (банки
+  42 layers / 125.2 GiB за 106 с; холодный page-cache 1.9 GB/s против
+  3.3-3.5 тёплых - состояние кэша, не путь); io_uring-путь чтения FTW
+  не изменился (252 tasks / 81816 jobs, pool=8, sub-chunk 2048 KiB,
+  backend direct); session tier жив (demote 21, restore из l1/l2,
+  shutdown flush 5 live-сегментов, l2=3254.5 MiB, ext=20, dead=0,
+  blob.bin сошёлся байт-в-байт со статистикой); replay fast-path 21 record
+  ~2 с против 22 с полного скана (READY 64 с == бут 63 с); L2 dedup жив
+  (физический blob = сумме уникальных экстентов; полный no-dedup A/B -
+  вне волны);
+- префилл (27692 ток x3, медиана полных чанков без последнего) -
+  деградаций нет: GGUF offload 966.1 tok/s против 487.1 старого стека =
+  x1.98 быстрее (69% fetch-потолка offload); FTW nvfp4 774.8 tok/s -
+  первый записанный FTW-префилл-базлайн;
+- аудит мёртвого кода (статанализ): уверенно мёртвых символов 13 -
+  кластеры benchmark/client.py (benchmark_one_batch / benchmark_trace /
+  read_qwen_trace / read_mooncake_trace / scale_traces / BenchmarkTrace),
+  fla (L2Norm / chunk_kda / fused_recurrent), perf.py
+  compare_memory_kernel_perf, osproc.py now_monotonic, session_tier.py
+  _calc_payload_crc_iovecs; мёртвые env-ручки FREETOKEN_GGUF_KDA_NSPLIT /
+  FREETOKEN_GGUF_MOE_MTILE / FREETOKEN_GGUF_DENSE_MTILE + 4 commented-out
+  autotune-блока fla; CLEAN: legacy_format.py, коллизий имён нет, nvfp4
+  read-путь единственный;
+- аудит мёртвых тестов: 9 тестов к разморозке (4x tests/models/
+  test_quant_config.py - D2-deferred контракт жив; tests/engine/
+  test_cache_budget.py:1196 - причина ложна; 4x tests/checkpoint/
+  test_ftw_gguf_banks.py - mmproj_path жив), 3 к удалению (тесты удалённой
+  partition-machinery в test_cache_budget.py), причины 3 честных скипов
+  переписать (FTW-index scan не ре-ленднут); module-skip вердикты:
+  test_gguf_expert_banks.py держать с переносом test_moe_vec_chunk_cap,
+  test_cpu_moe_gguf_iq.py - цель жива (g.2), tests/kernels/
+  test_gguf_quant.py (27 тестов) - цель мертва (D1 NO-GO), кандидат на
+  удаление/надгробие; гигиена: pip gguf нужен активным тестам, но не
+  объявлен в dev-группе pyproject; collection 2921/2935, errors=0.
 
 Остатки (вне D1-D5, каждый - отдельная задача/PR):
 
@@ -395,6 +432,13 @@ kv_nvfp4/kv_quant зелёные и активные.
   (row fp32 + block e4m3-u8/16 + low-nibble first) - отдельные PR с тестом и A/B;
 - g.2: ре-ленд test_cpu_moe_gguf_iq (сидит на удалённом models/gguf/dequant);
 - 11 до-существующих битых kb-ссылок (сек. 8) - первый docs-коммит;
+- чистка мёртвого кода по аудиту выше (кластеры символов - одна задача);
+- разморозка/удаление тестов по аудиту выше (одна задача: 9 разморозить,
+  3 удалить, 3 причины module-skip переписать);
+- pip gguf объявить в dev-группе pyproject (одна строка);
+- ревизия подозрений аудита: offload_expert_method (engine.py:1860 - прод
+  не вызывает) и байт-дубль _untile (qwen3_5_moe/gguf.py:138 против
+  qwen4_exp/gguf.py:154);
 - OPEN residual (новый пункт порт-долга, вне D1-D5): gguf->FTW boot - ЛЮБОЙ
   конвертнутый FTW не поднимается: checkpoint_quant_config
   (models/register.py:458) строит таблицу ggml-типов из
@@ -413,5 +457,5 @@ kv_nvfp4/kv_quant зелёные и активные.
 пользователь.
 
 Статус кейса: DONE 2026-10-21 - все пять портов закрыты (D4 9314c9b, D3 393b682,
-D1 NO-GO 415b84e, D2 7bc68b0, D5 660c814); остатки перенесены в отдельные
-задачи (список выше).
+D1 NO-GO 415b84e, D2 7bc68b0, D5 660c814); остатки зафиксированы в этом
+списке и в kb-статьях кампании.

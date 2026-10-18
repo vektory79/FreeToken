@@ -199,10 +199,15 @@ Specification / Acceptance / Checklist.
   после round-5 ре-платформы ggml (merge f0eed55): пять отложенных портов
   D1-D5 - загрузчик glm5next GGUF (D4, готов 9314c9b), гибрид/offload поверх
   slot pools (D3, готов 393b682; T2 не возвращён), выигрыши ядер на
-  ggml-стеке (D1, закрыт NO-GO 2026-10-21), mmproj-зрение (D2),
-  nvfp4-KV generic-бэкендов (D5) - с базлайнами, правилами исполнения волн и
-  приёмкой каждой фазы. Вход: [TASK.md](round5-deferred-ports/TASK.md).
-  Статус: IN PROGRESS (осталось D2 и D5). Карта портов -
+  ggml-стеке (D1, закрыт NO-GO 2026-10-21, 415b84e), mmproj-зрение (D2,
+  готов 7bc68b0), nvfp4-KV generic-бэкендов (D5, готов 660c814) - с
+  базлайнами, правилами исполнения волн и приёмкой каждой фазы. Вход:
+  [TASK.md](round5-deferred-ports/TASK.md).
+  Статус: DONE 2026-10-21 - все пять портов закрыты (D4 9314c9b, D3 393b682,
+  D1 NO-GO 415b84e, D2 7bc68b0, D5 660c814); верификации закрытия - SSD/IO
+  и префилл без деградаций (префилл 966 tok/s = x1.98 против старого
+  стека), аудиты мёртвого кода и тестов зафиксированы остатками в сек. 9
+  TASK.md. Карта портов -
   [../topics/round5-ggml-replatform-deferred-ports.md](../topics/round5-ggml-replatform-deferred-ports.md).
 
 ## Навигация
