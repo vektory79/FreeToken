@@ -32,12 +32,12 @@ def main() -> None:
     args = parser.parse_args()
 
     from freetoken.checkpoint.ftw import iter_ftw_weights
-    from freetoken.models.gguf.reader import iter_gguf_tensors, load_gguf_metadata
+    from freetoken.models.gguf.reader import gguf_tensor_index, load_gguf_metadata
     from freetoken.models.glm5_next.gguf import _VISION_BLOCK_MAP, _VISION_MM_MAP, iter_gguf_vision_weights
 
     source_dtype = {
         t.name: ("F32" if t.ggml_type == 0 else "BF16" if t.ggml_type == 30 else str(t.ggml_type))
-        for t in iter_gguf_tensors(args.mmproj)
+        for t in gguf_tensor_index(args.mmproj).values()
     }
     # reverse the reader's mapping (mmproj source name -> visual param): the report
     # is param-level (visual.*), so the source dtype must be looked up through it

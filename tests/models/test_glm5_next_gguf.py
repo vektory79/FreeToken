@@ -2670,7 +2670,6 @@ def _merged_carrier(dst, glm5next_gguf, extra_kvs) -> str:
     return str(dst)
 
 
-@pytest.mark.skip(reason="round-5 merge kept these carrier tests but dropped the merged-carrier writer (write_metadata_gguf extra_kvs / _pack_kv); re-land with the D2 vision phase")
 def test_metadata_gguf_extra_kv_roundtrip(glm5next_gguf, tmp_path):
     """The converter packs the tower facts as raw KV records into the byte-verbatim
     carrier: every supported scalar/array type must read back value-identical."""
@@ -2696,7 +2695,6 @@ def test_metadata_gguf_extra_kv_roundtrip(glm5next_gguf, tmp_path):
     assert list(m["ft.t.ints"]) == [2, 3]
 
 
-@pytest.mark.skip(reason="round-5 merge kept these carrier tests but dropped the merged-carrier writer (write_metadata_gguf extra_kvs / _pack_kv); re-land with the D2 vision phase")
 def test_ftw_carrier_boots_vision_without_mmproj(glm5next_gguf, mmproj_gguf, tmp_path):
     """A carrier with the mmproj clip.* KVs merged resolves the multimodal spec, the
     vision config, the pinned image token and the baked processor kwargs - the same
@@ -2723,7 +2721,6 @@ def test_ftw_carrier_boots_vision_without_mmproj(glm5next_gguf, mmproj_gguf, tmp
     assert list(ip.image_mean) == pytest.approx(mm_meta["clip.vision.image_mean"], abs=1e-6)
 
 
-@pytest.mark.skip(reason="round-5 merge kept these carrier tests but dropped the merged-carrier writer (write_metadata_gguf extra_kvs / _pack_kv); re-land with the D2 vision phase")
 def test_metadata_gguf_extra_kv_collision_fails_fast(glm5next_gguf, tmp_path):
     """An extra KV clashing with a source KV (or the reserved output-weight fact) would
     write a duplicate record the re-parse silently dedupes - name the clash instead."""
@@ -2737,7 +2734,6 @@ def test_metadata_gguf_extra_kv_collision_fails_fast(glm5next_gguf, tmp_path):
         write_metadata_gguf(glm5next_gguf, tmp_path / "b.gguf", extra_kvs={OUTPUT_WEIGHT_PRESENT_KV: True})
 
 
-@pytest.mark.skip(reason="round-5 merge kept these carrier tests but dropped the merged-carrier writer (write_metadata_gguf extra_kvs / _pack_kv); re-land with the D2 vision phase")
 def test_pack_kv_rejects_bad_arrays(tmp_path):
     from freetoken.models.gguf.reader import _pack_kv
 
@@ -2749,7 +2745,6 @@ def test_pack_kv_rejects_bad_arrays(tmp_path):
         _pack_kv("ft.dict", {"a": 1})
 
 
-@pytest.mark.skip(reason="round-5 merge kept these carrier tests but dropped the merged-carrier writer (write_metadata_gguf extra_kvs / _pack_kv); re-land with the D2 vision phase")
 def test_ftw_carrier_partial_vision_metadata_fails_fast(glm5next_gguf, mmproj_gguf, tmp_path):
     """A hand-trimmed carrier (tower flag present, fields missing) fails fast instead
     of silently building a half-configured tower."""
@@ -2774,7 +2769,6 @@ def test_raw_gguf_with_tower_metadata_fails_fast(glm5next_gguf, tmp_path):
         cached_load_hf_config(p)
 
 
-@pytest.mark.skip(reason="round-5 merge kept these carrier tests but dropped the merged-carrier writer (write_metadata_gguf extra_kvs / _pack_kv); re-land with the D2 vision phase")
 def test_ftw_text_only_carrier_unchanged(glm5next_gguf, tmp_path):
     """No clip.* KVs in the carrier: the pre-phase-4 text-only boot path, byte for
     byte (old FTWs converted before this campaign must not change shape)."""
