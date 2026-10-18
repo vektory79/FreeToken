@@ -48,9 +48,14 @@ These families accept image input by default; pass `--text-model-only` to skip t
 - **cpu** — misses are computed on the CPU instead of fetched.
 - **hybrid** — per step, fetches some misses over PCIe and computes the rest on
   CPU, overlapped. Run `ft bench bw` once per machine to calibrate the split.
+  On a bare `.gguf`, an explicit `hybrid` pick needs the file header to prove
+  every expert bank type servable; an FTW dir cannot prove this yet, so `hybrid`
+  stays rejected there and `offload` keeps working.
 - **auto** — dense models always resolve to `fused`; MoE models resolve to
   `offload`, upgraded to `hybrid` when a cached `ft bench bw` profile
-  recommends it. Unified-memory GPUs differ, see below.
+  recommends it. With `--moe-cache-auto`, a multi-signature `.gguf` whose budget
+  cannot fund every signature's expert floor fails before the expert banks load.
+  Unified-memory GPUs differ, see below.
 
 ### Unified-memory GPUs (GB10 / DGX Spark)
 

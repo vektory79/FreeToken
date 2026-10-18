@@ -920,6 +920,67 @@ def test_slot_pools_keep_each_layer_in_its_own_slots(target):
     assert [v[0].shape[0] for v in map(cache.pool_bank_views, range(L))] == [8, 8, 24]
 
 
+def test_slot_pool_locality_multiple_pools_on_cpu():
+    """CPU-level pin of the >1-pool invariants the hybrid fetch relies on (the hybrid
+    ensure kernel caps at the layer's OWN pool size and routes overflow misses to -1,
+    D3 spec (c).3): slot tables are pool-local disjoint slices, and the multi-pool
+    whole-layer prefill stages into the shared buffer without registering slots in ANY
+    pool (the per-pool LRU state stays untouched). The triton split itself is
+    CUDA-only and stays covered by test_slot_pools_keep_each_layer_in_its_own_slots."""
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    torch.manual_seed(0)
+    L, E, sizes = 3, 8, [6, 10]
+    sources = {
+        "gate_up": [torch.randn(E, 32, 8) for _ in range(L)],
+        "down": [torch.randn(E, 8, 16) for _ in range(L)],
+    }
+    cache = OffloadMoeCache(
+        num_layers=L, num_experts=E, cache_size=sum(sizes), device=torch.device("cpu"),
+        pool_of_layer=[0, 0, 1], pool_sizes=sizes,
+    )
+    cache.set_bank_sources(sources)
+    assert [cache.pool_slots(l) for l in range(L)] == [6, 6, 10]
+
+    # the slot tables are disjoint pool-local slices of one table: a pool's writes
+    # never leak into another pool's LRU scope
+    id0, usage0 = cache.pool_state(0)
+    id1, usage1 = cache.pool_state(2)
+    assert id0.numel() == 6 and id1.numel() == 10
+    id0.fill_(-5)
+    usage0.fill_(7)
+    assert (id1 == -1).all() and (usage1 == 0).all()  # writes stayed inside pool 0
+
+    # each pool's bank views span exactly its own slot segment of every bank
+    views0 = cache.pool_bank_views(0)
+    views1 = cache.pool_bank_views(2)
+    assert [v.shape for v in views0] == [(6, 32, 8), (6, 8, 16)]
+    assert [v.shape for v in views1] == [(10, 32, 8), (10, 8, 16)]
+    for (_, bank), v0, v1 in zip(cache.banks, views0, views1):
+        v0_before = v0.clone()
+        v1.fill_(123)
+        assert torch.equal(v0, v0_before)  # pool 1's slots never alias pool 0's bytes
+        v1.zero_()
+
+    # with several pools a whole-layer prefill stages slots [0, E) into the shared
+    # buffer: the copy plan is registration-free (position == expert id) and the
+    # staging invalidation touches only the buffer's borrowed slot prefix, never a
+    # pool's LRU scope beyond it
+    cache.id_of_slot.fill_(5)
+    cache.usage.fill_(9)
+    cache.materialize_layer(1)
+    assert cache.num_indices.item() == E
+    assert cache.src_indices[:E].tolist() == list(range(E))
+    assert cache.evict_slots[:E].tolist() == list(range(E))
+    inval = cache._inval[0]
+    borrowed = set(range(*inval.indices(cache.id_of_slot.numel()))) if isinstance(inval, slice) else set(inval.tolist())
+    touched_ids = (cache.id_of_slot != 5).nonzero().flatten().tolist()
+    touched_usage = (cache.usage != 9).nonzero().flatten().tolist()
+    assert touched_ids and set(touched_ids) <= borrowed
+    assert set(touched_usage) <= borrowed
+
+
 def _make_split_cache(num_layers=2, locked=(1,), prefill_overlap=False, device="cpu"):
     """A [gate_up, down] bf16 cache with the given layers LOCKED (rest pinned)."""
     from freetoken.moe.host_banks import HostResidency

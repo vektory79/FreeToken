@@ -286,3 +286,93 @@ def test_ftw_stores_each_layers_own_banks(tmp_path):
             got = loaded.sources[role][layer]
             assert got.shape == tensor.shape and got.dtype == tensor.dtype, (role, layer)
             assert torch.equal(got.view(torch.uint8), tensor.view(torch.uint8)), (role, layer)
+
+
+@cuda
+def test_two_gguf_signatures_hybrid_decode_keeps_pool_locality():
+    """D3 g.3: one gguf cache carrying two expert-type signatures (the glm5next
+    width mix) resolves to two pools, and the real hybrid ensure kernel keeps the
+    fetch contract per pool: the cap counts the step's UNIQUE miss pairs, -1
+    routes are only the overflow beyond the cap, and one pool's slot/LRU writes
+    never leak into the other pool's segment."""
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    torch.manual_seed(0)
+    L, E, TOPK = 4, 8, 2
+    tags = ["A", "A", "B", "B"]
+    widths = {"A": (64, 80), "B": (96, 112)}  # byte-row widths of the two signatures
+    sources = {"gate_up": [], "down": []}
+    for layer in range(L):
+        for role, w in zip(("gate_up", "down"), widths[tags[layer]]):
+            sentinel = torch.arange(E, dtype=torch.uint8).view(E, 1) + layer * E + 1
+            sources[role].append(sentinel.repeat(1, w).pin_memory())
+
+    def make(fetch):
+        cache = OffloadMoeCache(
+            num_layers=L, num_experts=E, cache_size=24, device=torch.device("cuda"),
+            quant_format="gguf", decode_target="hybrid", hybrid_max_fetch=fetch,
+            pool_of_layer=[0, 0, 1, 1], pool_sizes=[10, 14],
+        )
+        cache.set_bank_sources(sources, layer_tags=tags)
+        assert len(cache.pool_sizes) == 2 and cache._raw_banks
+        return cache
+
+    def step(cache, layer, rows):
+        ids = torch.tensor(rows, dtype=torch.int32, device="cuda")
+        routes = cache.ensure_experts_hybrid(layer, ids, torch.ones(len(rows), TOPK, device="cuda"))
+        cache.copy_missing()
+        return ids.cpu(), routes
+
+    # uncapped: every unique miss pair of the step is fetched, no -1 lanes
+    cache = make(E)
+    pool_b = slice(10, 24)
+    b_ids, b_usage = cache.id_of_slot[pool_b].clone(), cache.usage[pool_b].clone()
+    ids, routes = step(cache, 0, [[0, 1], [0, 2], [1, 3], [2, 3]])  # 4 unique pairs on 8 lanes
+    assert int(cache.num_missing_full.item()) == 4
+    assert int(cache.num_indices.item()) == 4
+    assert (ids >= 0).all() and (ids < 10).all()  # pool-local slots, no overflow
+    assert (routes.cpu_ids == -1).all() and (routes.gpu_w == 1).all()
+    views = cache.pool_bank_views(0)
+    for e in range(4):
+        s = int(cache.slot_for_id[0, e])
+        assert 0 <= s < 10
+        for view, src in zip(views, (sources["gate_up"][0], sources["down"][0])):
+            assert torch.equal(view[s].cpu(), src[e])  # fetched bytes are this layer's rows
+    assert torch.equal(cache.id_of_slot[pool_b], b_ids)  # pool A's writes never leak into pool B
+    assert torch.equal(cache.usage[pool_b], b_usage)
+
+    # cap 0: nothing is fetched, every lane is overflow routed to the CPU leg
+    cold = make(0)
+    ids, routes = step(cold, 2, [[0, 1], [0, 2], [1, 3], [2, 3]])
+    assert int(cold.num_missing_full.item()) == 4 and int(cold.num_indices.item()) == 0
+    assert (ids == -1).all() and (routes.gpu_w == 0).all()
+    assert (routes.cpu_ids >= 0).all()  # the CPU leg still sees the expert ids
+    assert (cold.id_of_slot == -1).all()  # the GPU cache stays cold
+
+    # cap 1 with a warm pool: only the overflow pair's lane is -1, the hit pair is not
+    warm = make(E)
+    step(warm, 0, [[0, 1], [0, 1]])  # pairs 0 and 1 of pool A become resident
+    warm.hybrid_max_fetch = 1  # the cap is read per call: warm up uncapped, then clamp
+    ids, routes = step(warm, 0, [[2, 0], [3, 0]])  # pair 0 hits; unique misses {2, 3}
+    assert int(warm.num_missing_full.item()) == 2 and int(warm.num_indices.item()) == 1
+    assert ids.flatten().tolist().count(-1) == 1  # -1 only on the overflow pair's lane
+    fetched = {e for e in (2, 3) if int(warm.slot_for_id[0, e]) >= 0}
+    assert len(fetched) == 1
+    cpu_expert = ({2, 3} - fetched).pop()
+    lanes = [(t, k) for t in range(2) for k in range(2) if int(ids[t, k]) == -1]
+    assert len(lanes) == 1 and int(routes.cpu_ids[lanes[0][0], lanes[0][1]]) == cpu_expert
+
+    # pool B's own decode steps never touch pool A's segment either; slots are pool-local
+    warm.hybrid_max_fetch = E
+    a_ids, a_usage = warm.id_of_slot[:10].clone(), warm.usage[:10].clone()
+    ids_b, routes_b = step(warm, 3, [[4, 5], [6, 7]])
+    assert int(warm.num_missing_full.item()) == 4 and int(warm.num_indices.item()) == 4
+    assert (ids_b >= 0).all() and (ids_b < 14).all()  # pool B's local slot space
+    assert (routes_b.cpu_ids == -1).all()
+    for e in range(4, 8):
+        s = int(warm.slot_for_id[3, e])
+        assert 0 <= s < 14
+        for view, src in zip(warm.pool_bank_views(3), (sources["gate_up"][3], sources["down"][3])):
+            assert torch.equal(view[s].cpu(), src[e])
+    assert torch.equal(warm.id_of_slot[:10], a_ids) and torch.equal(warm.usage[:10], a_usage)

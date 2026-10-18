@@ -138,13 +138,21 @@ class GgmlMoEKernel(MoEKernel):
         return impl(x, gate_up, down, topk_weights, topk_ids, layer.activation, layer.apply_router_weight_on_input, float(layer.alpha), limit_or_inf(layer))
 
 
+def cpu_spec_for_types(gate_up_type: int, down_type: int) -> tuple[str, dict[str, int]]:
+    """The CPU executor spec a gguf file's (gate_up, down) expert types need.
+
+    ``GGUFMoEMethod.cpu_spec`` without a cfg: shared by the config-time header-scan
+    gates so file types and loaded-layer methods can never diverge."""
+    # BF16 experts keep the executor's bf16 kernels, which use AVX512-BF16 where the CPU has it; ggml-cpu is built for AVX2 only
+    if float_dtype(gate_up_type) is torch.bfloat16 and float_dtype(down_type) is torch.bfloat16:
+        return "bf16", {}
+    return "gguf", {"gate_up_type": gate_up_type, "down_type": down_type}
+
+
 @register_method(QuantKind.GGUF, LayerKind.MOE)
 class GGUFMoEMethod(MoEMethod):
     candidates = (GgmlMoEKernel,)
 
     def cpu_spec(self) -> tuple[str | None, dict[str, int]]:
         gate_up, down = expert_types(self.cfg)
-        # BF16 experts keep the executor's bf16 kernels, which use AVX512-BF16 where the CPU has it; ggml-cpu is built for AVX2 only
-        if float_dtype(gate_up) is torch.bfloat16 and float_dtype(down) is torch.bfloat16:
-            return "bf16", {}
-        return "gguf", {"gate_up_type": gate_up, "down_type": down}
+        return cpu_spec_for_types(gate_up, down)

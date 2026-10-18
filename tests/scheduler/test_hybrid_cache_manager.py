@@ -720,6 +720,62 @@ def test_chunk_commit_dedup_refreshes_boundary_lru():
     cm.prefix_cache.check_integrity()
 
 
+def test_agent_loop_repeated_turns_never_lose_the_full_prefix():
+    """Fix-3 pattern (D3 spec g.6): an agent client re-sends history NON-append-only --
+    injected blocks ride the newest message and are stripped from it later, so each
+    turn's divergence point moves deeper -- across 5 repeated turns on a pool too small
+    to keep every per-chunk donation alive. Pre-Fix-3 the uniform walk tics made the
+    shared boundaries tie in LRU and eviction could kill the only reuse point (the
+    observed 5/5 full re-prefills); post-Fix-3 the dedup/match-use refresh keeps the
+    re-validated boundary strictly younger than the churn: 0/5 full misses."""
+    pool = _pool(num_slots=16)         # donations churn, eviction still bites
+    pt = torch.zeros(8, 512, dtype=torch.int32)
+    cm = CacheManager(64, 64, pt, "hybrid_radix", linear_state_pool=pool)
+    chain = list(range(1, 193))        # 192 tokens: snapshot boundaries at 64 and 128
+
+    def _turn(uid, table_idx, ids, cached, pages_base, handle):
+        live, pp = pool.alloc(1)[0], tuple(pool.alloc(2))
+        pt[table_idx, :cached] = torch.arange(pages_base, pages_base + cached, dtype=torch.int32)
+        req = Req(input_ids=torch.tensor(ids, dtype=torch.int32), table_idx=table_idx,
+                  cached_len=cached, output_len=1, uid=uid,
+                  sampling_params=SamplingParams(), cache_handle=handle)
+        req.linear_slot_idx, req.mamba_ping_pong = live, pp
+        req.mamba_next_track_idx = 1
+        req.mamba_last_track_seqlen = cached
+        cm.lock(handle)
+        cm.cache_req(req, finished=True)  # agent turns finish: the live slot donates at the x64 boundary, ping-pong slots recycle
+
+    # warmup: two commits put live snapshots at 64 and 128 (the first fabricates the
+    # state a real chunk commit has: page table filled, track at the x64 boundary)
+    mr = cm.match_req(_pend(chain[:65]))
+    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    _turn(0, 0, chain[:65], 64, 100, mr.cuda_handle)
+    mr = cm.match_req(_pend(chain[:129]))
+    assert mr.cuda_handle.cached_len == 64 and mr.mamba_value is not None
+    _turn(1, 1, chain[:129], 128, 200, mr.cuda_handle)
+
+    full_misses = 0
+    resumes = []
+    for r in range(5):
+        cut = 64 + 16 * r              # the rewrite rides deeper each turn
+        prompt = chain[:cut] + [2000 + 16 * r + i for i in range(16)] + chain[cut:cut + 16]
+        mr = cm.match_req(_pend(prompt))
+        cached = mr.cuda_handle.cached_len
+        resumes.append(cached)
+        if cached == 0 or mr.mamba_value is None:
+            full_misses += 1
+        else:
+            _turn(2 + r, 2 + r, prompt, cached, 300 + 100 * r, mr.cuda_handle)
+        cm.prefix_cache.check_integrity()
+    assert full_misses == 0
+    # every turn resumed from a live re-validated boundary, not a shrub
+    assert all(v >= 64 for v in resumes) and resumes[-1] >= 128
+
+    # the shared prefix is still restorable at the deepest re-validated boundary
+    mr = cm.match_req(_pend(chain))
+    assert mr.cuda_handle.cached_len > 0 and mr.mamba_value is not None
+
+
 def test_pool_exhaustion_evicts_the_stale_validated_boundary():
     """Amended Fix-3, scheduler level: a 7-slot pool (6 allocatable -- the pool keeps one
     padding sink) makes ensure_mamba_slots actually exhaust at req4's chunk commit (the

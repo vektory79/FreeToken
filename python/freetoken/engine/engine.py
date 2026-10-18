@@ -700,11 +700,14 @@ class Engine:
         if parts:
             batch.mm_embeds = torch.cat([p.to(self.dtype) for p in parts], dim=0)
 
-    def _resolve_auto_moe_cache_size(self, config: EngineConfig, banks, method=None, max_slots=None) -> tuple[int, int, bool]:
+    def _resolve_auto_moe_cache_size(self, config: EngineConfig, banks, method=None, max_slots=None, per_expert_bytes=None) -> tuple[int, int, bool]:
         """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
 
         Pure glue over the Phase-1 budget policy; isolated here so it is unit-testable
-        without a GPU. Reused by the Phase-2 runtime rebuild.
+        without a GPU. Reused by the Phase-2 runtime rebuild. ``per_expert_bytes``
+        overrides the mean slot width for the pre-load floor gate, which knows it from
+        the header-only gguf scan before any bank exists (the scan only answers when
+        it can prove the loaded layout, so the two figures agree).
         """
         from freetoken.engine.cache_budget import expert_bytes_per_slot, resolve_moe_cache_auto
 
@@ -712,13 +715,15 @@ class Engine:
         fixed_cache_size += state_pool_bytes(config)  # sibling GDN state pool, engine-summed
         num_experts = config.model_config.num_experts
         total_experts = config.model_config.num_moe_layers * num_experts
+        if per_expert_bytes is None:
+            per_expert_bytes = expert_bytes_per_slot(banks.sources)
         return resolve_moe_cache_auto(
             baseline_free=self._baseline_free,
             weights_bytes=self._weights_bytes,
             memory_ratio=config.memory_ratio,
             cache_per_page=cache_per_page,
             fixed_cache_size=fixed_cache_size,
-            per_expert_bytes=expert_bytes_per_slot(banks.sources),
+            per_expert_bytes=per_expert_bytes,
             num_experts=num_experts,
             total_experts=total_experts,
             prefill_overlap=config.moe_prefill_overlap,
@@ -726,6 +731,41 @@ class Engine:
             page_size=page_tokens,
             max_slots=max_slots if max_slots is not None or method is None else method.slot_limit(),
         )
+
+    def _gguf_auto_floor_gate(self, config: EngineConfig, method) -> None:
+        """Pre-load fail-fast for --moe-cache-auto on a multi-signature gguf file: the
+        header-only scan proves the signature groups and their slot widths cheaply, so
+        check_partition_floors rejects an unfundable plan before the multi-minute bank
+        load instead of after it. The late checks are totals-only (split_slots' pool
+        minima, _require_offload_cache_size's num_experts floor): a layout the scan
+        cannot prove is not floor-checked late - it degrades as documented (smaller
+        pools, a clamped decode batch) instead of raising."""
+        if not config.moe_cache_auto or config.use_dummy_weight:
+            return
+        model_config = config.model_config
+        expert_quant = getattr(model_config, "expert_quant", "none")
+        fmt = expert_quant if expert_quant != "none" else (
+            getattr(model_config, "moe_weight_format", None) or "bf16"
+        )
+        if fmt != "gguf":
+            return
+        from freetoken.engine.cache_budget import check_partition_floors
+        from freetoken.moe.expert_banks import gguf_signature_groups
+
+        scan = gguf_signature_groups(config.model_path, model_config)
+        if scan is None:
+            return
+        groups, per_group_slots = scan
+        if len(groups) <= 1:
+            return  # one pool: the plan's num_experts floor already covers it
+        num_layers = model_config.num_moe_layers
+        # the plan is denominated in the mean slot width over layers (expert_bytes_per_slot);
+        # the header math agrees with it by construction
+        mean_width = -(-sum(len(g) * w for g, w in zip(groups, per_group_slots)) // num_layers)
+        envelope, _, _ = self._resolve_auto_moe_cache_size(config, None, method, per_expert_bytes=mean_width)
+        # re-denominate the plan into layer-0-width slots, the figure check_partition_floors speaks
+        envelope_slots = envelope * mean_width // per_group_slots[0]
+        check_partition_floors(groups, per_group_slots, model_config.num_experts, envelope_slots)
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
         from freetoken.moe.expert_banks import is_mixed
 
@@ -746,6 +786,22 @@ class Engine:
         decode_target = config.model_config.decode_target
         if decode_target == "cpu" and not cpu_layer_ids:
             decode_target = "gpu"
+        if decode_target in ("cpu", "hybrid"):
+            # capability screen (the old partition gate's executor half, re-formed for the
+            # one executor): an explicit cpu/hybrid pick on a format the CPU executor
+            # cannot serve must fail here, naming the layer formats, instead of crashing
+            # in CpuMoeExecutor after the whole bank load (the executor screens every
+            # layer's format, GPU-decoded ones included)
+            specs = (
+                [m.cpu_spec() for m in layer_methods] if layer_methods is not None
+                else [method.cpu_spec()] * num_moe_layers if method is not None
+                else [(None, {})] * num_moe_layers
+            )
+            rejection = _cpu_moe_format_rejection(
+                specs, getattr(config.model_config, "hidden_act", "silu")
+            )
+            if rejection:
+                raise ValueError(rejection)
         # split residency: where pinning is quota-capped (_pin_budget_bytes), pin only the GPU layers' banks and mlock the CPU layers'
         # uncapped hosts keep every bank pinned (CPU decode reads them the same; overlap prefill stays on)
         # not applied to plain --moe-strategy cpu; all-locked under a cap = --moe-strategy offload --moe-cpu-layers 1.0
@@ -775,6 +831,9 @@ class Engine:
                 "(locked layers prefill via synchronous pageable copies)"
             )
             object.__setattr__(config, "moe_prefill_overlap", False)
+        # after the split-residency overlap flip so the gate plans with the SAME
+        # prefill_overlap the post-load resolve will see
+        self._gguf_auto_floor_gate(config, method)
         # Fast path: an FTW checkpoint loads its repacked banks directly.
         # Slow path: load_expert_banks auto-picks parallel vs serial baseline by
         # expert-tensor granularity. Both pin-after-fill.
@@ -1540,6 +1599,87 @@ def _cpu_moe_executor_viable(model_config, model_path=None) -> bool:
     return fmt == "mxfp4" or fmt in _cpu_moe.weight_formats()
 
 
+def _cpu_moe_format_rejection(layer_formats: list, activation: str) -> str | None:
+    """The CPU executor's own capability set (CpuMoeExecutor's format + activation
+    checks), queried at config time: None when every layer's ``(format, options)`` spec
+    is servable. Explicit cpu/hybrid picks fail here with the offending layer formats
+    named, before any bank loads; the executor's own checks remain the load-time
+    backstop."""
+    from freetoken.moe.cpu_executor import _ACT_IDS, compiled_extension_supports
+
+    try:
+        from freetoken.kernel import _cpu_moe
+    except ImportError:
+        return (
+            "the compiled _cpu_moe extension is missing; rebuild with "
+            "`python setup.py build_ext --inplace` or use --moe-strategy offload instead"
+        )
+    formats = set(_cpu_moe.weight_formats())
+    bad_ids = [i for i, (fmt, _) in enumerate(layer_formats) if fmt is None or fmt not in formats]
+    if bad_ids:
+        bad = sorted({layer_formats[i][0] for i in bad_ids}, key=lambda f: (f is None, f))
+        return (
+            f"the CPU MoE executor serves {sorted(formats)} formats, but MoE layers "
+            f"{bad_ids[:8]} need {bad}; use --moe-strategy offload instead"
+        )
+    if "gguf" in {fmt for fmt, _ in layer_formats}:
+        from freetoken.kernel import ggml_cpu
+
+        if ggml_cpu.select() is None:
+            return (
+                "--moe-strategy cpu/hybrid cannot compute GGUF experts here: this build "
+                "has no ggml-cpu kernels (x86-64 only); use --moe-strategy offload instead"
+            )
+    if activation not in _ACT_IDS:
+        return (
+            f"the CPU MoE executor does not support activation {activation!r}; "
+            "use --moe-strategy offload instead"
+        )
+    # mirror the executor's ABI-probe skip: mxfp4 handles its act inside the kernel and
+    # predates the marker, so all-mxfp4_triton layers need no compiled_extension_supports
+    if (
+        _ACT_IDS[activation] >= 3
+        and sorted({fmt for fmt, _ in layer_formats}) != ["mxfp4_triton"]
+        and not compiled_extension_supports(activation)
+    ):
+        return (
+            f"the compiled _cpu_moe extension predates activation {activation!r} "
+            "(rebuild with `python setup.py build_ext --inplace`); "
+            "use --moe-strategy offload instead"
+        )
+    return None
+
+
+def _gguf_hybrid_rejection(config, model_config) -> str | None:
+    """Why ``--moe-strategy hybrid`` cannot serve a gguf model's experts (None when it can).
+
+    Capability is the CPU executor's own set, queried through ``_cpu_moe_format_rejection``
+    -- never restated here. The per-layer (gate, up, down) type ids come from a header-only
+    scan of the .gguf file: banks are not loaded at config time, and an unscannable file
+    cannot prove capability, so it rejects -- offload remains the always-safe fallback
+    instead of a post-load executor failure."""
+    from freetoken.layers.quantization.moe.gguf import cpu_spec_for_types
+    from freetoken.moe.expert_banks import gguf_expert_bank_types
+
+    types_by_layer = gguf_expert_bank_types(getattr(config, "model_path", None), model_config)
+    if types_by_layer is None:
+        return (
+            "the gguf expert bank types cannot be verified from the file header; "
+            "use --moe-strategy offload instead"
+        )
+    mixed = [l for l, (gate, up, _) in sorted(types_by_layer.items()) if gate != up]
+    if mixed:
+        return (
+            f"gate and up experts have different ggml types on layers {mixed[:8]}; the "
+            "banks cannot load; use --moe-strategy offload instead"
+        )
+    specs = [
+        cpu_spec_for_types(gate_up, down)
+        for gate_up, _, down in (types_by_layer[l] for l in sorted(types_by_layer))
+    ]
+    return _cpu_moe_format_rejection(specs, getattr(model_config, "hidden_act", "silu"))
+
+
 def _pin_budget_bytes(reserved: int = 0) -> int | None:
     """Bytes this process can still safely cudaHostRegister, or None when the platform does not cap pinning (plain Linux).
 
@@ -1655,7 +1795,7 @@ def _adjust_ftw_quant_backend(model_path: str, quant_backend: QuantBackend) -> Q
 
 
 def offload_layer_methods(model) -> list | None:
-    """The expert method of each offload MoE layer of ``model``, by MoE-layer id; None for models whose MoE layers carry none (GGUF)."""
+    """The expert method of each offload MoE layer of ``model``, by MoE-layer id; None for a model whose MoE layers carry no expert method."""
     layers = [l for l in iter_offload_moe_layers(model) if getattr(l, "quant_method", None) is not None]
     if not layers:
         return None
@@ -1665,7 +1805,7 @@ def offload_layer_methods(model) -> list | None:
 
 
 def shared_offload_method(model):
-    """The expert method the offload MoE layers of ``model`` use, or None for models whose MoE layers carry none (GGUF).
+    """The expert method the offload MoE layers of ``model`` use, or None for a model whose MoE layers carry no expert method.
 
     With experts of several formats (a checkpoint that keeps some layers unquantized) this is the format of the most
     layers; the cache then takes every layer's method (``offload_layer_methods``) and keeps one slot pool per format."""
@@ -1907,6 +2047,18 @@ def _adjust_config(config: EngineConfig):
             "offload only; drop the flag and let every layer decode on the GPU offload "
             "path instead."
         )
+
+    if (
+        is_moe
+        and config.moe_strategy == "hybrid"
+        and (expert_quant if expert_quant != "none" else (getattr(model_config, "moe_weight_format", None) or "bf16")) == "gguf"
+    ):
+        # hybrid decodes experts on the CPU executor: every per-layer bank type in the
+        # file must be executor-capable (capability queried from the executor's own set,
+        # never restated here); banks are not loaded at config time, hence the header scan.
+        rejection = _gguf_hybrid_rejection(config, model_config)
+        if rejection:
+            raise ValueError(f"--moe-strategy 'hybrid': {rejection}")
 
     if is_moe and config.moe_strategy == "auto":
         # A MoE model always defaults to the offload family: experts stream from pinned host

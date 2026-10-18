@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -640,26 +639,80 @@ def test_adjust_config_auto_keeps_gguf_on_offload_despite_hybrid_profile(monkeyp
 def _write_expert_types_gguf(path, layer_types) -> str:
     """Minimal .gguf carrying ONLY the ffn_{gate,up,down}_exps stacks, typed per layer.
 
-    The hybrid gate scans the tensor table alone (GGUFReader mmaps; no bank data is
-    touched), so one-quant-block payloads are enough: the byte shape (block, type_size)
-    decodes to the ggml shape (block, block) iter_gguf_tensors expects."""
-    import gguf
+    The gates scan the tensor table alone (GGUFReader mmaps; no bank data is touched),
+    so one-quant-block payloads are enough: a uint8 (block * type_size)-byte payload
+    decodes to a ggml shape the reader's own n_bytes math accepts (its innermost dim
+    must be a whole number of quant blocks). Hand-rolled GGUF v3 bytes: the vendored
+    gguf package ships a reader only, and the pip writer left main's dep set."""
+    import struct
 
-    w = gguf.GGUFWriter(str(path), "glm5next")
+    from freetoken.third_party.gguf.constants import GGML_QUANT_SIZES
+
+    tensors = []
     for blk, types in sorted(layer_types.items()):
+        if len(types) == 2:  # (gate_up, down): the combined ffn_gate_up_exps stacking (gemma4)
+            for role, tid in zip(("gate_up", "down"), types):
+                block, type_size = GGML_QUANT_SIZES[tid]
+                tensors.append((f"blk.{blk}.ffn_{role}_exps.weight", tid, (block * type_size, 1, 1), block * type_size))
+            continue
         for role, tid in zip(("gate", "up", "down"), types):
-            qt = gguf.GGMLQuantizationType(tid)
-            block, type_size = gguf.GGML_QUANT_SIZES[qt]
-            w.add_tensor(
-                f"blk.{blk}.ffn_{role}_exps.weight",
-                np.zeros((block, type_size), np.uint8),
-                raw_dtype=qt,
-            )
-    w.write_header_to_file()
-    w.write_kv_data_to_file()
-    w.write_tensors_to_file()
-    w.close()
+            block, type_size = GGML_QUANT_SIZES[tid]
+            tensors.append((f"blk.{blk}.ffn_{role}_exps.weight", tid, (block * type_size, 1, 1), block * type_size))
+    buf = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), 0)
+    offsets = []
+    pos = 0
+    for name, tid, ne, nbytes in tensors:
+        offsets.append(pos)
+        pos += nbytes
+        nq = name.encode()
+        buf += struct.pack("<Q", len(nq)) + nq
+        buf += struct.pack("<I", len(ne)) + struct.pack(f"<{len(ne)}Q", *ne)
+        buf += struct.pack("<IQ", tid, offsets[-1])
+    data_start = (len(buf) + 31) // 32 * 32
+    with open(path, "wb") as f:
+        f.write(buf)
+        f.write(b"\x00" * (data_start - len(buf)))
+        for (name, tid, ne, nbytes), off in zip(tensors, offsets):
+            assert off == f.tell() - data_start
+            f.write(b"\x00" * nbytes)
     return str(path)
+
+
+def _write_gguf_tensors(path, tensors) -> str:
+    """Hand-rolled GGUF v3 bytes (the vendored gguf package ships a reader only):
+    ``tensors`` are (name, ggml type id, ne, payload bytes) triples, names and shapes
+    unconstrained - the gates under test read the tensor table alone."""
+    import struct
+
+    buf = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), 0)
+    offsets = []
+    pos = 0
+    for name, tid, ne, nbytes in tensors:
+        offsets.append(pos)
+        pos += nbytes
+        nq = name.encode()
+        buf += struct.pack("<Q", len(nq)) + nq
+        buf += struct.pack("<I", len(ne)) + struct.pack(f"<{len(ne)}Q", *ne)
+        buf += struct.pack("<IQ", tid, offsets[-1])
+    data_start = (len(buf) + 31) // 32 * 32
+    with open(path, "wb") as f:
+        f.write(buf)
+        f.write(b"\x00" * (data_start - len(buf)))
+        for (_, _, _, nbytes), off in zip(tensors, offsets):
+            assert off == f.tell() - data_start
+            f.write(b"\x00" * nbytes)
+    return str(path)
+
+
+def _write_3d_expert_gguf(path, layer_shapes, num_experts) -> str:
+    """Expert stacks in the real packed shape, ``ne = (K, rows, E)`` in ggml order:
+    Q8_0 gate/up stacks of ``rows`` rows and down stacks, one 32-element block per
+    row (34 bytes). ``layer_shapes`` = {blk: (I, H)}."""
+    tensors = []
+    for blk, (I, H) in sorted(layer_shapes.items()):
+        for role, rows in (("gate", I), ("up", I), ("down", H)):
+            tensors.append((f"blk.{blk}.ffn_{role}_exps.weight", 8, (32, rows, num_experts), num_experts * rows * 34))
+    return _write_gguf_tensors(path, tensors)
 
 
 def _gguf_gate_model_config(**extra):
@@ -698,11 +751,11 @@ def _gguf_gate_cfg(model_config, strategy, model_path=None):
     )
 
 
-@pytest.mark.skip(reason="D3: branch per-signature partition executor machinery dropped in round-5 merge (main per-format slot pools); deep adaptation deferred")
 def test_adjust_config_accepts_gguf_hybrid_for_capable_types(tmp_path):
     # glm5next packs (18, 18, 23) / (18, 18, 14) / (23, 23, 14) bank types, all inside
-    # the CPU executor's capability set (Task 02): the explicit hybrid pick must pass
-    # the gate instead of the old blanket offload-only rejection.
+    # the CPU executor's capability set (the ggml-cpu leg serves every ggml type;
+    # Task 02): the explicit hybrid pick must pass the gate instead of a blanket
+    # offload-only rejection.
     from freetoken.engine.engine import _adjust_config
 
     path = _write_expert_types_gguf(tmp_path / "capable.gguf", {0: (18, 18, 23), 1: (18, 18, 14)})
@@ -711,20 +764,34 @@ def test_adjust_config_accepts_gguf_hybrid_for_capable_types(tmp_path):
     assert cfg.moe_strategy == "hybrid"
 
 
-@pytest.mark.skip(reason="D3: branch per-signature partition executor machinery dropped in round-5 merge (main per-format slot pools); deep adaptation deferred")
-def test_adjust_config_rejects_gguf_hybrid_for_incapable_types(tmp_path):
-    # Q8_0 (type id 8) banks have no CPU GEMV: the gate refuses the hybrid pick at
-    # config time and names the offending type id instead of crashing in the executor
-    # after the whole weight load.
+def test_adjust_config_rejects_gguf_hybrid_for_incapable_types(tmp_path, monkeypatch):
+    # A build whose _cpu_moe extension lacks the gguf format: the gate refuses the
+    # hybrid pick at config time and names the offending layer formats instead of
+    # crashing in the executor after the whole weight load. On HEAD (no gate) the
+    # explicit hybrid pick sailed through to the post-load NotImplementedError.
     from freetoken.engine.engine import _adjust_config
+    from freetoken.kernel import _cpu_moe
 
+    monkeypatch.setattr(_cpu_moe, "weight_formats", lambda: ["bf16", "mxfp4_triton"])
     path = _write_expert_types_gguf(tmp_path / "incapable.gguf", {0: (18, 18, 23), 1: (8, 8, 14)})
     cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=path)
-    with pytest.raises(ValueError, match=r"types \[8\] have no CPU GEMV"):
+    with pytest.raises(ValueError, match=r"MoE layers \[0, 1\] need \['gguf'\]"):
         _adjust_config(cfg)
 
 
-@pytest.mark.skip(reason="D3: branch per-signature partition executor machinery dropped in round-5 merge (main per-format slot pools); deep adaptation deferred")
+def test_adjust_config_rejects_gguf_hybrid_without_ggml_cpu(tmp_path, monkeypatch):
+    # the other real incapability: no ggml-cpu kernels (non-x86-64 build) -- every
+    # gguf expert type is then unservable on the CPU, whatever its type id
+    import freetoken.kernel.ggml_cpu as ggml_cpu
+    from freetoken.engine.engine import _adjust_config
+
+    monkeypatch.setattr(ggml_cpu, "select", lambda: None)
+    path = _write_expert_types_gguf(tmp_path / "capable.gguf", {0: (18, 18, 23), 1: (18, 18, 14)})
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=path)
+    with pytest.raises(ValueError, match="no ggml-cpu kernels"):
+        _adjust_config(cfg)
+
+
 def test_adjust_config_rejects_gguf_hybrid_when_types_unverifiable():
     # Fail-safe direction: without a scannable .gguf file the gate cannot prove that
     # every bank type is CPU-executable, so hybrid stays rejected (offload keeps working).
@@ -732,6 +799,18 @@ def test_adjust_config_rejects_gguf_hybrid_when_types_unverifiable():
 
     cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "hybrid", model_path=None)
     with pytest.raises(ValueError, match="cannot be verified from the file header"):
+        _adjust_config(cfg)
+
+
+def test_adjust_config_rejects_gguf_hybrid_for_mismatched_gate_up_types(tmp_path):
+    # the loader hard-fails on gate/up type divergence; the gate says so pre-load
+    from freetoken.engine.engine import _adjust_config
+
+    path = _write_expert_types_gguf(tmp_path / "mixed.gguf", {0: (18, 23, 14)})
+    model_config = _gguf_gate_model_config()
+    model_config.num_moe_layers = 1  # the scan only answers on a complete bank set
+    cfg = _gguf_gate_cfg(model_config, "hybrid", model_path=path)
+    with pytest.raises(ValueError, match="gate and up experts have different ggml types"):
         _adjust_config(cfg)
 
 
@@ -743,8 +822,252 @@ except ImportError:
     _HAVE_CPU_MOE_EXT = False
 
 
+# ---- D3 gates: capability screen, header-scan rejection, pre-load auto floor gate ----
+
+
+def test_gguf_expert_bank_types_scans_the_header(tmp_path):
+    from freetoken.moe.expert_banks import gguf_expert_bank_types, gguf_signature_groups
+
+    path = _write_expert_types_gguf(tmp_path / "m.gguf", {0: (18, 18, 23), 1: (18, 18, 14)})
+    model_config = _gguf_gate_model_config()
+    assert gguf_expert_bank_types(path, model_config) == {0: (18, 18, 23), 1: (18, 18, 14)}
+    groups, slots = gguf_signature_groups(path, model_config)
+    # layers of different (type, rows, row_bytes) signatures never share a pool
+    assert [sorted(g) for g in sorted(groups, key=lambda g: g[0])] == [[0], [1]]
+    assert all(s > 0 for s in slots)
+
+    # incomplete bank set: unverifiable layouts must never pass a gate
+    partial = _write_expert_types_gguf(tmp_path / "p.gguf", {0: (18, 18, 23)})
+    assert gguf_expert_bank_types(partial, model_config) is None  # config wants 2 layers
+    one = _gguf_gate_model_config()
+    one.num_moe_layers = 1
+    assert gguf_expert_bank_types(partial, one) == {0: (18, 18, 23)}
+    assert gguf_expert_bank_types(None, one) is None
+    assert gguf_expert_bank_types(str(tmp_path / "absent.gguf"), one) is None
+
+    # combined ffn_gate_up_exps stacking scans as (t, t, down)
+    combined = _write_expert_types_gguf(tmp_path / "c.gguf", {0: (23, 14)})
+    assert gguf_expert_bank_types(combined, one) == {0: (23, 23, 14)}
+
+
+def test_cpu_moe_format_rejection_names_the_layers(monkeypatch):
+    from freetoken.kernel import _cpu_moe
+    from freetoken.engine.engine import _cpu_moe_format_rejection
+
+    real = list(_cpu_moe.weight_formats())
+    monkeypatch.setattr(_cpu_moe, "weight_formats", lambda: real)
+    ok = [("gguf", {"gate_up_type": 18, "down_type": 23}), ("bf16", {})]
+    assert _cpu_moe_format_rejection(ok, "silu") is None
+    assert _cpu_moe_format_rejection([], "silu") is None  # no layers: nothing to reject
+
+    bad = [("gguf", {}), ("nvfp4_marlin", {}), (None, {})]
+    rejection = _cpu_moe_format_rejection(bad, "silu")
+    assert rejection and "layers [1, 2]" in rejection and "'nvfp4_marlin'" in rejection
+    assert "--moe-strategy offload" in rejection
+
+    assert "relu" in _cpu_moe_format_rejection(ok, "relu")
+
+
+def test_cpu_moe_format_rejection_without_ggml_cpu(monkeypatch):
+    import freetoken.kernel.ggml_cpu as ggml_cpu
+    from freetoken.engine.engine import _cpu_moe_format_rejection
+
+    monkeypatch.setattr(ggml_cpu, "select", lambda: None)
+    rejection = _cpu_moe_format_rejection([("gguf", {})], "silu")
+    assert rejection and "no ggml-cpu kernels" in rejection
+    assert _cpu_moe_format_rejection([("bf16", {})], "silu") is None  # gguf-only check
+
+
+def test_cpu_moe_format_rejection_mirrors_the_executor_mxfp4_act_skip(monkeypatch):
+    # the executor skips its ABI probe when every layer is mxfp4_triton (the act runs
+    # inside the mxfp4 kernel, which predates the max_generic_act_id marker): a screen
+    # that still demands compiled_extension_supports falsely rejects a servable
+    # mxfp4 + swigluoai pick on a stale prebuilt .so
+    from freetoken.moe import cpu_executor
+    from freetoken.engine.engine import _cpu_moe_format_rejection
+
+    monkeypatch.setattr(cpu_executor, "compiled_extension_supports", lambda act: False)
+    assert _cpu_moe_format_rejection([("mxfp4_triton", {})], "swigluoai") is None
+    rejection = _cpu_moe_format_rejection([("mxfp4_triton", {}), ("bf16", {})], "swigluoai")
+    assert rejection and "predates activation 'swigluoai'" in rejection
+
+
+def test_cpu_moe_format_rejection_silent_for_non_gguf_expert_formats():
+    # the screen rejects formats the executor cannot serve, not gguf-ness: an explicit
+    # cpu/hybrid pick on bf16 or nvfp4 experts passes it untouched
+    from freetoken.engine.engine import _cpu_moe_format_rejection
+
+    assert _cpu_moe_format_rejection([("bf16", {})], "silu") is None
+    assert _cpu_moe_format_rejection([("nvfp4", {})], "silu") is None
+    assert _cpu_moe_format_rejection([("bf16", {}), ("nvfp4", {})], "silu") is None
+
+
+def test_gate_wiring_precedes_the_bank_load():
+    # fails-before on HEAD: the only CPU-executor capability checks lived in
+    # CpuMoeExecutor.__init__, strictly AFTER the multi-minute bank load, and nothing
+    # called the orphaned check_partition_floors before it
+    import inspect
+
+    from freetoken.engine import engine as engine_mod
+    from freetoken.engine.engine import Engine
+
+    init_src = inspect.getsource(Engine._init_offload_moe_cache)
+    for anchor in ("_cpu_moe_format_rejection", "_gguf_auto_floor_gate"):
+        assert init_src.index(anchor) < init_src.index("load_expert_banks("), anchor
+    assert "_gguf_hybrid_rejection" in inspect.getsource(engine_mod._adjust_config)
+
+
+def _floor_gate_engine(envelope_holder):
+    """Engine.__new__ stand-in whose auto-plan resolve is replaced by the (size, pages,
+    overlap) triple stored in ``envelope_holder['envelope']`` -- the gate must feed the
+    header-scan groups through check_partition_floors against it."""
+    from freetoken.engine.engine import Engine
+
+    engine = Engine.__new__(Engine)
+
+    def fake_resolve(config, banks, method=None, max_slots=None, per_expert_bytes=None):
+        envelope_holder["per_expert_bytes"] = per_expert_bytes
+        return envelope_holder["envelope"], 128, False
+
+    engine._resolve_auto_moe_cache_size = fake_resolve
+    return engine
+
+
+def test_gguf_auto_floor_gate_rejects_an_unfundable_multi_signature_plan(tmp_path):
+    from freetoken.engine.engine import Engine
+    from freetoken.moe.expert_banks import gguf_signature_groups
+
+    path = _write_expert_types_gguf(tmp_path / "m.gguf", {0: (18, 18, 23), 1: (18, 18, 14), 2: (23, 23, 14)})
+    model_config = _gguf_gate_model_config()
+    model_config.num_moe_layers = 3
+    model_config.num_experts = 8
+    cfg = _gguf_gate_cfg(model_config, "offload", model_path=path)
+    cfg.moe_cache_auto = True
+    cfg.use_dummy_weight = False
+    groups, slots = gguf_signature_groups(path, model_config)
+    assert len(groups) == 3
+
+    holder = {"envelope": 15}  # layer-0-width slots: below the 3 x 8-slot floors
+    with pytest.raises(ValueError, match="slot floors"):
+        Engine._gguf_auto_floor_gate(_floor_gate_engine(holder), cfg, method=None)
+
+
+def test_gguf_auto_floor_gate_passes_a_fundable_plan_and_skips_one_pool(tmp_path):
+    from freetoken.engine.engine import Engine
+
+    path = _write_expert_types_gguf(tmp_path / "m.gguf", {0: (18, 18, 23), 1: (18, 18, 14), 2: (23, 23, 14)})
+    model_config = _gguf_gate_model_config()
+    model_config.num_moe_layers = 3
+    model_config.num_experts = 8
+    cfg = _gguf_gate_cfg(model_config, "offload", model_path=path)
+    cfg.moe_cache_auto = True
+    cfg.use_dummy_weight = False
+
+    holder = {"envelope": 10**6}
+    Engine._gguf_auto_floor_gate(_floor_gate_engine(holder), cfg, method=None)
+    assert holder["per_expert_bytes"] > 0  # the plan was denominated in the header's mean width
+
+    uniform = _write_expert_types_gguf(tmp_path / "u.gguf", {0: (18, 18, 23), 1: (18, 18, 23)})
+    cfg = _gguf_gate_cfg(_gguf_gate_model_config(), "offload", model_path=uniform)
+    cfg.moe_cache_auto = True
+    cfg.use_dummy_weight = False
+    holder = {"envelope": 0, "called": False}
+
+    def no_resolve(config, banks, method=None, max_slots=None, per_expert_bytes=None):
+        holder["called"] = True
+        return 0, 0, False
+
+    engine = Engine.__new__(Engine)
+    engine._resolve_auto_moe_cache_size = no_resolve
+    Engine._gguf_auto_floor_gate(engine, cfg, method=None)
+    assert not holder["called"]  # single signature -> one pool -> the plan floor covers it
+
+
+def test_late_split_checks_verify_totals_not_signature_floors():
+    # the per-signature floors are pre-load-only (the gguf auto gate): the checks that
+    # run after the plan is materialized into pools verify totals - split_slots' pool
+    # minima and _require_offload_cache_size's num_experts floor - so an envelope that
+    # funds the totals but not every signature's whole-expert floor boots with the
+    # documented small-pool degradation (clamped decode batch) instead of a late raise
+    from freetoken.engine.cache_budget import check_partition_floors
+    from freetoken.engine.engine import _require_offload_cache_size
+    from freetoken.moe.pool_policy import group_layers, make_pools, split_slots
+
+    num_experts = 8
+    pools = make_pools(group_layers("unified", ["a", "b", "c"], [1, 2, 4]), num_experts, min(num_experts, 1), None)
+    total = 10  # funds the totals (3 pool minima, >= num_experts) but not the 3 x 8-slot floors
+    sizes = split_slots(total, pools)
+    assert sum(sizes) == total and all(1 <= s <= num_experts for s in sizes)
+    _require_offload_cache_size(total, num_experts)  # no raise: the documented degradation
+    # the same numbers ARE floor-checked pre-load, where the header scan can prove them
+    with pytest.raises(ValueError, match="slot floors"):
+        check_partition_floors([[2], [1], [0]], [4, 2, 1], num_experts, total)
+
+
+def test_gguf_signature_groups_slot_bytes_match_layer_slot_bytes_on_3d_banks(tmp_path):
+    # the scan's row_bytes = nbytes // (ne[1]*ne[2]) was only exercised on degenerate
+    # ne=(x, 1, 1) fixtures before: on the real packed shape ne=(K, rows, E) the
+    # per-group slot bytes must equal layer_slot_bytes of the banks the loader
+    # materializes from the same file
+    from freetoken.engine.cache_budget import layer_slot_bytes
+    from freetoken.models.gguf.experts import load_gguf_expert_banks
+    from freetoken.moe.expert_banks import gguf_signature_groups
+
+    E, I, H = 4, 6, 10
+    path = _write_3d_expert_gguf(tmp_path / "m.gguf", {0: (I, H), 1: (I, H), 2: (2 * I, H)}, E)
+    model_config = _gguf_gate_model_config()
+    model_config.num_moe_layers = 3
+    groups, slots = gguf_signature_groups(path, model_config)
+    banks = load_gguf_expert_banks(path, 3, device=torch.device("cpu"))
+    per_layer = layer_slot_bytes(banks.sources)
+    assert [sorted(g) for g in sorted(groups, key=lambda g: g[0])] == [[0, 1], [2]]
+    assert slots == [per_layer[g[0]] for g in sorted(groups, key=lambda g: g[0])]
+    assert slots[0] == 2 * I * 34 + H * 34  # gate|up rows then down rows, one 34-byte row each
+
+
+def test_gguf_signature_groups_fail_safe_on_unparsable_layer_name(tmp_path):
+    # a bank tensor named blk.<not-a-number>... must return None groups (the
+    # silently-None scanner contract), not leak a raw ValueError out of the scan
+    from freetoken.moe.expert_banks import gguf_signature_groups
+
+    tensors = [
+        (f"blk.0.ffn_{role}_exps.weight", 8, (32, 4, 2), 2 * 4 * 34)
+        for role in ("gate", "up", "down")
+    ]
+    tensors.append(("blk.bad.ffn_gate_exps.weight", 8, (32, 4, 2), 2 * 4 * 34))
+    path = _write_gguf_tensors(tmp_path / "bad-name.gguf", tensors)
+    assert gguf_signature_groups(path, _gguf_gate_model_config()) is None
+
+
+def test_recipe_gguf_786k_hybrid_0_85_passes_the_budget_assert():
+    # the re-counted glm5next-GGUF hybrid recipe (spec (f)): no prefill overlap, 0.85,
+    # 786k nvfp4 KV - the greedy MoE fill must fit the budget with the KV reserve.
+    budget = resolve_moe_cache_auto(
+        baseline_free=int(29.6 * 2**30), weights_bytes=3 * 2**30, memory_ratio=0.85,
+        cache_per_page=430_000, fixed_cache_size=int(1.2 * 2**30),
+        per_expert_bytes=11_400_000, num_experts=288, total_experts=8 * 288,
+        prefill_overlap=False, kv_reserve_tokens=786_432, page_size=64,
+    )
+    size, pages, overlap = budget
+    assert overlap is False and pages >= 12_288 and 1400 < size < 2304
+    total = size * 11_400_000 + pages * 430_000
+    assert total <= int(0.85 * int(29.6 * 2**30)) - 3 * 2**30 - int(1.2 * 2**30)
+
+
+def test_recipe_nvfp4_786k_hybrid_fails_the_budget_assert():
+    # the same recipe on the NVFP4-FTW model (per_slot 14.4 MB, dense 17 GiB) honestly
+    # dies in the plan arithmetic - the failure that killed the pre-merge recipe
+    with pytest.raises(AssertionError, match="cache budget too small: minimum plan"):
+        resolve_moe_cache_auto(
+            baseline_free=int(29.6 * 2**30), weights_bytes=17 * 2**30, memory_ratio=0.85,
+            cache_per_page=430_000, fixed_cache_size=int(1.2 * 2**30),
+            per_expert_bytes=15_100_000, num_experts=288, total_experts=8 * 288,
+            prefill_overlap=True, kv_reserve_tokens=786_432, page_size=64,
+        )
+
+
 @pytest.mark.skipif(not _HAVE_CPU_MOE_EXT, reason="compiled _cpu_moe extension missing")
-@pytest.mark.skip(reason="D3: branch per-signature partition executor machinery dropped in round-5 merge (main per-format slot pools); deep adaptation deferred")
+@pytest.mark.skip(reason="D3 verdict: per-type viability is obsolete on the new stack - the ggml-cpu leg serves every ggml type, so _cpu_moe_executor_viable stays format-level")
 def test_cpu_moe_executor_viable_reads_gguf_types(tmp_path):
     # --moe-cpu-layers auto consults this: the "gguf" alias alone must not count as
     # viable - the file's per-layer types decide, so an incapable set fails at config
@@ -798,10 +1121,10 @@ def test_adjust_config_accepts_gguf_hybrid_for_ftw_types(tmp_path):
     assert cfg.moe_strategy == "hybrid"
 
 
-@pytest.mark.skip(reason="D3: branch per-signature partition executor machinery dropped in round-5 merge (main per-format slot pools); deep adaptation deferred")
 def test_adjust_config_rejects_gguf_hybrid_for_ftw_without_types(tmp_path):
-    # an old-converter FTW dir carries no gguf_types meta: hybrid stays rejected at
-    # config time (fail-safe), offload keeps working
+    # an FTW dir's types are not yet verifiable (the gguf_types meta rides the D4
+    # loader re-land): hybrid stays rejected at config time (fail-safe), offload keeps
+    # working
     from freetoken.engine.engine import _adjust_config
 
     path = _write_ftw_gguf_types_dir(tmp_path / "ckpt", [], include_types=False)
