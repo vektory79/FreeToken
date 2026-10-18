@@ -57,8 +57,9 @@ def partition_floor_slots(per_group_slot_bytes: list[int], num_experts: int) -> 
     floor: each group's floor costs ``num_experts`` slots at its own byte width, so the
     floors' byte-weighted demand against the layer-0-width envelope is
     ``num_experts * sum(per_group_slot_bytes) / per_group_slot_bytes[0]``, rounded up.
-    Both the pre-load gguf gate and the late split check raise from this figure so the
-    early and late numbers can never diverge."""
+    Only the pre-load gguf gate raises from this figure; the late checks are totals-only
+    (pool minima, the num_experts floor), so an unprovable layout degrades instead of
+    raising."""
     # a bit header can yield zero groups or a zero-width first group; die loudly here
     # instead of IndexError/ZeroDivisionError downstream
     assert per_group_slot_bytes, "no signature groups to floor"
@@ -75,7 +76,8 @@ def check_partition_floors(
     """Reject an --moe-cache-auto envelope that cannot fund every signature group's
     ``num_experts``-slot floor, naming the honest numbers: the groups and their layer
     counts, the per-group floor, the byte-weighted need in layer-0-width slots, the
-    available envelope, and the remedy. An envelope exactly equal to the need passes."""
+    available envelope, and the remedy. An envelope exactly equal to the need passes.
+    Pre-load only: the late checks are totals-only and never re-run this floor."""
     need = partition_floor_slots(per_group_slot_bytes, num_experts)
     if envelope_slots >= need:
         return
