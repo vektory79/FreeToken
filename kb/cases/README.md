@@ -197,11 +197,12 @@ Specification / Acceptance / Checklist.
   [RESULTS.md](glm53flash-spec-decode/RESULTS.md).
 - [round5-deferred-ports/](round5-deferred-ports/) — план восстановления ветки
   после round-5 ре-платформы ggml (merge f0eed55): пять отложенных портов
-  D1-D5 - загрузчик glm5next GGUF (D4), гибрид/offload поверх slot pools с
-  возвратом T2 (D3), выигрыши ядер на ggml-стеке (D1), mmproj-зрение (D2),
+  D1-D5 - загрузчик glm5next GGUF (D4, готов 9314c9b), гибрид/offload поверх
+  slot pools (D3, готов 393b682; T2 не возвращён), выигрыши ядер на
+  ggml-стеке (D1, закрыт NO-GO 2026-10-21), mmproj-зрение (D2),
   nvfp4-KV generic-бэкендов (D5) - с базлайнами, правилами исполнения волн и
   приёмкой каждой фазы. Вход: [TASK.md](round5-deferred-ports/TASK.md).
-  Статус: PLANNED. Карта портов -
+  Статус: IN PROGRESS (осталось D2 и D5). Карта портов -
   [../topics/round5-ggml-replatform-deferred-ports.md](../topics/round5-ggml-replatform-deferred-ports.md).
 
 ## Навигация

@@ -42,6 +42,10 @@
   [failfast-report.md](incidents/nvfp4-1m-capacity/failfast-report.md).
 - **FTW** — родной формат весов FreeToken; GGUF->FTW конвертация ускоряет
   загрузку модели с диска — [TASK.md](cases/ftw-gguf-fastpath/TASK.md).
+- **floor (латентный пол)** - нижняя граница времени ядра, заданная запуском и
+  латентностью, а не работой: на декоде (T=1) все варианты mhc-сплита
+  неотличимы (медианы 16.4-16.7 мкс при чистом ядре от 4.2 мкс) -
+  [round5-d1-kernel-wins-no-go.md](topics/round5-d1-kernel-wins-no-go.md).
 
 ## G
 
@@ -135,6 +139,10 @@
   (`_blob_eof` + padded-размер, `_reserve_blob_span`) под параллельные pwrite
   группы сегментов; cap-чек учитывает pending-байты группы -
   [P3-NOTES.md](cases/boot-shutdown-io/P3-NOTES.md).
+- **roof (крыша)** - предел производительности ядра: DRAM-крыша (~1.7-1.8 TB/s
+  у 5090) или ALU/тензорная (169-227 TF/s int8-экв. в MoE-пробах D1);
+  эффективный GB/s ниже DRAM-крыши - не провал, если ядро compute-bound -
+  [round5-d1-kernel-wins-no-go.md](topics/round5-d1-kernel-wins-no-go.md).
 
 ## S
 
