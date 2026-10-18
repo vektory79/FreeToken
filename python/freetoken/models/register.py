@@ -67,6 +67,10 @@ _QWEN4_EXP_PACKED = _QWEN3_5_PACKED + (
 _GLM5_NEXT_PACKED = _EXPERTS_PACKED + (
     ("in_proj", ("q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj")),
 )
+# the GGUF file stores the MLA kv_b pair and the KDA depthwise conv as multi-tensor
+# dense fusions (kv_b needs a transpose across the Q8_0 pack axis; the conv is a
+# plain depthwise module), so both serve unquantized on the gguf path too
+_GLM5_NEXT_GGUF_UNQUANTIZED = ("*.kv_b_proj", "*.conv1d")
 _GLM5_NEXT_PROCESSOR = "freetoken.mm.processors.glm5_next:Glm5NextMMProcessor"
 _GLM5_NEXT_ENCODERS = (EncoderSpec("vision", "vision_config", ("image",)),)
 # Gemma 4 keeps HF's flat layer children (mlp / experts / router) under one feed_forward block.
@@ -420,6 +424,8 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         "Glm5NextForCausalLM",
         parse_config="parse_gguf_config",
         iter_weights="iter_gguf_weights",
+        packed_modules_mapping=_GLM5_NEXT_PACKED,
+        unquantized_modules=_GLM5_NEXT_GGUF_UNQUANTIZED,
     ),
     # GGUF glm5next + --mmproj: the multimodal sibling selected only when the operator
     # supplies a clip-architecture mmproj file (see build_gguf_shim); the tower and
@@ -429,6 +435,8 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         "Glm5NextForConditionalGeneration",
         parse_config="parse_gguf_config",
         iter_weights="iter_gguf_weights",
+        packed_modules_mapping=_GLM5_NEXT_PACKED,
+        unquantized_modules=_GLM5_NEXT_GGUF_UNQUANTIZED,
         mm_processor=_GLM5_NEXT_PROCESSOR,
         encoders=_GLM5_NEXT_ENCODERS,
     ),

@@ -38,32 +38,65 @@ def _drop_page_cache(info: GgufTensorInfo) -> None:
         pass
 
 
-def _device_bank(shape: tuple[int, ...], k: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    """An [E, rows, row] device bank; a zero row follows the last one when ggml's MMQ tiles read past it."""
+def _device_bank(shape: tuple[int, ...], k: int, ggml_type: int, device: torch.device) -> torch.Tensor:
+    """An [E, rows, row] device bank; zero padding follows the last row when ggml's MMQ tiles read past it."""
     experts, rows, row = shape
-    flat = torch.empty(experts * rows + pad_rows(k), row, dtype=dtype, device=device)
-    flat[experts * rows :].zero_()
+    dtype = float_dtype(ggml_type)
+    flat = torch.zeros(experts * rows + pad_rows(ggml_type, k), row, dtype=dtype if dtype is not None else torch.uint8, device=device)
     return flat[: experts * rows].view(shape)
 
 
-def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int = 0, dummy: bool = False, device: torch.device | None = None):
-    """``ExpertBanks`` with one bank per (layer, role): pinned host banks for the offload cache, filled from the file and pinned while later layers load, or resident banks on ``device``."""
+def _require_bank(index: dict[str, GgufTensorInfo], name: str, model_path: str) -> GgufTensorInfo:
+    # a bare KeyError names the tensor only; the file path + the re-convert hint
+    # make a truncated / foreign-converter GGUF diagnosable from the log alone
+    info = index.get(name)
+    if info is None:
+        raise ValueError(
+            f"GGUF {model_path}: expert bank {name} is missing; the file is truncated "
+            "or its converter does not pack expert banks - check the file's integrity "
+            "or re-convert with `ft checkpoint --model <gguf> --out <ftw_dir>`"
+        )
+    return info
+
+
+def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int = 0, dummy: bool = False, device: torch.device | None = None, layer_sink=None):
+    """``ExpertBanks`` with one bank per (layer, role): pinned host banks for the offload cache, filled from the file and pinned while later layers load, or resident banks on ``device``.
+
+    ``layer_sink`` (the converter): hands every layer's ``{role: HostBank}`` to the sink the
+    moment it is filled and reports ``streamed=True`` - the sink writes the per-layer FTW
+    entries and releases the banks, so conversion RAM never holds the whole bank set and
+    the per-layer row widths never have to match (heterogeneous ggml types cannot cat
+    into one flat region)."""
     from freetoken.moe.expert_banks import ExpertBanks
     from freetoken.moe.host_banks import HostBank, PinPipeline
 
     index = gguf_tensor_index(model_path)
+    if first_layer:
+        # a bank under first_layer is a corrupt file: dropping it silently would
+        # desync the bank count the offload cache allocates (glm5next carries
+        # leading_dense_block_count=3; the dense layers must not carry banks).
+        for layer in range(first_layer):
+            for role in ("gate", "up", "down", "gate_up"):
+                name = f"blk.{layer}.ffn_{role}_exps.weight"
+                if name in index:
+                    raise ValueError(
+                        f"glm5next GGUF: routed-expert bank {name} on dense layer "
+                        f"{layer} (< first_layer {first_layer})"
+                    )
     sources: dict[str, list[torch.Tensor]] = {"gate_up": [], "down": []}
     tails: dict[str, list[int]] = {"gate_up": [], "down": []}
     tags = []
+    total = 0
     with PinPipeline() if device is None else contextlib.nullcontext() as pins:
         for layer in range(num_layers):
             blk = f"blk.{first_layer + layer}"
-            down = index[f"{blk}.ffn_down_exps.weight"]
+            down = _require_bank(index, f"{blk}.ffn_down_exps.weight", model_path)
             if f"{blk}.ffn_gate_up_exps.weight" in index:
                 gate = index[f"{blk}.ffn_gate_up_exps.weight"]
                 parts = [gate]
             else:
-                gate, up = index[f"{blk}.ffn_gate_exps.weight"], index[f"{blk}.ffn_up_exps.weight"]
+                gate = _require_bank(index, f"{blk}.ffn_gate_exps.weight", model_path)
+                up = _require_bank(index, f"{blk}.ffn_up_exps.weight", model_path)
                 if gate.ggml_type != up.ggml_type:
                     raise NotImplementedError(f"{blk}: gate and up experts have different ggml types")
                 parts = [gate, up]
@@ -78,8 +111,8 @@ def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int
                 banks = {role: bank.tensor for role, bank in host.items()}
             else:
                 banks = {
-                    "gate_up": _device_bank(gate_up_shape, gate.ne[0], rows[0].dtype, device),
-                    "down": _device_bank(tuple(d.shape), down.ne[0], d.dtype, device),
+                    "gate_up": _device_bank(gate_up_shape, gate.ne[0], gate.ggml_type, device),
+                    "down": _device_bank(tuple(d.shape), down.ne[0], down.ggml_type, device),
                 }
             if dummy:
                 banks["gate_up"].zero_()
@@ -92,13 +125,20 @@ def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int
                 banks["down"].copy_(d)
                 for info in (*parts, down):
                     _drop_page_cache(info)
+            if layer_sink is not None:
+                # the converter writes the entries straight off the host banks and
+                # releases them; no pin pipeline (mirrors build_expert_banks' sink path)
+                assert device is None, "streamed gguf banks are host banks"
+                layer_sink(layer, host)
+                total += sum(b.nbytes for b in host.values())
+                continue
             if device is None:
                 pins(layer, host)
             for role, bank in banks.items():
                 sources[role].append(bank)
-    total = sum(t.numel() * t.element_size() for ts in sources.values() for t in ts)
+            total += sum(t.numel() * t.element_size() for t in banks.values())
     logger.info_rank0(f"GGUF expert banks: {num_layers} layers, {total / 2**30:.1f} GiB {'on ' + str(device) if device is not None else 'in host RAM'}")
-    return ExpertBanks("gguf", sources, kind=QuantKind.GGUF, kernel="ggml", layout=None, layer_tags=tags, row_tail_bytes=tails)
+    return ExpertBanks("gguf", sources, kind=QuantKind.GGUF, kernel="ggml", layout=None, layer_tags=tags, row_tail_bytes=tails, streamed=layer_sink is not None)
 
 
 __all__ = ["load_gguf_expert_banks"]

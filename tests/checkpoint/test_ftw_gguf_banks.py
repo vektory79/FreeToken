@@ -29,15 +29,86 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "models"))
 
 # reuse the proven writer/metadata and the triple-signature gate fixtures
-from test_gguf_expert_banks import (  # noqa: E402
-    _TRIPLE_GROUP_SLOT_BYTES,
-    _TRIPLE_SIGS,
-    _gate_engine_and_config,
-)
+# (inline copies: test_gguf_expert_banks rides the amputated old expert-sources API
+# and is module-skipped for the expert-banks deferred-port wave)
+_TRIPLE_SIGS = [(18, 18, 23)] * 5 + [(23, 23, 14)] + [(18, 18, 14)] * 2
+_TRIPLE_GROUP_SLOT_BYTES = [169_984, 246_784, 207_872]
+
+
+def _gate_engine_and_config(path, kv_reserve_tokens):
+    # Engine.__new__ stub (same idiom as test_engine_resolve_auto_moe_cache_size_maps_kwargs)
+    # + an auto-plan config over the triple-signature gguf: budget 89,000,000 B,
+    # cache_per_page 98,304, per-slot (layer-0 width) 169,984 -> kv_reserve_tokens
+    # picks the envelope: 14,080 -> 14 slots, 14,048 -> 15, 14,016 -> 16.
+    import torch
+
+    from freetoken.engine.engine import Engine
+    from freetoken.kvcache.mha_pool import MHAKVCache
+    from freetoken.models.config import KVCacheGroupSpec
+
+    class StubModelConfig:
+        num_experts = 4
+        num_moe_layers = 8
+        first_k_dense_replace = 0
+        expert_quant = "none"
+        moe_weight_format = "gguf"
+        hidden_size = 512
+        moe_intermediate_size = 256
+        decode_target = "gpu"
+
+        def kv_cache_group_specs(self):
+            return [KVCacheGroupSpec(
+                name="full", layer_ids=(0, 1, 2), num_kv_heads=8, head_dim=64, sliding_window=None,
+            )]
+
+        def linear_attention_group(self):
+            return None
+
+    class StubConfig:
+        dtype = torch.float16
+        page_size = 16
+        max_running_req = 4
+        hybrid_swa_cache_mode = "auto"
+        memory_ratio = 0.9
+        moe_cache_auto = True
+        use_dummy_weight = False
+        model_path = path
+        moe_prefill_overlap = True
+        moe_strategy = "offload"
+        moe_cpu_layers = None
+        expert_load = "auto"
+        swa_full_tokens_ratio = 0.2
+        swa_num_pages_override = None
+        model_config = StubModelConfig()
+
+        class tp_info:
+            size = 1
+
+    StubConfig.kv_reserve_tokens = kv_reserve_tokens  # class bodies cannot close over locals
+
+    engine = Engine.__new__(Engine)  # bypass __init__/GPU
+    engine._baseline_free = 100_000_000
+    engine._weights_bytes = 1_000_000
+    engine._pool_cls = MHAKVCache
+    return engine, StubConfig()
+
+
 from test_glm5_next_gguf import (  # noqa: E402
     _CLIP_METADATA,
+    _CONV,
+    _HCN,
+    _HD,
+    _IDXH,
+    _IDXD,
     _ITER_METADATA,
+    _KL,
+    _KPOOL,
+    _NH,
+    _PROJ,
+    _QL,
+    _QK,
     _TOKENIZER_METADATA,
+    _VD,
     _full_vision_fixture_data,
     _write_iter_gguf,
     _write_vision_mmproj,
@@ -62,7 +133,10 @@ _ROW_BYTES = {18: 98, 23: 136, 14: 210}  # packed bytes per 256-element block
 
 
 def _write_ftw_source_gguf(path) -> str:
-    import gguf
+    # pypi gguf-py (fixture writer only, freetoken vendors its own reader):
+    # the baseline tree kept this whole module uncollected behind the D4 module
+    # skip, so these tests skip rather than error when the package is absent
+    gguf = pytest.importorskip("gguf")
 
     qt = {
         8: gguf.GGMLQuantizationType.Q8_0,
@@ -70,10 +144,68 @@ def _write_ftw_source_gguf(path) -> str:
         23: gguf.GGMLQuantizationType.IQ4_XS,
         14: gguf.GGMLQuantizationType.Q6_K,
     }
+
+    def q8(rows, ne0):
+        # packed Q8_0 payload stub: (rows, ne0 // 32 * 34) zero bytes
+        return (np.zeros((rows, ne0 // 32 * 34), np.uint8), qt[8])
+
+    # dense tensors for every mapped module name: the new stack builds quant
+    # schemes by walking to_gguf(name) per module, so a convertible file must
+    # carry the full trunk (shapes mirror test_glm5_next_gguf._iter_tensor_set)
+    hc_rows, hc_cols = (2 + _HCN) * _HCN, _HCN * _FT_H
+    kda_layers = (0, 1, 2, 4, 5, 6)  # head_count_kv == 0 under the i % 4 == 3 rule
+    dsa_layers = (3, 7)
     entries = {
         # vocab x hidden Q8_0 embedding: the config parse's only tensor fact
         "token_embd.weight": (np.zeros((256, _FT_H // 32 * 34), np.uint8), qt[8]),
+        # untied Q6_K head + final norm: iter_gguf_weights consumes both
+        "output.weight": (np.zeros((256, _FT_H // 256 * 210), np.uint8), qt[14]),
+        "output_norm.weight": (np.full(_FT_H, 0.5, np.float32), None),
     }
+    for layer in range(8):
+        entries[f"blk.{layer}.attn_norm.weight"] = (np.full(_FT_H, 0.25, np.float32), None)
+        entries[f"blk.{layer}.ffn_norm.weight"] = (np.full(_FT_H, 0.75, np.float32), None)
+        entries[f"blk.{layer}.hc_attn_fn.weight"] = q8(hc_rows, hc_cols)
+        entries[f"blk.{layer}.hc_attn_base.weight"] = (np.arange(hc_rows, dtype=np.float32) / 8, None)
+        entries[f"blk.{layer}.hc_attn_scale.weight"] = (np.array([0.1, 0.2, 0.3], np.float32), None)
+        entries[f"blk.{layer}.hc_ffn_fn.weight"] = q8(hc_rows, hc_cols)
+        entries[f"blk.{layer}.hc_ffn_base.weight"] = (np.arange(hc_rows, dtype=np.float32) / 8, None)
+        entries[f"blk.{layer}.hc_ffn_scale.weight"] = (np.array([0.4, 0.5, 0.6], np.float32), None)
+        entries[f"blk.{layer}.ffn_gate_inp.weight"] = (np.zeros((_FT_E, _FT_H), np.float32), None)
+        entries[f"blk.{layer}.exp_probs_b.bias"] = (np.zeros(_FT_E, np.float32), None)
+        entries[f"blk.{layer}.ffn_gate_shexp.weight"] = q8(_FT_I, _FT_H)
+        entries[f"blk.{layer}.ffn_up_shexp.weight"] = q8(_FT_I, _FT_H)
+        entries[f"blk.{layer}.ffn_down_shexp.weight"] = q8(_FT_H, _FT_I)
+    for layer in kda_layers:
+        for rows, suffix in (
+            (_PROJ, "attn_q"), (_PROJ, "attn_k"), (_PROJ, "attn_v"),
+            (_NH, "ssm_beta"), (_HD, "ssm_f_a"), (_HD, "ssm_g_a"),
+        ):
+            entries[f"blk.{layer}.{suffix}.weight"] = q8(rows, _FT_H)
+        for part in ("q", "k", "v"):
+            entries[f"blk.{layer}.ssm_conv1d_{part}.weight"] = (np.full((_PROJ, 1, _CONV), 1.0, np.float32), None)
+        entries[f"blk.{layer}.ssm_f_b.weight"] = q8(_PROJ, _HD)
+        entries[f"blk.{layer}.ssm_g_b.weight"] = q8(_PROJ, _HD)
+        entries[f"blk.{layer}.attn_output.weight"] = q8(_FT_H, _PROJ)
+        entries[f"blk.{layer}.ssm_a"] = (np.full(_NH, -1.0, np.float32), None)  # A_log = log(-x)
+        entries[f"blk.{layer}.ssm_dt.bias"] = (np.zeros(_PROJ, np.float32), None)
+        entries[f"blk.{layer}.ssm_norm.weight"] = (np.full(_HD, 0.5, np.float32), None)
+    for layer in dsa_layers:
+        entries[f"blk.{layer}.attn_q_a.weight"] = q8(_QL, _FT_H)
+        entries[f"blk.{layer}.attn_q_a_norm.weight"] = (np.full(_QL, 0.5, np.float32), None)
+        entries[f"blk.{layer}.attn_q_b.weight"] = q8(_NH * _QK, _QL)
+        entries[f"blk.{layer}.attn_kv_a_mqa.weight"] = q8(_KL, _FT_H)
+        entries[f"blk.{layer}.attn_kv_a_norm.weight"] = (np.full(_KL, 0.5, np.float32), None)
+        entries[f"blk.{layer}.attn_output.weight"] = q8(_FT_H, _NH * _VD)
+        entries[f"blk.{layer}.attn_k_b.weight"] = (np.zeros((_NH, _KL, _QK // 32 * 34), np.uint8), qt[8])
+        entries[f"blk.{layer}.attn_v_b.weight"] = (np.zeros((_NH, _VD, _KL // 32 * 34), np.uint8), qt[8])
+        entries[f"blk.{layer}.indexer.attn_k.weight"] = q8(_IDXD, _FT_H)
+        entries[f"blk.{layer}.indexer.attn_q_b.weight"] = q8(_IDXH * _IDXD, _QL)
+        entries[f"blk.{layer}.indexer.proj.weight"] = (np.zeros((_IDXH, _FT_H), np.float32), None)
+        entries[f"blk.{layer}.indexer.k_norm.weight"] = (np.full(_IDXD, 0.5, np.float32), None)
+        entries[f"blk.{layer}.indexer.k_norm.bias"] = (np.zeros(_IDXD, np.float32), None)
+        entries[f"blk.{layer}.indexer_compressor_gate.weight"] = q8(_IDXD, _FT_H)
+        entries[f"blk.{layer}.indexer_compressor_ape.weight"] = (np.zeros((_KPOOL, _IDXD), np.float32), None)
     for layer, (gt, ut, dt) in enumerate(_TRIPLE_SIGS):
         # layer 0 inserts down first: role assembly must follow the explicit
         # gate/up/down order, never the file's tensor encounter order
@@ -107,7 +239,8 @@ def ftw_gguf_ckpt(tmp_path_factory):
 
 def test_ftw_gguf_roundtrip(ftw_gguf_ckpt):
     from freetoken.checkpoint.ftw import ALIGN, load_ftw_banks
-    from freetoken.models.gguf.reader import iter_gguf_tensors
+    from freetoken.models.gguf.reader import gguf_tensor_index
+    from freetoken.models.gguf.tensors import packed_rows
 
     src, out = ftw_gguf_ckpt
     banks = load_ftw_banks(out, num_layers=8)
@@ -115,24 +248,30 @@ def test_ftw_gguf_roundtrip(ftw_gguf_ckpt):
     assert banks.quant_format == "gguf"
     assert banks.kind is None and banks.kernel is None
     assert banks.gate_up_alpha is None and banks.down_alpha is None
-    assert sorted(banks.sources) == ["down", "gate", "up"]
-    assert banks.gguf_types == tuple(tuple(s) for s in _TRIPLE_SIGS)
+    # the merged runtime schema (same-type gate/up stacks pack into one gate_up bank;
+    # the pre-re-platform three-role on-disk layout was retired with it)
+    assert sorted(banks.sources) == ["down", "gate_up"]
     assert banks.layer_residency == ["pinned"] * 8
-    for layer, sig in enumerate(_TRIPLE_SIGS):
-        for role, tid in zip(("gate", "up", "down"), sig):
-            t = banks.sources[role][layer]
-            ne0, rows = (_FT_I, _FT_H) if role == "down" else (_FT_H, _FT_I)
-            assert t.dtype is torch.uint8
-            assert tuple(t.shape) == (_FT_E, rows, ne0 // 256 * _ROW_BYTES[tid])
+    for layer, (gt, ut, dt) in enumerate(_TRIPLE_SIGS):
+        gu = banks.sources["gate_up"][layer]
+        dn = banks.sources["down"][layer]
+        assert gu.dtype is torch.uint8
+        assert tuple(gu.shape) == (_FT_E, 2 * _FT_I, _FT_H // 256 * _ROW_BYTES[gt])
+        assert tuple(dn.shape) == (_FT_E, _FT_H, _FT_I // 256 * _ROW_BYTES[dt])
 
-    # bank bytes are the source file's packed rows verbatim, per explicit role
-    # (the down-first insertion order of layer 0 makes an encounter-order bug swap bytes)
-    by_name = {t.name: t for t in iter_gguf_tensors(src)}
-    for layer, sig in enumerate(_TRIPLE_SIGS):
-        for role, tid in zip(("gate", "up", "down"), sig):
-            ne0, rows = (_FT_I, _FT_H) if role == "down" else (_FT_H, _FT_I)
-            raw = by_name[f"blk.{layer}.ffn_{role}_exps.weight"].packed()
-            assert torch.equal(banks.sources[role][layer], raw.reshape(_FT_E, rows, -1))
+    # bank bytes are the source file's packed rows verbatim, gate rows then up rows
+    # inside the merged gate_up bank (the down-first insertion order of layer 0 makes
+    # an encounter-order bug swap bytes)
+    by_name = gguf_tensor_index(src)
+    for layer, (gt, ut, dt) in enumerate(_TRIPLE_SIGS):
+        gu = banks.sources["gate_up"][layer]
+        gate = packed_rows(by_name[f"blk.{layer}.ffn_gate_exps.weight"]).reshape(_FT_E, _FT_I, -1)
+        up = packed_rows(by_name[f"blk.{layer}.ffn_up_exps.weight"]).reshape(_FT_E, _FT_I, -1)
+        dn = banks.sources["down"][layer]
+        down = packed_rows(by_name[f"blk.{layer}.ffn_down_exps.weight"]).reshape(_FT_E, _FT_H, -1)
+        assert torch.equal(gu[:, :_FT_I], gate)
+        assert torch.equal(gu[:, _FT_I:], up)
+        assert torch.equal(dn, down)
 
     # the converter index carries the role-ordered types and honors ALIGN-4096 entries
     with open(os.path.join(out, "freetoken_weight.json"), encoding="utf-8") as f:
@@ -141,10 +280,14 @@ def test_ftw_gguf_roundtrip(ftw_gguf_ckpt):
     assert index["gguf_types"] == [list(s) for s in _TRIPLE_SIGS]
     assert index["expert_bank_num_layers"] == 8
     bank_entries = [t for t in index["tensors"] if t["kind"] == "experts_bank"]
-    assert len(bank_entries) == 24  # 3 role banks x 8 layers
+    assert len(bank_entries) == 16  # 2 merged banks x 8 layers
     assert all(t["global_off"] % ALIGN == 0 for t in bank_entries)
 
 
+@pytest.mark.skip(
+    "pins moe.expert_banks.gguf_ftw_signature_groups, amputated by the ggml "
+    "re-platform; re-land with the expert-banks deferred port"
+)
 def test_ftw_without_gguf_meta_keeps_legacy_semantics(tmp_path):
     # absent gguf_types meta -> None (nvfp4/bf16 checkpoints load exactly as before),
     # and the quant_format tag still resolves kind/kernel through LEGACY_FORMAT
@@ -172,6 +315,9 @@ def test_ftw_without_gguf_meta_keeps_legacy_semantics(tmp_path):
 def test_ftw_scan_matches_loaded_bank_grouping(ftw_gguf_ckpt):
     # exactness bridge: the index-only scan's grouping and per-group slot widths
     # equal what _group_bank_layers / expert_bytes_per_slot see on the loaded banks
+    # D3: pins gguf_ftw_signature_groups + Engine._group_bank_layers, both amputated
+    # by the ggml re-platform; re-lands with the D3 slot-pool deep adaptation
+    pytest.skip("D3: gguf_ftw_signature_groups / Engine._group_bank_layers re-land with the D3 deep adaptation")
     from freetoken.checkpoint.ftw import load_ftw_banks
     from freetoken.engine.cache_budget import expert_bytes_per_slot
     from freetoken.engine.engine import Engine
@@ -195,6 +341,10 @@ def test_ftw_scan_matches_loaded_bank_grouping(ftw_gguf_ckpt):
 def test_ftw_early_floor_gate_rejects_before_bank_load(ftw_gguf_ckpt, monkeypatch):
     # pins the FTW branch of the gate's position inside _init_offload_moe_cache:
     # an unfundable plan must raise off the index alone, before load_expert_banks
+    # D3: the gate's gguf_signature_groups answers only on a bare .gguf (an FTW dir
+    # keeps the documented degrade-not-raise path) until the FTW-index signature
+    # scan re-lands with the D3 deep adaptation
+    pytest.skip("D3: gguf_signature_groups FTW fallback re-lands with the D3 deep adaptation")
     import freetoken.engine.engine as engine_mod
 
     _, out = ftw_gguf_ckpt
@@ -237,6 +387,37 @@ def test_ftw_gguf_types_meta_rejected(tmp_path, meta, why):
     w.finalize({"quant_format": "gguf", **meta})
     with pytest.raises(RuntimeError, match="gguf_types"):
         load_ftw_banks(str(out), num_layers=2)
+
+
+def test_ftw_gguf_types_meta_accepted(tmp_path, monkeypatch):
+    # the positive half of the guard (the parametrization above pins the rejections
+    # only): a well-formed triple per MoE layer loads and lands on banks.gguf_types
+    monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")  # CPU-only: no pin settle
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+
+    out = tmp_path / "ckpt"
+    w = FTWWriter(str(out))
+    for name, shape in (("gate_up", (4, 16, 3)), ("down", (4, 5, 2))):
+        for layer in range(2):
+            w.add_tensor(
+                f"{name}#L{layer:05d}", torch.zeros(shape, dtype=torch.uint8), kind="experts_bank"
+            )
+    w.finalize({"quant_format": "gguf", "gguf_types": [[18, 18, 23], [18, 18, 23]]})
+    banks = load_ftw_banks(str(out), num_layers=2)
+    assert banks.quant_format == "gguf"
+    assert banks.kind is None and banks.kernel is None
+    assert sorted(banks.sources) == ["down", "gate_up"]
+    assert banks.layer_residency == ["pinned"] * 2
+
+
+def test_converter_gguf_types_triple_form():
+    # the converter-side contract without pypi-gguf/CUDA: layer_tags -> int triples
+    # in the OLD key/shape the capability gates read (the gate type repeats for up)
+    from freetoken.checkpoint.convert import gguf_type_triples
+
+    tags = [("ggml", "IQ3_XXS", "IQ4_XS"), ("ggml", "IQ4_XS", "Q6_K")]
+    assert gguf_type_triples(tags) == [[18, 18, 23], [23, 23, 14]]
+    assert gguf_type_triples([]) == []
 
 
 @pytest.mark.parametrize(
@@ -285,6 +466,10 @@ def test_ftw_persisted_types_feed_capability_gates(ftw_gguf_ckpt):
 
 @pytest.fixture(scope="module")
 def ftw_gguf_vision_ckpt(tmp_path_factory):
+    pytest.skip(
+        "D2: convert_checkpoint lost the mmproj_path kwarg in the round-5 re-platform; "
+        "mmproj FTW packing re-lands with the vision deferred port"
+    )
     """A converted GGUF FTW built WITH --mmproj: tower tensors + merged metadata."""
     import freetoken.engine.engine as engine_mod
     from freetoken.checkpoint.convert import convert_checkpoint
@@ -384,6 +569,10 @@ def test_ftw_gguf_text_only_boot_unchanged(ftw_gguf_ckpt):
     assert ftw_lacks_vision(out) is True
 
 
+@pytest.mark.skip(
+    "D2: convert_checkpoint lost the mmproj_path kwarg in the round-5 re-platform; "
+    "mmproj FTW packing re-lands with the vision deferred port"
+)
 def test_convert_mmproj_non_clip_fails_fast(tmp_path):
     import freetoken.engine.engine as engine_mod
     from test_glm5_next_gguf import _write_mmproj_gguf

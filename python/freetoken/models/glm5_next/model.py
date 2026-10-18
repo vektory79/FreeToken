@@ -142,6 +142,8 @@ class Glm5NextModel(BaseOP):
         self.embed_tokens = VocabParallelEmbedding(
             num_embeddings=config.vocab_size,
             embedding_dim=config.hidden_size,
+            quant_config=config.quant,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.layers = OPList(
             [Glm5NextDecoderLayer(config, i, prefix=f"{prefix}.layers.{i}") for i in range(config.num_layers)]
@@ -168,14 +170,6 @@ class Glm5NextForCausalLM(BaseLLMModel):
             quant_config=config.quant,
             prefix="lm_head",
         )
-
-        # GGUF checkpoints carry native block-quantized weights: swap the packed
-        # projections + embedding + untied head for GGUF-quant ops (routed experts
-        # stay on the offload cache, Phase 5).
-        from .gguf import convert_glm5_next_to_gguf, is_gguf_model
-
-        if is_gguf_model(config):
-            convert_glm5_next_to_gguf(self, config)
 
     def prepare_for_runtime(self) -> None:
         """Post-load, pre-KV-sizing hook: materialize the DSA layers' bmm-ready

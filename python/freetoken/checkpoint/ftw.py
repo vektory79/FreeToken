@@ -681,6 +681,31 @@ def load_ftw_banks(
     bank_entries, alpha_entries, flat_entries, per_layer_groups = split
     quant_format = reader.meta("quant_format")
 
+    # gguf guard: fail before any read/pin instead of silently loading kind=None
+    # banks; gguf_types stays unset (non-gguf formats never read it)
+    meta_gguf_types = reader.meta("gguf_types")
+    if quant_format == "gguf" and meta_gguf_types is None:
+        raise RuntimeError(
+            f"{path!r} packs gguf expert banks but its index has no gguf_types: it was "
+            "converted by an older build; re-convert with ft checkpoint"
+        )
+    if meta_gguf_types is not None:
+        if (
+            not isinstance(meta_gguf_types, list)
+            or len(meta_gguf_types) != num_layers
+            or not all(
+                isinstance(row, (list, tuple))
+                and len(row) == 3
+                and all(isinstance(t, int) for t in row)
+                for row in meta_gguf_types
+            )
+        ):
+            raise RuntimeError(
+                f"{path!r} records malformed gguf_types meta (one (gate, up, down) int "
+                f"triple per MoE layer expected, got {meta_gguf_types!r}); the checkpoint "
+                "does not match its config"
+            )
+
     # Alphas: unchanged, one flat HostBank per entry.
     alpha_specs = {e["name"]: (tuple(e["shape"]), _dtype_of(e["dtype"])) for e in alpha_entries}
     alpha_hb = alloc_banks(alpha_specs)
@@ -857,6 +882,32 @@ def load_ftw_banks_to_device(path: str, *, num_layers: int, device: torch.device
         bank_entries, alpha_entries, flat_entries, per_layer_groups = split
 
         quant_format = reader.meta("quant_format")
+
+        # gguf guard mirrored from load_ftw_banks: fail before any read/device op
+        # instead of silent kind=None banks; gguf_types stays unset (resident fused
+        # never reads it)
+        meta_gguf_types = reader.meta("gguf_types")
+        if quant_format == "gguf" and meta_gguf_types is None:
+            raise RuntimeError(
+                f"{path!r} packs gguf expert banks but its index has no gguf_types: it was "
+                "converted by an older build; re-convert with ft checkpoint"
+            )
+        if meta_gguf_types is not None:
+            if (
+                not isinstance(meta_gguf_types, list)
+                or len(meta_gguf_types) != num_layers
+                or not all(
+                    isinstance(row, (list, tuple))
+                    and len(row) == 3
+                    and all(isinstance(t, int) for t in row)
+                    for row in meta_gguf_types
+                )
+            ):
+                raise RuntimeError(
+                    f"{path!r} records malformed gguf_types meta (one (gate, up, down) int "
+                    f"triple per MoE layer expected, got {meta_gguf_types!r}); the checkpoint "
+                    "does not match its config"
+                )
 
         # (name, layer_id or None for an alpha, read offset, read length, head pad, shape, dtype)
         jobs = [(e["name"], None, e["global_off"], e["nbytes"], 0, tuple(e["shape"]), _dtype_of(e["dtype"])) for e in alpha_entries]

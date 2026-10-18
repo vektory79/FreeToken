@@ -103,6 +103,25 @@ def _copy_metadata(model_path: str, out_dir: str) -> list[str]:
     return copied
 
 
+def gguf_type_triples(layer_tags) -> list[list[int]]:
+    """The index's ``gguf_types`` meta: one (gate, up, down) int triple per MoE layer.
+
+    The shape the 9ac8830-era readers and capability gates persist/expect; the banks
+    carry name tags ("ggml", gate, down) with gate == up enforced by the packer, so
+    the middle entry repeats the gate type - key/shape stay the OLD ones for backward
+    compatibility with pre-re-platform conversions."""
+    from freetoken.third_party import gguf as ggml
+
+    return [
+        [
+            int(ggml.GGMLQuantizationType[gate]),
+            int(ggml.GGMLQuantizationType[gate]),
+            int(ggml.GGMLQuantizationType[down]),
+        ]
+        for _kind, gate, down in layer_tags
+    ]
+
+
 class _ConvertSink:
     """Layer-completion sink for ``load_expert_banks(layer_sink=...)``: writes each
     completed layer's banks as their own FTW entries immediately (name
@@ -240,12 +259,19 @@ def convert_checkpoint(
     # 2) offload expert banks (post-repack) + alpha scales (slow path auto-picks parallel/serial)
     quant_format = None
     layer_quant_formats = None
+    gguf_types = None
     num_layers = None
     if offload:
         # every method-packed format streams each layer to its own FTW entry as it completes (via the sink); the GGUF provider reports through ExpertBanks.streamed whether it engaged the sink or materialized the whole bank set first
+        from freetoken.layers.quantization import QuantKind
         from freetoken.moe.legacy_format import legacy_bank_names, legacy_format_for
 
-        names = legacy_bank_names(legacy_format_for(method.kind, method.kernel.name)) if method is not None else {}
+        if method is not None and method.kind is QuantKind.GGUF:
+            # gguf banks pack to the merged gate_up/down layout and LEGACY_FORMAT has no
+            # (GGUF, ggml) inverse - the tag carries no packed kernel (kind=None)
+            names = legacy_bank_names("gguf")
+        else:
+            names = legacy_bank_names(legacy_format_for(method.kind, method.kernel.name)) if method is not None else {}
         sink = _ConvertSink(writer, names=names)
         banks = load_expert_banks(
             model_path, mc, method=method, device=dev, layer_sink=sink, layer_methods=layer_methods
@@ -253,6 +279,11 @@ def convert_checkpoint(
         quant_format = banks.quant_format
         layer_quant_formats = banks.layer_formats
         assert layer_quant_formats is None or banks.streamed, "experts of several formats always stream to the sink"
+        gguf_types = (
+            gguf_type_triples(banks.layer_tags)
+            if quant_format == "gguf" and banks.layer_tags
+            else None
+        )
         if banks.streamed:
             sink.close()
             num_layers = sink.num_layers  # however many distinct layers the sink actually saw
@@ -319,6 +350,10 @@ def convert_checkpoint(
         # Experts of several formats: each MoE layer's quant_format (quant_format above is the most common). A layer only
         # stores the banks its kernel reads; the reader gives it zero-byte placeholders for the others.
         "layer_quant_formats": layer_quant_formats,
+        # gguf expert banks: one (gate, up, down) ggml type-id triple per MoE layer
+        # (the old-converter key/shape; load_ftw_banks hard-requires it on gguf
+        # checkpoints and the capability gates read it back on FTW dirs)
+        "gguf_types": gguf_types,
         # The reader takes num_layers from the model config (copied into this
         # checkpoint); recording it here too gives load_ftw_banks a cross-check that
         # the banks match the config they ship with. None for non-offload checkpoints.

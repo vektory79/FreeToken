@@ -159,7 +159,9 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
         if registry_key is None:
             raise ValueError(
                 f"GGUF architecture {arch!r} is not supported "
-                f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)})"
+                f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)}); if this checkpoint exists "
+                "only as GGUF, convert it once with `ft checkpoint --model <gguf> "
+                "--out <ftw_dir>` and serve the resulting FTW dir; docs: docs/cli.md (checkpoint)"
             )
     if tower_meta is not None:
         module_name, _, attr = _GGUF_VISION_CONFIG_HOOK[arch].partition(":")

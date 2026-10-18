@@ -9,6 +9,7 @@ banks from them (``build_expert_banks``). GGUF experts keep their packed ggml ro
 from __future__ import annotations
 
 import glob
+import json
 import math
 import os
 from dataclasses import dataclass, field
@@ -423,7 +424,7 @@ def load_expert_banks(
             from freetoken.models.gguf.experts import load_gguf_expert_banks
 
             # each layer keeps its own ggml types, so the banks come from the file, not from one method's layout
-            return load_gguf_expert_banks(model_path, model_config.num_moe_layers, first_layer=model_config.first_k_dense_replace, dummy=dummy, device=device if resident else None)
+            return load_gguf_expert_banks(model_path, model_config.num_moe_layers, first_layer=model_config.first_k_dense_replace, dummy=dummy, device=device if resident else None, layer_sink=layer_sink)
         if method is None:
             raise ValueError("the experts of a raw checkpoint are packed by the offload layers' MoE quant method; pass method=")
         return _method_expert_banks(model_path, model_config, method, device, dummy, par, workers, chunk, layer_sink, resident)
@@ -494,3 +495,153 @@ def attach_resident_banks(layers, banks: ExpertBanks) -> None:
             alphas.append(a)
         layer._expert_banks = {role: per_layer[i] for role, per_layer in banks.sources.items()}
         layer._expert_alphas = tuple(a[i * e : (i + 1) * e] for a in alphas) or None
+
+
+# llama.cpp's MoE stacking convention; the stem's checkpoint layer ("blk.N.") maps to
+# a bank layer through bank_layer_of (leading dense layers and MTP slots carry none).
+_GGUF_BANK_ROLE_SUFFIXES = {
+    "ffn_gate_up_exps.weight": "gate_up",
+    "ffn_gate_exps.weight": "gate",
+    "ffn_up_exps.weight": "up",
+    "ffn_down_exps.weight": "down",
+}
+
+
+def _gguf_bank_role_infos(model_path, model_config) -> dict[int, dict[str, GgufTensorInfo]] | None:
+    """Header-only scan of a bare .gguf file: ``{bank_layer: {role: GgufTensorInfo}}`` for
+    every ``ffn_{gate,up,down,gate_up}_exps`` stack.
+
+    GGUFReader mmaps the file and parses the KV + tensor infos without touching tensor
+    data, so a multi-GB checkpoint parses in milliseconds and never enters RAM. ``None``
+    when the path is not a local .gguf file, the scan fails, or the trunk's bank set is
+    incomplete: gates only answer on a proven-complete bank set (an unverifiable layout
+    must never pass a capability gate)."""
+    from freetoken.models.gguf.reader import gguf_tensor_index, is_gguf_path
+    from freetoken.moe.expert_pieces import bank_layer_of
+
+    if not model_path or not is_gguf_path(model_path):
+        return None
+    num_moe = int(getattr(model_config, "num_moe_layers", 0) or 0)
+    if num_moe <= 0:
+        return None
+    try:
+        index = gguf_tensor_index(model_path)
+    except Exception:
+        return None
+    per_layer: dict[int, dict[str, GgufTensorInfo]] = {}
+    for name, info in index.items():
+        for suffix, role in _GGUF_BANK_ROLE_SUFFIXES.items():
+            if name.endswith(suffix):
+                break
+        else:
+            continue
+        head, _, layer_id = name[: -len(suffix) - 1].rpartition(".")
+        if head != "blk":
+            continue
+        try:
+            bank_layer = bank_layer_of(model_config, int(layer_id))
+        except Exception:
+            return None  # an unparsable bank name cannot prove a complete bank set
+        if bank_layer is None:
+            continue  # leading dense layers and MTP slots never load a bank
+        per_layer.setdefault(bank_layer, {})[role] = info
+    if set(per_layer) != set(range(num_moe)) or any(
+        not ({"gate_up", "down"} <= set(stacks) or {"gate", "up", "down"} <= set(stacks))
+        for stacks in per_layer.values()
+    ):
+        return None
+    return per_layer
+
+
+def _ftw_gguf_bank_types(model_path, model_config) -> dict[int, tuple[int, int, int]] | None:
+    """The bare-header scan's FTW analog: an FTW dir has no .gguf tensor table to scan,
+    so the (gate, up, down) int triples the converter persists in the index's
+    ``gguf_types`` meta are the bank types (the same values the loader's guard validates
+    in checkpoint/ftw.py). None - and the capability gate stays rejected - when the path
+    is not an FTW gguf checkpoint or the meta is absent/malformed: an unverifiable layout
+    must never pass a gate."""
+    from freetoken.checkpoint.ftw import INDEX_NAME, ftw_quant_format, is_ftw_checkpoint
+
+    if not model_path or not is_ftw_checkpoint(model_path):
+        return None
+    num_moe = int(getattr(model_config, "num_moe_layers", 0) or 0)
+    if num_moe <= 0 or ftw_quant_format(model_path) != "gguf":
+        return None
+    try:
+        with open(os.path.join(model_path, INDEX_NAME)) as f:
+            meta = json.load(f).get("gguf_types")
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(meta, list)
+        or len(meta) != num_moe
+        or not all(
+            isinstance(row, (list, tuple))
+            and len(row) == 3
+            and all(isinstance(t, int) for t in row)
+            for row in meta
+        )
+    ):
+        return None
+    return {layer: tuple(row) for layer, row in enumerate(meta)}
+
+
+def gguf_expert_bank_types(model_path, model_config) -> dict[int, tuple[int, int, int]] | None:
+    """Role-ordered (gate, up, down) ggml type id of every routed-expert bank layer of a
+    bare .gguf file, from its tensor table alone (see ``_gguf_bank_role_infos``).
+
+    For an FTW checkpoint (index + segments, nothing to scan) the converter's persisted
+    ``gguf_types`` index meta answers instead (``_ftw_gguf_bank_types``).
+
+    The engine's hybrid gate consults this at config time, before any bank is loaded.
+    ``None`` when neither source can prove the bank types - unverifiable types must
+    never pass a capability gate; offload stays the always-safe fallback."""
+    per_layer = _gguf_bank_role_infos(model_path, model_config)
+    if per_layer is None:
+        return _ftw_gguf_bank_types(model_path, model_config)
+    types = {}
+    for layer, stacks in per_layer.items():
+        if "gate_up" in stacks:
+            gate_up = stacks["gate_up"].ggml_type
+            types[layer] = (gate_up, gate_up, stacks["down"].ggml_type)
+        else:
+            types[layer] = (
+                stacks["gate"].ggml_type,
+                stacks["up"].ggml_type,
+                stacks["down"].ggml_type,
+            )
+    return types
+
+
+def gguf_signature_groups(model_path, model_config) -> tuple[list[list[int]], list[int]] | None:
+    """(signature groups, per-group slot bytes) of a bare .gguf file, from its tensor
+    table alone (header-only, milliseconds, no tensor data).
+
+    Groups mirror the loaded banks' pool grouping (``bank_layouts``): the gguf provider
+    packs each bank layer as one (gate_up [E, 2I, row_bytes]) plus one down bank, so two
+    layers share a signature iff their (type, rows, row bytes) agree per bank. Slot
+    bytes match ``layer_slot_bytes`` on the loaded banks. ``None`` keeps the late split
+    check as the only gate - an unprovable layout must never fail a boot the real banks
+    would fund."""
+    per_layer = _gguf_bank_role_infos(model_path, model_config)
+    if per_layer is None:
+        return None
+    keys: dict[int, tuple] = {}
+    for layer, stacks in per_layer.items():
+        infos = [stacks["gate_up"], stacks["down"]] if "gate_up" in stacks else [
+            # separate gate + up stacks: the loader merges them into one gate_up bank
+            # (same type and row width, else the load itself fails)
+            stacks["gate"],
+            stacks["up"],
+            stacks["down"],
+        ]
+        keys[layer] = tuple(
+            (info.ggml_type, int(info.ne[1]), int(info.nbytes) // (int(info.ne[1]) * int(info.ne[2])))
+            for info in infos
+        )
+    groups: dict[tuple, list[int]] = {}
+    for layer in range(len(keys)):
+        groups.setdefault(keys[layer], []).append(layer)
+    return list(groups.values()), [
+        sum(rows * row_bytes for _, rows, row_bytes in key) for key in groups
+    ]

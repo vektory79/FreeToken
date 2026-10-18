@@ -10,6 +10,31 @@ import json
 
 from .reader import load_gguf_metadata
 
+# glm4 pre-tokenization, ported verbatim from the reference pre_tokenizer
+# (RedHatAI GLM-5.3-Flash-NVFP4 tokenizer.json; the gguf declares pre=glm4).
+_GLM4_SPLIT_REGEX = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+    r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+    r"|\p{N}{1,3}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
+
+def _glm4_pre_tokenizer():
+    """The reference glm4 Sequence pre-tokenizer rebuilt natively (no ref file)."""
+    from tokenizers import Regex
+    from tokenizers.pre_tokenizers import ByteLevel, Sequence, Split
+
+    return Sequence(
+        [
+            Split(Regex(_GLM4_SPLIT_REGEX), behavior="isolated", invert=False),
+            ByteLevel(add_prefix_space=False, trim_offsets=True, use_regex=False),
+        ]
+    )
+
 # end-of-generation token names from llama.cpp (llama_vocab::impl::load in src/llama-vocab.cpp): a GGUF stores one eos id and no stop list
 _EOG_NAMES = frozenset((
     "<|eot_id|>", "<|im_end|>", "<|end|>", "<|return|>", "<|call|>", "<|flush|>", "<|calls|>", "<end_of_turn>",
@@ -82,6 +107,10 @@ def load_gguf_tokenizer(model_path: str):
     fast = _fix_added_tokens(fast, meta)
     if meta.get("tokenizer.ggml.model") == "gpt2" and meta.get("tokenizer.ggml.pre") in _IGNORE_MERGES_PRE:
         fast.model.ignore_merges = True
+    # glm5next only: the converter's GPT-2 regex glues the space onto digit runs
+    # ("Ġ100"); swap in the reference glm4 scheme so numerals survive encoding.
+    if arch == "glm5next":
+        fast.pre_tokenizer = _glm4_pre_tokenizer()
     # special: bos/eos/unk/pad as the file names them (None when absent) and the chat template
     return PreTrainedTokenizerFast(
         tokenizer_object=fast,

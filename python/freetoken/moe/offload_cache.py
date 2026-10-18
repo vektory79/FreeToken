@@ -78,10 +78,7 @@ _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     # DeepSeek-V4 FP4: packed e2m1 codes + e8m0 per-32 block scales, no global scale
     # (4 banks). Read by DeepSeek-V4's own DS-FP4 grouped GEMV kernels via pool_bank_views().
     "ds_fp4": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
-    # glm5next native-GGUF banks: three separate stacked banks (gate/up/down), each
-    # row packed in the layer's own ggml type (per-layer IQ3_XXS/IQ4_XS/Q6_K mix);
-    # the type rides the cache's gguf_types, not the schema.
-    "gguf": ("gate", "up", "down"),
+    # gguf keeps the merged gate_up+down banks (same-type gate/up stacks are merged by the loader); the three-separate-stack layout was pre-merge
 }
 
 # lives in kernel/aot_models.py: the AOT row table shares it and must stay importable in the torch-only kernel-cache build env, which cannot import freetoken.moe

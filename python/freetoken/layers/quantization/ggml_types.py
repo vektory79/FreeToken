@@ -43,9 +43,13 @@ def row_bytes(ggml_type: int, k: int) -> int:
     return k // block * size
 
 
-def pad_rows(k: int) -> int:
-    """Zero rows to append after a packed [rows, K] matrix so ggml's tail reads stay inside it."""
-    return 0 if k % MATRIX_ROW_PADDING == 0 else 1
+def pad_rows(ggml_type: int, k: int) -> int:
+    """Packed rows to append after a [rows, K] quantized matrix so ggml's tail reads stay inside it (0 when K already covers the padding or the rows are float)."""
+    rem = k % MATRIX_ROW_PADDING
+    if rem == 0 or not is_quantized(ggml_type):
+        return 0
+    # the tail is row_bytes(MATRIX_ROW_PADDING - rem), which need not be a whole number of rows: round up
+    return -(-mmq_tail_bytes(ggml_type, k) // row_bytes(ggml_type, k))
 
 
 def mmq_tail_bytes(ggml_type: int, k: int) -> int:

@@ -8,40 +8,37 @@ delegates to ``glm5_next.config.parse_config`` -- the same ``ModelConfig`` /
 ``Glm5NextArgs`` payload the HF path produces, sourced from GGUF KV metadata
 instead of a HF config object. Weight iteration translates the gguf tensor names
 to the params ``models/glm5_next/weight.py`` yields for HF checkpoints (fused
-KDA in_proj / conv1d, fused DSA kv_b_proj, derived A_log); routed-expert banks
-stream verbatim (ggml type intact) via ``iter_gguf_expert_sources``.
+KDA in_proj / conv1d, fused DSA kv_b_proj, derived A_log); quantized linears
+yield their packed ggml rows under the GGUF segment naming, and routed-expert
+banks load separately with their ggml type intact (``moe/expert_banks`` ->
+``models/gguf/experts``).
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Iterator
 
+import numpy as np
 import torch
 
-from freetoken.layers.base import BaseOP
+from freetoken.layers.quantization.ggml_types import float_dtype, row_bytes, type_name
+from freetoken.models.gguf.reader import GgufTensorInfo, gguf_tensor_index
+from freetoken.models.gguf.tensors import float_tensor, fused, matrix
 from freetoken.models.glm5_next.args import DSA_LAYER, KDA_LAYER
-def _deferred_port(*_a):
-    raise ImportError(
-        "glm5next gguf loading needs models/gguf/dequant.py, removed by main's"
-        " vendored-ggml re-platform; re-landing the loader is deferred"
-    )
+from freetoken.third_party import gguf as ggml
 
-
-def __getattr__(name):
-    # dequant helpers went away with the gguf re-platform; the loader raises the
-    # deferred-port error only when it actually runs, so the package stays importable
-    if name in ("GGML_NAME", "GGML_Q6_K", "GGML_Q8_0", "dequantize", "row_bytes"):
-        _deferred_port()
-    raise AttributeError(name)
+# the two block types the convert contract pins (embedding table / untied head)
+_GGML_Q8_0 = int(ggml.GGMLQuantizationType.Q8_0)
+_GGML_Q6_K = int(ggml.GGMLQuantizationType.Q6_K)
 
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
     from freetoken.models.gguf.config import GgufConfigShim
-    from freetoken.models.gguf.reader import GgufTensor
     from freetoken.models.glm5_next.config import VisionConfig
 
 logger = logging.getLogger(__name__)
@@ -363,7 +360,7 @@ def iter_gguf_vision_weights(
     a missing vision block or an incomplete patch-slice set raises ValueError
     naming the fact - no silent skips.
     """
-    from freetoken.models.gguf.reader import gguf_architecture, iter_gguf_tensors, load_gguf_metadata
+    from freetoken.models.gguf.reader import gguf_architecture, gguf_tensor_index, load_gguf_metadata
 
     # device is accepted for reader-signature parity with the HF iter_vision_weights;
     # the loader materializes onto the model params from these CPU tensors
@@ -377,7 +374,7 @@ def iter_gguf_vision_weights(
     depth = int(load_gguf_metadata(mmproj_path)["clip.vision.block_count"])
     blocks: set[int] = set()
     patch: dict[int, tuple[str, torch.Tensor]] = {}
-    for t in iter_gguf_tensors(mmproj_path):
+    for t in gguf_tensor_index(mmproj_path).values():
         name = t.name
         tensor = _cast(t, torch.bfloat16)
         if name.startswith("v.blk."):
@@ -616,7 +613,8 @@ def parse_gguf_config(shim: "GgufConfigShim") -> "ModelConfig":
         routed_scaling_factor=float(g("expert_weights_scale")),
         tie_word_embeddings=bool(shim.tie_word_embeddings),
     )
-    # gguf marker for the model build (gemma4 precedent): is_gguf_model keys on it.
+    # the gguf marker the model build keys on: moe_weight_format="gguf" drives the
+    # engine's GGUF strategy gates and the expert-bank format dispatch.
     return replace(
         parse_config(
             SimpleNamespace(
@@ -643,9 +641,10 @@ def parse_gguf_config(shim: "GgufConfigShim") -> "ModelConfig":
 # --------------------------------------------------------------------------------------
 
 # Routed-expert stacks: NOT yielded by iter_gguf_weights (mirrors the HF path, where
-# routed experts only serve from the offload cache); iter_gguf_expert_sources streams
-# them with their ggml type intact - quant dispatch is Phase 4/5 and must not see
-# dequantized copies (dequant.py has no IQ/Q3_K/Q4_K support either).
+# routed experts only serve from the offload cache); they load with their ggml type
+# intact through moe/expert_banks -> models/gguf/experts. A bank under
+# leading_dense_block_count is a corrupt file: models/gguf/experts rejects it loudly
+# instead of desyncing the bank count the offload cache allocates.
 _EXPERT_BANK_ROLES = {
     "ffn_gate_exps.weight": "gate",
     "ffn_up_exps.weight": "up",
@@ -655,9 +654,10 @@ _EXPERT_BANK_ROLES = {
 # suffix (after "blk.N.") -> (FreeToken param name, cast). "qw" yields the packed
 # block bytes under the .qweight name (Phase 4 native-quant path, gemma4 convention);
 # "bf16"/"fp32" dequantize in place, matching the dtype weight.py yields for HF
-# checkpoints: layer norms + o_norm + indexer linears bf16, A_log / dt_bias / hc_* /
+# checkpoints: layer norms + o_norm + indexer norms bf16, A_log / dt_bias / hc_* /
 # e_score_correction_bias / ape fp32. hc_*_fn and the indexer linears are Q8_0 in the
-# gguf but dense downstream, so they dequantize here.
+# gguf but dense downstream, so they dequantize here. "qw" entries become packed
+# GGUF linears (segment ``weight`` params, convert contract Q8_0).
 _COMMON_LAYER_MAP = {
     "attn_norm.weight": ("input_layernorm.weight", "bf16"),
     "ffn_norm.weight": ("post_attention_layernorm.weight", "bf16"),
@@ -668,6 +668,10 @@ _COMMON_LAYER_MAP = {
     "hc_ffn_base.weight": ("hc_ffn_base", "fp32"),
     "hc_ffn_scale.weight": ("hc_ffn_scale", "fp32"),
 }
+# per layer-class rows MINUS the bespoke fusions (in_proj / conv1d / kv_b_proj) and
+# the KDA derived params (ssm_a -> A_log, ssm_dt.bias -> dt_bias), which iter emits
+# explicitly; the indexer's wq_b is listed bf16 here but ships as a Q8_0 GGUF linear
+# on the new stack (it is built with the checkpoint's quant config).
 _KDA_LAYER_MAP = {
     "ssm_f_b.weight": ("self_attn.f_b_proj.weight", "qw"),
     "ssm_g_b.weight": ("self_attn.g_b_proj.weight", "qw"),
@@ -681,8 +685,8 @@ _DSA_LAYER_MAP = {
     "attn_kv_a_mqa.weight": ("self_attn.kv_a_proj_with_mqa.weight", "qw"),
     "attn_kv_a_norm.weight": ("self_attn.kv_a_layernorm.weight", "bf16"),
     "attn_output.weight": ("self_attn.o_proj.weight", "qw"),
+    "indexer.attn_q_b.weight": ("self_attn.indexer.wq_b.weight", "qw"),
     "indexer.attn_k.weight": ("self_attn.indexer.wk.weight", "bf16"),
-    "indexer.attn_q_b.weight": ("self_attn.indexer.wq_b.weight", "bf16"),
     "indexer.proj.weight": ("self_attn.indexer.weights_proj.weight", "bf16"),
     "indexer.k_norm.weight": ("self_attn.indexer.k_norm.weight", "bf16"),
     "indexer.k_norm.bias": ("self_attn.indexer.k_norm.bias", "bf16"),
@@ -702,49 +706,54 @@ _MOE_MAP = {
     "ffn_down_shexp.weight": ("mlp.shared_experts.down_proj.weight", "qw"),
 }
 
-# KDA in_proj fusion slots. The concat order q|k|v|b|f_a|g_a is pinned by the
-# consumer: Glm5NextKDA._in_proj_split = [p, p, p, h, d, d] (kda.py:64-65) and
-# weight.py:94 _KDA_IN_PROJ = (q_proj, k_proj, v_proj, b_proj, f_a_proj, g_a_proj).
-_IN_PROJ_SLOTS = {
-    "attn_q.weight": "q",
-    "attn_k.weight": "k",
-    "attn_v.weight": "v",
-    "ssm_beta.weight": "b",
-    "ssm_f_a.weight": "f_a",
-    "ssm_g_a.weight": "g_a",
-}
-_IN_PROJ_SLOT_ORDER = ("q", "k", "v", "b", "f_a", "g_a")
 
-# KDA conv1d fusion: one depthwise conv over the merged q|k|v stream; weight.py
-# concatenates {q,k,v}_conv1d on the channel axis, Glm5NextKDA.conv1d is (24576, 1, 4).
-_CONV_SLOTS = {
-    "ssm_conv1d_q.weight": "q",
-    "ssm_conv1d_k.weight": "k",
-    "ssm_conv1d_v.weight": "v",
-}
-_CONV_SLOT_ORDER = ("q", "k", "v")
-
-_KV_B_SLOTS = {"attn_k_b.weight": "k", "attn_v_b.weight": "v"}
+def _cuda_target(device: torch.device | str | None) -> torch.device | None:
+    """The CUDA device to decode quantized rows on, or None for the numpy path."""
+    if device is None or torch.device(device).type != "cuda":
+        return None
+    return torch.device(device)
 
 
-def _cast(t: "GgufTensor", dtype: torch.dtype) -> torch.Tensor:
-    """Dense ``dtype`` tensor from a (possibly quantized) GgufTensor: dequantize.py
-    returns storage-order values, the caller reshapes to the torch shape."""
-    return dequantize(t.packed().reshape(-1), t.ggml_type, dtype).reshape(t.shape)
+def _cast(info: GgufTensorInfo, dtype: torch.dtype, device: torch.device | None = None) -> torch.Tensor:
+    """Dense ``dtype`` tensor in torch order from a (possibly quantized) tensor.
+
+    The GPU path decodes with the vendored ggml kernel on ``device`` (the packed
+    rows move to CUDA as packed bytes - the kernel takes device tensors, a host
+    dequant would not even feed it), the CPU path with the vendored gguf-py numpy
+    quants; the two never mix within one tensor (their fp16 scale chains round
+    differently in edge cases)."""
+    native = float_dtype(info.ggml_type)
+    if native is not None:
+        return float_tensor(info).to(dtype)
+    ne = tuple(int(d) for d in info.ne)
+    k, rows = ne[0], int(math.prod(ne[1:]))
+    target = _cuda_target(device)
+    if target is not None:
+        from freetoken.kernel import ggml as ggml_kernel
+
+        flat = ggml_kernel.dequantize(matrix(info).to(target), info.ggml_type, k, dtype)
+    else:
+        from freetoken.third_party.gguf import quants
+
+        vals = quants.dequantize(
+            info.data().reshape(rows, info.nbytes // rows),
+            ggml.GGMLQuantizationType(info.ggml_type),
+        )
+        flat = torch.from_numpy(np.ascontiguousarray(vals)).to(dtype)
+    return flat.reshape(tuple(reversed(ne)))
 
 
 def _logged(
-    name: str, tensor: torch.Tensor, t: "GgufTensor | None" = None, note: str = ""
+    name: str, tensor: torch.Tensor, info: GgufTensorInfo | None = None, note: str = ""
 ) -> torch.Tensor:
     """Plan acceptance 'dtype/type per tensor logged': one debug line per yield,
     silent at INFO so serving never pays for it."""
-    if t is not None:
+    if info is not None:
         logger.debug(
-            "glm5next %s: ggml %s %dx%dB -> %s %s",
+            "glm5next %s: ggml %s %s -> %s %s",
             name,
-            GGML_NAME.get(t.ggml_type, t.ggml_type),
-            t.rows,
-            t.row_bytes,
+            type_name(info.ggml_type),
+            tuple(int(d) for d in info.ne),
             tuple(tensor.shape),
             tensor.dtype,
         )
@@ -755,10 +764,10 @@ def _logged(
     return tensor
 
 
-def _a_log(t: "GgufTensor", name: str) -> torch.Tensor:
+def _a_log(info: GgufTensorInfo, name: str, device: torch.device | None = None) -> torch.Tensor:
     # gguf stores -exp(A_log) per head (kimi-k3 convention, glm5next.cpp:7); invert
     # in fp32 - the recurrent kernels read A_log as fp32 (kda.py gate params).
-    ssm = _cast(t, torch.float32)
+    ssm = _cast(info, torch.float32, device)
     if bool((ssm >= 0).any()):
         raise ValueError(
             f"{name}: ssm_a holds -exp(A_log) but {int((ssm >= 0).sum())} entries "
@@ -767,7 +776,7 @@ def _a_log(t: "GgufTensor", name: str) -> torch.Tensor:
     return torch.log(-ssm)
 
 
-def _fuse_kv_b(k_b: "GgufTensor", v_b: "GgufTensor") -> torch.Tensor:
+def _fuse_kv_b(k_b: GgufTensorInfo, v_b: GgufTensorInfo, device: torch.device | None = None) -> torch.Tensor:
     """kv_b_proj.weight from the two 3D Q8_0 tensors - the #1 silent-corruption risk.
 
     Axis convention (unit-verifiable against an HF checkpoint): attn_k_b reads
@@ -780,8 +789,8 @@ def _fuse_kv_b(k_b: "GgufTensor", v_b: "GgufTensor") -> torch.Tensor:
     (k_b packs qk_head, the target packs kv_lora), so both pieces dequantize to
     bf16; a packed fusion is impossible here.
     """
-    k = _cast(k_b, torch.bfloat16).transpose(1, 2)
-    v = _cast(v_b, torch.bfloat16)
+    k = _cast(k_b, torch.bfloat16, device).transpose(1, 2)
+    v = _cast(v_b, torch.bfloat16, device)
     heads, k_rows, kv_lora = k.shape
     return torch.cat([k, v], dim=1).reshape(heads * (k_rows + v.shape[1]), kv_lora)
 
@@ -805,171 +814,185 @@ def iter_gguf_weights(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield (param_name, tensor) for every non-expert glm5next param.
 
-    Q8_0/Q6_K projections yield packed ``.qweight`` uint8 [rows, row_bytes] for the
-    Phase 4 native-quant ops (gemma4 convention); rows named "bf16"/"fp32" in the
-    maps yield dense casts instead. Fused targets (in_proj, conv1d, kv_b_proj) emit
-    once all their pieces are seen; anything without a map entry raises ValueError
-    naming the tensor, and blk.45 (MTP/NextN) is skipped entirely.
+    Quantized linears yield packed ggml rows under the GGUF linear's segment
+    names (``weight``, ``weight_1``, ... via ``tensors.fused``), filling exactly
+    the buffers ``GGUFLinearMethod.create_weights`` allocates; the kv_b_proj /
+    conv1d fusions and every bf16/fp32 row yield dense casts (the MLA absorption
+    and the depthwise conv read unquantized weights). Routed-expert banks are
+    not yielded here: they load through ``moe/expert_banks`` ->
+    ``models/gguf/experts``. A tensor without a mapping raises ValueError naming
+    the tensor, and blk.{n_layer} (MTP/NextN) is skipped entirely.
 
     include_vision defaults False: a bare .gguf carries no vision tensors, and the
     text-only spec's loader call passes no include_vision at all. load_weight passes
     True together with the mmproj path once the family registers encoders and the
     boot carries --mmproj; the visual.* tensors then stream after the text trunk.
     """
-    from freetoken.models.gguf.reader import iter_gguf_tensors
     from freetoken.utils import cached_load_hf_config
 
-    # caller contract (same as the HF reader): routed experts stream via
-    # iter_gguf_expert_sources; ValueError so the guards survive python -O.
+    # caller contract (same as the HF reader): routed experts load as GGUF expert
+    # banks; ValueError so the guards survive python -O.
     if include_moe_experts:
         raise ValueError("glm5next GGUF: include_moe_experts=True is not supported")
     if not include_non_moe:
         raise ValueError("glm5next GGUF: include_non_moe=False is not supported")
     _require_tp1("weight loading")
     config = parse_gguf_config(cached_load_hf_config(model_path))
+    index = gguf_tensor_index(model_path)
+    hidden = config.hidden_size
     num_layers = config.num_layers
     first_dense = config.first_k_dense_replace
     kda_layers = set(config.glm5_args.kda_layer_ids)
+    consumed: set[str] = set()
 
-    in_proj_buf: dict[int, dict[str, torch.Tensor]] = {}
-    conv_buf: dict[int, dict[str, "GgufTensor"]] = {}
-    kv_b_buf: dict[int, dict[str, "GgufTensor"]] = {}
+    def need(name: str, what: str) -> GgufTensorInfo:
+        info = index.get(name)
+        if info is None:
+            # ValueError, not assert: under python -O a bare assert would vanish and
+            # the loader would silently consume a partial param set.
+            raise ValueError(f"glm5next GGUF: {what} is missing tensor {name}")
+        consumed.add(name)
+        return info
 
-    for t in iter_gguf_tensors(model_path):
-        name = t.name
-        if name == "token_embd.weight":
-            if t.ggml_type != GGML_Q8_0:
-                # the convert swap builds the embedding as Q8_0; a variant dense type
-                # would otherwise die as a late loader shape assert.
-                raise ValueError(
-                    f"{name} is {GGML_NAME.get(t.ggml_type, t.ggml_type)}; "
-                    "the convert swap builds the embedding as Q8_0"
-                )
-            pn = "model.embed_tokens.qweight"
-            yield pn, _logged(pn, t.packed(), t)  # Q8_0 packed table
-            continue
-        if name == "output.weight":
-            if t.ggml_type != GGML_Q6_K:
-                # the untied head swaps to a Q6_K GGUF head (convert contract).
-                raise ValueError(
-                    f"{name} is {GGML_NAME.get(t.ggml_type, t.ggml_type)}; "
-                    "the convert swap builds the untied head as Q6_K"
-                )
-            pn = "lm_head.qweight"
-            yield pn, _logged(pn, t.packed(), t)  # Q6_K packed table
-            continue
-        if name == "output_norm.weight":
-            pn = "model.norm.weight"
-            yield pn, _logged(pn, _cast(t, torch.bfloat16), t)
-            continue
-        if not name.startswith("blk."):
-            raise ValueError(f"unmapped glm5next GGUF tensor: {name}")
-        layer = int(name.split(".")[1])
-        if layer >= num_layers:
-            # blk.45 is the NextN/MTP draft block + its .nextn. glue: no MTP support,
-            # same ignore verdict as the HF path (weight.py never reads that layer).
-            logger.debug("glm5next GGUF: skipping MTP tensor %s", name)
-            continue
-        suffix = name.split(".", 2)[2]
-        if suffix in _EXPERT_BANK_ROLES:
-            continue  # routed banks -> iter_gguf_expert_sources
-        base = f"model.layers.{layer}"
+    def packed_linear(prefix: str, info: GgufTensorInfo):
+        # every map-branch linear is a Q8_0 GGUF linear (convert contract); a
+        # K/iq-quant dense row would otherwise die as a late loader shape assert
+        if info.ggml_type != _GGML_Q8_0:
+            raise ValueError(
+                f"{info.name} is {type_name(info.ggml_type)}; "
+                "the convert swap builds packed linears as Q8_0"
+            )
+        return fused(prefix, [info], [matrix(info)], int(info.ne[0]))
 
-        slot = _IN_PROJ_SLOTS.get(suffix)
-        if slot is not None:
-            in_proj_buf.setdefault(layer, {})[slot] = t.packed()
-        elif suffix in _CONV_SLOTS:
-            conv_buf.setdefault(layer, {})[_CONV_SLOTS[suffix]] = t
-        elif suffix in _KV_B_SLOTS:
-            kv_b_buf.setdefault(layer, {})[_KV_B_SLOTS[suffix]] = t
-        elif suffix == "ssm_a":
-            pn = f"{base}.self_attn.A_log"
-            yield pn, _logged(pn, _a_log(t, name), note="derived from ssm_a fp32")
-        elif suffix == "ssm_dt.bias":
-            # dt ships in a .bias tensor but is a plain fp32 param, no Linear behind it
-            pn = f"{base}.self_attn.dt_bias"
-            yield pn, _logged(pn, _cast(t, torch.float32), t)
-        else:
-            table = _KDA_LAYER_MAP if layer in kda_layers else _DSA_LAYER_MAP
-            entry = table.get(suffix) or _COMMON_LAYER_MAP.get(suffix)
-            if entry is None:
-                entry = (
-                    _DENSE_FFN_MAP.get(suffix)
-                    if layer < first_dense
-                    else _MOE_MAP.get(suffix)
-                )
-            if entry is None:
-                raise ValueError(f"unmapped glm5next GGUF tensor: {name}")
-            rel, cast = entry
-            if cast == "qw":
-                if t.ggml_type != GGML_Q8_0:
-                    # every map-branch linear swaps to a Q8_0 GGUFLinear; a K/iq-quant
-                    # dense row would otherwise die as a late loader shape assert.
+    def dense(owner: str, param: str, info: GgufTensorInfo, cast: str):
+        pn = f"{owner}.{param}"
+        return pn, _logged(
+            pn, _cast(info, torch.bfloat16 if cast == "bf16" else torch.float32, device), info
+        )
+
+    # token_embd / output: the convert contract pins the table types; a variant
+    # dense type would otherwise die as a late loader shape assert.
+    emb = need("token_embd.weight", "the vocab table")
+    if emb.ggml_type != _GGML_Q8_0:
+        raise ValueError(
+            f"token_embd.weight is {type_name(emb.ggml_type)}; "
+            "the convert swap builds the embedding as Q8_0"
+        )
+    yield from fused("model.embed_tokens", [emb], [matrix(emb)], hidden)
+    if config.tie_word_embeddings:
+        # the iterator would otherwise die late on the missing lm_head tensors
+        raise ValueError(
+            "glm5next gguf serving requires the untied file (output.weight present); "
+            "the tied variant has no lm_head path yet"
+        )
+    out = need("output.weight", "the untied head")
+    if out.ggml_type != _GGML_Q6_K:
+        raise ValueError(
+            f"output.weight is {type_name(out.ggml_type)}; "
+            "the convert swap builds the untied head as Q6_K"
+        )
+    yield from fused("lm_head", [out], [matrix(out)], hidden)
+    yield dense("model.norm", "weight", need("output_norm.weight", "the final norm"), "bf16")
+
+    for layer in range(num_layers):
+        blk, pre = f"blk.{layer}", f"model.layers.{layer}"
+        sa = f"{pre}.self_attn"
+        for suffix, (param, cast) in _COMMON_LAYER_MAP.items():
+            yield dense(pre, param, need(f"{blk}.{suffix}", f"layer {layer}"), cast)
+        layer_map = _KDA_LAYER_MAP if layer in kda_layers else _DSA_LAYER_MAP
+        if layer in kda_layers:
+            # in_proj fusion slots: the concat order q|k|v|b|f_a|g_a is pinned by the
+            # consumer, Glm5NextKDA._in_proj_split = [p, p, p, h, d, d] (kda.py) and
+            # weight.py's _KDA_IN_PROJ leaf order
+            pieces = [
+                need(f"{blk}.{s}.weight", f"layer {layer} in_proj")
+                for s in ("attn_q", "attn_k", "attn_v", "ssm_beta", "ssm_f_a", "ssm_g_a")
+            ]
+            for p in pieces:
+                if p.ggml_type != _GGML_Q8_0:
                     raise ValueError(
-                        f"{name} is {GGML_NAME.get(t.ggml_type, t.ggml_type)}; "
+                        f"{p.name} is {type_name(p.ggml_type)}; "
                         "the convert swap builds packed linears as Q8_0"
                     )
-                pn = f"{base}.{rel[: -len('.weight')]}.qweight"
-                yield pn, _logged(pn, t.packed(), t)
-            else:
-                pn = f"{base}.{rel}"
-                yield pn, _logged(
-                    pn,
-                    _cast(t, torch.bfloat16 if cast == "bf16" else torch.float32),
-                    t,
-                )
-
-        # Emit fused targets once all pieces are present (gemma4 buffer pattern).
-        slots = in_proj_buf.get(layer)
-        if slots is not None and len(slots) == len(_IN_PROJ_SLOT_ORDER):
-            widths = {s: p.shape[1] for s, p in slots.items()}
-            if len(set(widths.values())) > 1:
-                # packed cat needs one row width; a mixed-type variant would otherwise
-                # die inside torch.cat with a tensor-less error.
+            widths = {row_bytes(p.ggml_type, int(p.ne[0])) for p in pieces}
+            if len(widths) > 1:
+                # the packed cat needs one row width; a mixed-type variant would
+                # otherwise die inside torch.cat with a tensor-less error
                 raise ValueError(
                     f"glm5next GGUF: layer {layer} in_proj pieces mix row_bytes {widths}"
                 )
-            # packed concat is exact: every piece has ne0 = 4096 -> same row_bytes
-            pn = f"{base}.self_attn.in_proj.qweight"
+            # packed concat is exact: every piece has ne0 == hidden -> one row width;
+            # the q|k|v|b|f_a|g_a order is pinned by Glm5NextKDA._in_proj_split
+            yield from fused(f"{sa}.in_proj", pieces, [matrix(p) for p in pieces], hidden)
+            conv = [
+                need(f"{blk}.ssm_conv1d_{p}.weight", f"layer {layer} conv1d")
+                for p in ("q", "k", "v")
+            ]
+            pn = f"{sa}.conv1d.weight"
             yield pn, _logged(
                 pn,
-                torch.cat([slots[s] for s in _IN_PROJ_SLOT_ORDER], dim=0),
-                note="fused in_proj q|k|v|b|f_a|g_a packed",
-            )
-            del in_proj_buf[layer]
-        cbuf = conv_buf.get(layer)
-        if cbuf is not None and len(cbuf) == len(_CONV_SLOT_ORDER):
-            pn = f"{base}.self_attn.conv1d.weight"
-            yield pn, _logged(
-                pn,
-                torch.cat(
-                    [_cast(cbuf[s], torch.bfloat16) for s in _CONV_SLOT_ORDER], dim=0
-                ),
+                torch.cat([_cast(t, torch.bfloat16, device) for t in conv], dim=0),
                 note="fused conv1d q|k|v channel cat, bf16",
             )
-            del conv_buf[layer]
-        kbuf = kv_b_buf.get(layer)
-        if kbuf is not None and len(kbuf) == len(_KV_B_SLOTS):
-            pn = f"{base}.self_attn.kv_b_proj.weight"
+            pn = f"{sa}.A_log"
             yield pn, _logged(
                 pn,
-                _fuse_kv_b(kbuf["k"], kbuf["v"]),
+                _a_log(need(f"{blk}.ssm_a", f"layer {layer}"), f"{blk}.ssm_a", device),
+                note="derived from ssm_a fp32",
+            )
+            # dt ships in a .bias tensor but is a plain fp32 param, no Linear behind it
+            pn = f"{sa}.dt_bias"
+            yield pn, _logged(pn, _cast(need(f"{blk}.ssm_dt.bias", f"layer {layer}"), torch.float32, device), note="plain fp32 param")
+        else:
+            # kv_b_proj is dense by construction (the MLA absorption reads it as a
+            # bmm operand); _fuse_kv_b owns the #1 silent-corruption axis convention
+            pn = f"{sa}.kv_b_proj.weight"
+            yield pn, _logged(
+                pn,
+                _fuse_kv_b(
+                    need(f"{blk}.attn_k_b.weight", f"layer {layer} kv_b"),
+                    need(f"{blk}.attn_v_b.weight", f"layer {layer} kv_b"),
+                    device,
+                ),
                 note="fused kv_b_proj bf16 (k last-two-axes transpose + v)",
             )
-            del kv_b_buf[layer]
+        for suffix, (param, cast) in layer_map.items():
+            owner, leaf = param.rpartition(".")[0], param.rpartition(".")[2]
+            if cast == "qw":
+                yield from packed_linear(
+                    f"{pre}.{owner}",
+                    need(f"{blk}.{suffix}", f"layer {layer}"),
+                )
+            else:
+                yield dense(f"{pre}.{owner}", leaf, need(f"{blk}.{suffix}", f"layer {layer}"), cast)
+        ffn_map = _DENSE_FFN_MAP if layer < first_dense else _MOE_MAP
+        for suffix, (param, cast) in ffn_map.items():
+            owner, leaf = param.rpartition(".")[0], param.rpartition(".")[2]
+            if cast == "qw":
+                yield from packed_linear(
+                    f"{pre}.{owner}",
+                    need(f"{blk}.{suffix}", f"layer {layer}"),
+                )
+            else:
+                yield dense(f"{pre}.{owner}", leaf, need(f"{blk}.{suffix}", f"layer {layer}"), cast)
 
-    for buf_name, buf in (
-        ("in_proj", in_proj_buf),
-        ("conv1d", conv_buf),
-        ("kv_b", kv_b_buf),
-    ):
-        if buf:
-            # ValueError, not assert: under python -O a bare assert would vanish and
-            # the loader would silently consume a partial param set.
-            raise ValueError(
-                f"glm5next GGUF: incomplete {buf_name} groups "
-                f"{sorted((l, sorted(s)) for l, s in buf.items())}"
-            )
+    # anything the trunk never asked for is a corrupt or unknown file: name it
+    skipped = 0
+    for name in sorted(set(index) - consumed):
+        if name.startswith("blk."):
+            head, sep, suffix = name[len("blk."):].partition(".")
+            if sep and head.isdigit():
+                if int(head) >= num_layers:
+                    # blk.45 is the NextN/MTP draft block + its .nextn. glue: no MTP
+                    # support, same ignore verdict as the HF path (weight.py never
+                    # reads that layer)
+                    skipped += 1
+                    continue
+                if suffix in _EXPERT_BANK_ROLES:
+                    continue  # routed banks -> moe/expert_banks -> models/gguf/experts
+        raise ValueError(f"unmapped glm5next GGUF tensor: {name}")
+    if skipped:
+        logger.debug("glm5next GGUF: skipped %d MTP/draft-block tensors", skipped)
 
     if include_vision:
         if mmproj_path is None:
@@ -980,235 +1003,86 @@ def iter_gguf_weights(
         yield from iter_gguf_vision_weights(mmproj_path)
 
 
-def iter_gguf_expert_sources(
-    model_path: str, config: "ModelConfig"
-) -> Iterator[tuple[int, dict[str, "GgufTensor"]]]:
-    """Stream the stacked routed-expert banks for the offload loader (Phase 5 hook).
-
-    One yield per MoE trunk layer: (layer, {"gate"/"up"/"down": GgufTensor}) with
-    the packed block bytes untouched and the ggml type carried on the tensor (this
-    file mixes IQ3_XXS / IQ4_XS gate+up and IQ4_XS / Q6_K down per layer; the bank
-    loader must dispatch per layer). Bank geometry: gate/up torch (288, 2048, 4096),
-    down (288, 4096, 2048); packed rows run ffn-major within an expert, so a dim-0
-    slice IS one expert's contiguous packed rows - consumers slice, no repack.
-    Yields CHECKPOINT layer ids (first_k_dense_replace .. num_layers-1), not bank
-    indices - the Phase 5 bank loader offsets via bank_layer_of
-    (moe/expert_pieces.py:27-31).
-    """
-    from freetoken.models.gguf.reader import iter_gguf_tensors
-
-    first_dense, num_layers = config.first_k_dense_replace, config.num_layers
-    bufs: dict[int, dict[str, "GgufTensor"]] = {}
-    for t in iter_gguf_tensors(model_path):
-        if not t.name.startswith("blk."):
-            continue
-        role = _EXPERT_BANK_ROLES.get(t.name.split(".", 2)[2])
-        if role is None:
-            continue
-        layer = int(t.name.split(".")[1])
-        if layer < first_dense:
-            # a bank under leading_dense_block_count is a corrupt file: dropping it
-            # silently would desync the bank count the offload cache allocates.
-            raise ValueError(
-                f"glm5next GGUF: routed-expert bank {t.name} on dense layer "
-                f"{layer} (< leading_dense_block_count {first_dense})"
-            )
-        if layer >= num_layers:
-            continue  # blk.45 MTP banks: ignored with the rest of the draft block
-        slots = bufs.setdefault(layer, {})
-        slots[role] = t
-        if len(slots) == len(_EXPERT_BANK_ROLES):
-            yield layer, slots
-            del bufs[layer]
-    if bufs:
-        raise ValueError(
-            f"glm5next GGUF: incomplete expert bank groups "
-            f"{sorted((l, sorted(s)) for l, s in bufs.items())}"
-        )
-
-
 # --------------------------------------------------------------------------------------
-# Model layer swap: packed Q8_0/Q6_K yields -> native GGUF-quant ops (gemma4 pattern).
+# Quant-config adapter: checkpoint module names -> the GGUF tensors that store them.
+# The registry resolves to_gguf per family (register.checkpoint_quant_config) and the
+# GGUFConfig scheme lookup probes it for every quantized module; the dense kv_b / conv
+# fusions map their multi-tensor sets too, but they are unquantized modules, so the
+# one-tensor-per-part rule never fires on them.
 # --------------------------------------------------------------------------------------
 
-
-def is_gguf_model(config: "ModelConfig") -> bool:
-    """True when the model was parsed from a GGUF checkpoint (native-quant path)."""
-    return getattr(config, "moe_weight_format", None) == "gguf"
-
-
-class GGUFLMHead(BaseOP):
-    """Untied LM head over the native Q6_K output table.
-
-    This checkpoint ships output.weight, so unlike gemma4 there is no tied-head
-    path; the prefill last-token slicing mirrors ParallelLMHead.forward. TP=1 only.
-    """
-
-    def __init__(self, num_embeddings: int, embedding_dim: int, quant_type: int):
-        self._quant_type = quant_type
-        self.qweight = torch.empty(
-            num_embeddings, row_bytes(embedding_dim, quant_type), dtype=torch.uint8
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        from freetoken.core import get_global_ctx
-        from freetoken.layers.gguf import fused_mul_mat_gguf
-
-        batch = get_global_ctx().batch
-        if batch.is_prefill:
-            indices = batch.attn_metadata.get_last_indices(batch.size)
-            x = x[indices].contiguous()
-        return fused_mul_mat_gguf(x, self.qweight, self._quant_type)
-
-
-def convert_glm5_next_to_gguf(model, config: "ModelConfig") -> None:
-    """In place: swap the packed Q8_0 projections, the Q8_0 embedding and the Q6_K
-    untied head for the native GGUF ops.
-
-    Only the .qweight-yielded params swap; the bf16/fp32 outputs (kv_b_proj, conv1d,
-    hc_*, indexer, router, e_score_correction_bias) keep the normal path, and the
-    routed experts are untouched (offload banks, Phase 5).
-    """
-    if config.tie_word_embeddings:
-        # the iterator yields lm_head.qweight only when output.weight ships; a tied
-        # variant would die late on that missing key. GGUFTiedLMHead (gemma4) is the
-        # future path once a tied glm5next gguf exists.
-        raise ValueError(
-            "glm5next gguf serving requires the untied file (output.weight present); "
-            "the tied variant has no lm_head path yet (GGUFTiedLMHead is the future "
-            "analog)"
-        )
-    from freetoken.layers.gguf import GGUFEmbedding, GGUFLinear
-
-    inner = model.model
-    inner.embed_tokens = GGUFEmbedding(config.vocab_size, config.hidden_size, GGML_Q8_0)
-
-    def swap(owner, attr):
-        lin = getattr(owner, attr)
-        out_features, in_features = lin.weight.shape
-        setattr(
-            owner,
-            attr,
-            GGUFLinear(in_features, out_features, GGML_Q8_0, has_bias=lin.bias is not None),
-        )
-
-    for layer in inner.layers.op_list:
-        attn = layer.self_attn
-        if hasattr(attn, "in_proj"):  # KDA layer
-            for attr in ("in_proj", "f_b_proj", "g_b_proj", "o_proj"):
-                swap(attn, attr)
-        else:  # DSA/MLA layer: kv_b_proj stays dense (the MLA absorption needs it unquantized)
-            for attr in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "o_proj"):
-                swap(attn, attr)
-        mlp = layer.mlp
-        owner, attrs = (
-            (mlp, ("gate_proj", "up_proj", "down_proj"))
-            if hasattr(mlp, "gate_proj")
-            else (mlp.shared_experts, ("gate_proj", "up_proj", "down_proj"))
-        )
-        for attr in attrs:
-            swap(owner, attr)
-
-    model.lm_head = GGUFLMHead(config.vocab_size, config.hidden_size, GGML_Q6_K)
+_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
+_TOP_LEAVES = {
+    "model.embed_tokens": "token_embd",
+    "lm_head": "output",
+    "model.norm": "output_norm",
+}
+# module leaf (after "model.layers.N.") -> the blk.N tensor-name suffix(es) that store it
+_LEAVES: dict[str, tuple[str, ...]] = {
+    "input_layernorm": ("attn_norm",),
+    "post_attention_layernorm": ("ffn_norm",),
+    "hc_attn_fn": ("hc_attn_fn",),
+    "hc_attn_base": ("hc_attn_base",),
+    "hc_attn_scale": ("hc_attn_scale",),
+    "hc_ffn_fn": ("hc_ffn_fn",),
+    "hc_ffn_base": ("hc_ffn_base",),
+    "hc_ffn_scale": ("hc_ffn_scale",),
+    # KDA in_proj pieces (the packed map splits the fused module back to these)
+    "self_attn.q_proj": ("attn_q",),
+    "self_attn.k_proj": ("attn_k",),
+    "self_attn.v_proj": ("attn_v",),
+    "self_attn.b_proj": ("ssm_beta",),
+    "self_attn.f_a_proj": ("ssm_f_a",),
+    "self_attn.g_a_proj": ("ssm_g_a",),
+    "self_attn.f_b_proj": ("ssm_f_b",),
+    "self_attn.g_b_proj": ("ssm_g_b",),
+    "self_attn.o_proj": ("attn_output",),
+    "self_attn.o_norm": ("ssm_norm",),
+    "self_attn.A_log": ("ssm_a",),
+    "self_attn.dt_bias": ("ssm_dt.bias",),
+    "self_attn.conv1d": ("ssm_conv1d_q", "ssm_conv1d_k", "ssm_conv1d_v"),
+    # DSA / MLA
+    "self_attn.q_a_proj": ("attn_q_a",),
+    "self_attn.q_a_layernorm": ("attn_q_a_norm",),
+    "self_attn.q_b_proj": ("attn_q_b",),
+    "self_attn.kv_a_proj_with_mqa": ("attn_kv_a_mqa",),
+    "self_attn.kv_a_layernorm": ("attn_kv_a_norm",),
+    "self_attn.kv_b_proj": ("attn_k_b", "attn_v_b"),
+    "self_attn.indexer.wk": ("indexer.attn_k",),
+    "self_attn.indexer.wq_b": ("indexer.attn_q_b",),
+    "self_attn.indexer.weights_proj": ("indexer.proj",),
+    "self_attn.indexer.k_norm": ("indexer.k_norm",),
+    "self_attn.indexer.k_norm.bias": ("indexer.k_norm.bias",),
+    "self_attn.indexer.index_kpool_compress_gate": ("indexer_compressor_gate",),
+    "self_attn.indexer.index_kpool_compress_ape": ("indexer_compressor_ape",),
+    # FFN: dense-lead MLP
+    "mlp.gate_proj": ("ffn_gate",),
+    "mlp.up_proj": ("ffn_up",),
+    "mlp.down_proj": ("ffn_down",),
+    # MoE trunk: router, correction bias, shared expert, routed-expert stacks
+    "mlp.gate": ("ffn_gate_inp",),
+    "mlp.e_score_correction_bias": ("exp_probs_b.bias",),
+    "mlp.shared_experts.gate_proj": ("ffn_gate_shexp",),
+    "mlp.shared_experts.up_proj": ("ffn_up_shexp",),
+    "mlp.shared_experts.down_proj": ("ffn_down_shexp",),
+    "mlp.experts.0.gate_proj": ("ffn_gate_exps",),
+    "mlp.experts.0.up_proj": ("ffn_up_exps",),
+    "mlp.experts.0.down_proj": ("ffn_down_exps",),
+}
 
 
-def load_gguf_expert_sources(model_path: str, model_config, *, layer_sink=None):
-    """Offload-bank hook (weight.py resolves it by name): per MoE BANK layer, the
-    three stacked bank tensors as packed uint8 views ([E, rows, row_bytes], bytes
-    and ggml type verbatim - no dequant, no repack; a dim-0 slice is one expert's
-    contiguous rows) plus the per-layer (gate, up, down) ggml type ints, built in
-    ROLE order - never the file's tensor encounter order (the offload dispatch
-    unpacks (gate, up, down)). Checkpoint layer ids offset to bank indices via
-    first_k_dense_replace (bank_layer_of contract).
-
-    Banks are materialized into pinned per-layer HostBanks (q4_0 parity): a
-    device_ptr on the file-backed mmap VA is an illegal access at the first copy,
-    and cudaHostRegister cannot take the GGUF mmap's 32B alignment - so each bank
-    is a one-time copy into its own allocation, pinned as its layer completes.
-    ``layer_sink`` (converter) fires per completed layer instead; nothing is
-    pinned and the sink owns the banks from then on.
-    """
-    from freetoken.layers.gguf import _MMVQ
-    from freetoken.moe.host_banks import HostBank, LayerCompletionTracker, PinPipeline
-
-    first = model_config.first_k_dense_replace
-    num_moe = model_config.num_moe_layers
-    n_expert = model_config.num_experts
-    roles = ("gate", "up", "down")
-
-    # First pass: geometry + type validation, loud, before any allocation. Rows are
-    # PER ROLE - down packs H output rows while gate/up pack I, so a single
-    # gate-derived row count reshapes the down bank wrong (review B1).
-    specs: dict[int, dict[str, tuple[int, int]]] = {}
-    for layer, slots in iter_gguf_expert_sources(model_path, model_config):
-        bank = layer - first
-        if not 0 <= bank < num_moe:
-            raise ValueError(f"gguf expert bank for checkpoint layer {layer} outside the MoE trunk")
-        if set(slots) != set(roles):
-            raise ValueError(
-                f"gguf expert bank for checkpoint layer {layer}: roles "
-                f"{sorted(slots)} != {sorted(roles)}"
-            )
-        per = {}
-        for role in roles:
-            t = slots[role]
-            gt = int(t.ggml_type)
-            if gt not in _MMVQ:
-                raise ValueError(
-                    f"gguf expert bank {t.name!r}: ggml type {gt} has no MMVQ kernel "
-                    f"(supported: {sorted(_MMVQ)}); the moe_vec switch would return zeros"
-                )
-            # ggml ne0 = the linear INPUT dim (drives the row width), ne1 = OUTPUT
-            # rows; packed() is the raw byte view, so the width comes from ne0 +
-            # BLOCK_SHAPE (ggml_type).
-            per[role] = (int(t.shape[1]), row_bytes(int(t.shape[-1]), gt))
-        specs[bank] = per
-    missing = [i for i in range(num_moe) if i not in specs]
-    if missing:
-        raise ValueError(f"gguf expert banks missing for bank layers {missing}")
-
-    hb = {
-        role: [HostBank((n_expert, *specs[bank][role]), torch.uint8) for bank in range(num_moe)]
-        for role in roles
-    }
-    banks = {role: [b.tensor for b in per] for role, per in hb.items()}
-    types: list = [None] * num_moe
-
-    def _fill(sink) -> None:
-        # One pass over the file; a layer completes when all three of its banks have
-        # landed, which is when the tracker hands it to the PinPipeline (serving) or
-        # the converter sink.
-        # ONE completion event per layer: all three of its banks are copied together
-        # above, so the tracker fires the pin immediately after that single note.
-        # (expected_per_layer must MATCH the note count - gemma4 notes per write, 2x
-        # per layer; a mismatch means on_layer never fires and NOTHING gets pinned,
-        # which surfaces as an IMA at the first decode copy, not at load.)
-        tracker = LayerCompletionTracker(1, hb, sink) if sink is not None else None
-        for layer, slots in iter_gguf_expert_sources(model_path, model_config):
-            bank = layer - first
-            for role in roles:
-                t = slots[role]
-                rows, rb = specs[bank][role]
-                banks[role][bank].copy_(t.packed().reshape(n_expert, rows, rb))
-            types[bank] = tuple(int(slots[r].ggml_type) for r in roles)
-            if tracker is not None:
-                tracker.note(bank)
-
-    if layer_sink is not None:
-        _fill(layer_sink)
-    elif torch.cuda.is_available():
-        with PinPipeline() as pins:
-            _fill(pins)
-    else:
-        _fill(None)  # CUDA-less host: banks stay pageable (no device copies happen)
-    return banks, tuple(types)
+def to_gguf(name: str, tensors: dict[str, int]) -> tuple[str, ...]:
+    """Checkpoint module name -> the GGUF tensors (without ``.weight``) that store it; empty for modules the GGUF has no matrix for."""
+    if name in _TOP_LEAVES:
+        return (_TOP_LEAVES[name],)
+    m = _LAYER_RE.match(name)
+    if m is None:
+        return ()
+    mapped = _LEAVES.get(m.group(2))
+    if mapped is None:
+        return ()
+    blk = f"blk.{m.group(1)}"
+    return tuple(f"{blk}.{s}" for s in mapped)
 
 
-__all__ = [
-    "parse_gguf_config",
-    "iter_gguf_weights",
-    "iter_gguf_expert_sources",
-    "load_gguf_expert_sources",
-    "is_gguf_model",
-    "convert_glm5_next_to_gguf",
-]
+__all__ = ["iter_gguf_weights", "parse_gguf_config", "to_gguf"]
