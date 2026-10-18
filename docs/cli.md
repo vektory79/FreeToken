@@ -248,14 +248,15 @@ for `FREETOKEN_H2D_BLOCKS_PER_BANK` if `PCIe-gather` sits well below the linear 
 
 ### NVFP4 KV cache
 
-`ft serve --model <checkpoint> --kv-cache-dtype nvfp4 --attention-backend dsa`
+`ft serve --model <checkpoint> --kv-cache-dtype nvfp4 --attention-backend triton`
 opts into packed E2M1 KV storage. The backends that decode packed NVFP4 KV today
-are `dsa` (MLA/DSA models, including GLM-5.3-Flash) and `qsa_sparse` (QSA models);
-generic backends (`triton`, `fa`, `fi`, `trtllm`) reject `nvfp4` at startup until
-their quantized-KV kernels are re-landed. `auto` selects QSA sparse or DSA
-attention for supported models. For MLA/DSA use `--attention-backend auto` or
-`--attention-backend dsa`. Head dimensions must be divisible by 16. DSV4 and BSA
-pools are rejected at startup. Only the latent slab is
+are `triton` (plain paged and hybrid-SWA pools), `dsa` (MLA/DSA models, including
+GLM-5.3-Flash) and `qsa_sparse` (QSA models); the remaining generic backends
+(`fa`, `fi`, `trtllm`) still reject `nvfp4` at startup until their quantized-KV
+kernels are re-landed. `auto` selects `triton` for FULL/hybrid-SWA models and QSA
+sparse or DSA attention for supported sparse models. For MLA/DSA use
+`--attention-backend auto` or `--attention-backend dsa`. Head dimensions must be
+divisible by 16. DSV4 and BSA pools are rejected at startup. Only the latent slab is
 quantized; indexer keys, kpool tails/gates, and recurrent states retain their
 existing precision. A 512-element latent row occupies 292 bytes instead of 1024
 bytes in BF16, excluding those other tiers.

@@ -3,12 +3,12 @@
 from types import SimpleNamespace
 
 import pytest
-
-pytestmark = pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 import torch
 
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.kvcache.mha_pool import MHAKVCache
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 
@@ -177,10 +177,11 @@ def test_e2m1_grid_and_round_to_even_boundaries():
     torch.testing.assert_close(pool.k_scale(1)[loc], row)
 
 
+@pytest.mark.parametrize("sliding_window", [None, 16])
 @pytest.mark.parametrize("dim", [64, 128, 256, 512])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("mode", ["paged", "decode", "extend", "split"])
-def test_attention_reads_packed_cache(dim, dtype, mode):
+def test_attention_reads_packed_cache(dim, dtype, mode, sliding_window):
     from freetoken.kernel.triton.attention import (
         decode_paged_attention, extend_paged_attention, paged_attention,
     )
@@ -203,7 +204,8 @@ def test_attention_reads_packed_cache(dim, dtype, mode):
     args = dict(q=q, k_cache=pool.k_cache(1).flatten(0, 1),
                 v_cache=pool.v_cache(1).flatten(0, 1), k_scale=pool.k_scale(1),
                 v_scale=pool.v_scale(1), k_block_scale=pool.k_block_scale(1),
-                v_block_scale=pool.v_block_scale(1), kv_quant="nvfp4", sm_scale=dim ** -.5)
+                v_block_scale=pool.v_block_scale(1), kv_quant="nvfp4", sm_scale=dim ** -.5,
+                sliding_window=sliding_window)
     kd, vd = _decode(pool, "k")[loc], _decode(pool, "v")[loc]
     if mode == "split":
         kd[prefix:] = k[prefix:].view(-1, 2, dim).float()
@@ -213,7 +215,12 @@ def test_attention_reads_packed_cache(dim, dtype, mode):
         kd, vd = kd.to(q.dtype).float(), vd.to(q.dtype).float()
     kd, vd = [x.repeat_interleave(3, 1).transpose(0, 1) for x in (kd, vd)]
     score = torch.einsum("thd,hnd->thn", q.float(), kd) * dim ** -.5
-    score.masked_fill_(torch.arange(n, device="cuda")[None, None, :] > pos[:, None, None], -float("inf"))
+    key_pos = torch.arange(n, device="cuda")
+    visible = key_pos[None, None, :] <= pos[:, None, None]
+    if sliding_window is not None:
+        # kernel convention: a key stays visible while q_pos - key_pos < window
+        visible &= pos[:, None, None] - key_pos[None, None, :] < sliding_window
+    score.masked_fill_(~visible, -float("inf"))
     ref = torch.einsum("thn,hnd->thd", score.softmax(-1), vd).to(q.dtype)
     if mode == "paged":
         actual = paged_attention(**args, indptr=indptr, indices=loc,
@@ -221,8 +228,7 @@ def test_attention_reads_packed_cache(dim, dtype, mode):
     elif mode == "decode":
         actual = decode_paged_attention(**args, indptr=indptr, indices=loc, q_positions=pos,
             attn_logits=torch.empty(1, 6, 8, dim, device="cuda"),
-            attn_lse=torch.empty(1, 6, 8, device="cuda"),
-            num_kv_splits=torch.tensor([8], device="cuda", dtype=torch.int32), max_kv_splits=8)
+            attn_lse=torch.empty(1, 6, 8, device="cuda"), max_kv_splits=8)
     else:
         extra = {} if mode == "extend" else dict(k_extend=k[prefix:].view(-1, 2, dim), v_extend=v[prefix:].view(-1, 2, dim))
         actual = extend_paged_attention(**args, **extra,
@@ -230,6 +236,77 @@ def test_attention_reads_packed_cache(dim, dtype, mode):
             kv_indptr=indptr, kv_indices=loc,
             prefix_lens=torch.tensor([prefix], device="cuda", dtype=torch.int32), max_q_len=tokens)
     torch.testing.assert_close(actual, ref, atol=0.008, rtol=0.025)
+
+
+@pytest.mark.parametrize("dim", [64, 256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_decode_reads_fp8_cache(dim, dtype):
+    """fp8-read mirror of test_attention_reads_packed_cache: decode_paged_attention
+    restores e4m3 codes through their per-(token, head) scale, not just nvfp4."""
+    from freetoken.kernel.triton.attention import decode_paged_attention
+
+    torch.manual_seed(43)
+    pool = MHAKVCache(2, 4, dim, 96 // 4, 4, torch.bfloat16,
+                      torch.device("cuda"), kv_quant="fp8")
+    n = 67
+    k, v = [torch.randn(n, 2 * dim, device="cuda", dtype=dtype) for _ in range(2)]
+    loc = torch.randperm(95, device="cuda")[:n] + 1
+    pool.store_kv(k, v, loc, 1)
+    q = torch.randn(1, 6, dim, device="cuda", dtype=dtype)
+    indptr = torch.tensor([0, n], device="cuda", dtype=torch.int32)
+    pos = torch.arange(n - 1, n, device="cuda")
+    codes = pool.k_cache(1).flatten(0, 1)
+    kd, vd = [(getattr(pool, f"{w}_cache")(1).flatten(0, 1).view(torch.float8_e4m3fn).float()
+               * getattr(pool, f"{w}_scale")(1)[..., None])[loc]
+              for w in ("k", "v")]
+    # Tensor-core paths round restored K/V to the query dtype before dot products.
+    kd, vd = [x.repeat_interleave(3, 1).transpose(0, 1).to(q.dtype).float() for x in (kd, vd)]
+    score = torch.einsum("thd,hnd->thn", q.float(), kd) * dim ** -.5
+    score.masked_fill_(torch.arange(n, device="cuda")[None, None, :] > pos[:, None, None], -float("inf"))
+    ref = torch.einsum("thn,hnd->thd", score.softmax(-1), vd).to(q.dtype)
+    actual = decode_paged_attention(
+        q=q, k_cache=codes, v_cache=pool.v_cache(1).flatten(0, 1),
+        indptr=indptr, indices=loc, q_positions=pos,
+        attn_logits=torch.empty(1, 6, 8, dim, device="cuda"),
+        attn_lse=torch.empty(1, 6, 8, device="cuda"),
+        sm_scale=dim ** -.5, k_scale=pool.k_scale(1), v_scale=pool.v_scale(1),
+    )
+    torch.testing.assert_close(actual, ref, atol=0.008, rtol=0.025)
+
+
+def _bf16_decode_kwargs(dim=64, n=8):
+    """Fresh 16-bit pool plus decode-call kwargs; scales stay separate (96, 2) fp32."""
+    if try_get_tp_info() is None:
+        set_tp_info(rank=0, size=1)
+    pool = MHAKVCache(2, 4, dim, 96 // 4, 4, torch.bfloat16, torch.device("cuda"))
+    k = torch.randn(n, 2 * dim, device="cuda", dtype=torch.bfloat16)
+    loc = torch.randperm(95, device="cuda")[:n] + 1
+    pool.store_kv(k, k, loc, 1)
+    return dict(
+        q=torch.randn(1, 6, dim, device="cuda", dtype=torch.bfloat16),
+        k_cache=pool.k_cache(1).flatten(0, 1), v_cache=pool.v_cache(1).flatten(0, 1),
+        indptr=torch.tensor([0, n], device="cuda", dtype=torch.int32),
+        indices=loc, q_positions=torch.arange(n - 1, n, device="cuda"),
+        attn_logits=torch.empty(1, 6, 8, dim, device="cuda"),
+        attn_lse=torch.empty(1, 6, 8, device="cuda"), sm_scale=dim ** -.5,
+    ), torch.ones(96, 2, device="cuda")
+
+
+def test_fp8_read_rejects_16bit_codes():
+    """kv_quant='fp8' on a 16-bit pool must raise, not read bf16 bits as e4m3 codes."""
+    from freetoken.kernel.triton.attention import decode_paged_attention
+
+    kwargs, scales = _bf16_decode_kwargs()
+    with pytest.raises(ValueError, match="fp8"):
+        decode_paged_attention(**kwargs, k_scale=scales, v_scale=scales, kv_quant="fp8")
+
+
+def test_unknown_kv_quant_is_rejected():
+    from freetoken.kernel.triton.attention import decode_paged_attention
+
+    kwargs, _ = _bf16_decode_kwargs()
+    with pytest.raises(ValueError, match="unknown kv_quant"):
+        decode_paged_attention(**kwargs, kv_quant="int4")
 
 
 def test_pool_budget_rebuild_and_layer_mapping():

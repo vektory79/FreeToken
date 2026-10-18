@@ -39,7 +39,7 @@ def _model_config(kind):
         has_swa_attention=False,
         has_linear_attention=False,
         num_layers=4,
-        rotary_config=SimpleNamespace(max_position=1024),
+        rotary_config=SimpleNamespace(max_position=1024, table_positions=1024),
     )
     specs = {
         "full": (_spec("full", AttnType.FULL),),
@@ -101,7 +101,6 @@ def test_kv_quant_spellings():
         _resolve_kv_quant("q8")
 
 
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_only_the_backends_that_read_scales_declare_fp8_support():
     from freetoken.attention import SUPPORTED_ATTENTION_BACKENDS, attention_backend_info
 
@@ -123,7 +122,6 @@ def test_only_the_backends_that_read_scales_declare_fp8_support():
     assert nvfp4 == {"triton", "qsa_sparse", "dsa"}
 
 
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_auto_avoids_the_fast_backends_for_fp8(monkeypatch):
     from freetoken.engine.engine import _adjust_config
 
@@ -152,7 +150,6 @@ def test_explicit_unsupported_backend_is_rejected(monkeypatch, backend):
         _adjust_config(config)
 
 
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_explicit_triton_is_accepted(monkeypatch):
     from freetoken.engine.engine import _adjust_config
 
@@ -162,7 +159,6 @@ def test_explicit_triton_is_accepted(monkeypatch):
     assert config.kv_quant == "fp8"
 
 
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_nvfp4_auto_selects_triton(monkeypatch):
     from freetoken.engine.engine import _adjust_config
 
@@ -173,7 +169,6 @@ def test_nvfp4_auto_selects_triton(monkeypatch):
 
 
 @pytest.mark.parametrize("kind", ["dsv4", "bsa"])
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_nvfp4_rejects_unsupported_pools_before_allocation(monkeypatch, kind):
     from freetoken.engine.engine import _adjust_config
     from freetoken.kvcache import create_kvcache_pool
@@ -210,7 +205,6 @@ def test_nvfp4_rejects_partial_blocks(monkeypatch):
         _adjust_config(config)
 
 
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_nvfp4_accepts_hybrid_swa(monkeypatch):
     from freetoken.engine.engine import _adjust_config
 
@@ -245,7 +239,6 @@ def test_mla_and_dsa_select_the_scale_reading_backend(monkeypatch, kind, backend
 
 
 @pytest.mark.parametrize("kind", ["dsv4", "bsa"])
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_pool_families_without_a_scale_read_path_are_rejected(monkeypatch, kind):
     from freetoken.engine.engine import _adjust_config
 
@@ -268,7 +261,6 @@ def test_qsa_keeps_fp8_available(monkeypatch):
     assert "qsa_sparse" in config.attention_backend
 
 
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_swa_pool_keeps_fp8_available(monkeypatch):
     from freetoken.engine.engine import _adjust_config
 

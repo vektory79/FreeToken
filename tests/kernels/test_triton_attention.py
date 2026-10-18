@@ -726,7 +726,6 @@ def test_select_extend_tile_is_shared_memory_aware(head_dim, smem_optin, expecte
         (256, 0, (64, 32), (64, 32)),
     ],
 )
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_select_extend_tile_uses_kv_cache_element_size(
     head_dim, smem_optin, expected_16bit, expected_fp8
 ):
@@ -1013,7 +1012,6 @@ def _dequantized(codes: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 @pytest.mark.parametrize(("head_dim", "num_kv_heads"), [(64, 4), (128, 2)])
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_decode_paged_attention_decodes_fp8_scales(head_dim: int, num_kv_heads: int):
     """fp8 decode must equal the SAME data dequantized by hand.
 
@@ -1047,7 +1045,6 @@ def test_decode_paged_attention_decodes_fp8_scales(head_dim: int, num_kv_heads: 
         batch, num_q_heads, max_kv_splits, head_dim, dtype=torch.float32, device=device
     )
     attn_lse = torch.empty(batch, num_q_heads, max_kv_splits, dtype=torch.float32, device=device)
-    num_kv_splits = torch.full((batch,), max_kv_splits, dtype=torch.int32, device=device)
     sm_scale = head_dim**-0.5
 
     k_codes, v_codes, k_scale, v_scale = _fp8_cache(k_rows, v_rows)
@@ -1060,9 +1057,8 @@ def test_decode_paged_attention_decodes_fp8_scales(head_dim: int, num_kv_heads: 
         q_positions,
         attn_logits,
         attn_lse,
-        num_kv_splits,
-        max_kv_splits,
         sm_scale,
+        max_kv_splits=max_kv_splits,
         k_scale=k_scale,
         v_scale=v_scale,
     )
@@ -1083,7 +1079,6 @@ def test_decode_paged_attention_decodes_fp8_scales(head_dim: int, num_kv_heads: 
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_paged_attention_decodes_fp8_scales():
     """The non-tl.dot fallback kernel takes the same scales (it serves head_dim > 256
     with a short prefill, and every decode batch when the grouped path is not used)."""
@@ -1141,7 +1136,6 @@ def test_paged_attention_decodes_fp8_scales():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 @pytest.mark.parametrize("use_split_inputs", [False, True])
-@pytest.mark.skip(reason="D5: generic-triton fp8/nvfp4 KV kernel path removed by main's attention rewrite; re-land deferred (dsa/qsa_sparse keep it)")
 def test_extend_paged_attention_decodes_fp8_scales(use_split_inputs: bool):
     """Prefill over an fp8 cache.
 

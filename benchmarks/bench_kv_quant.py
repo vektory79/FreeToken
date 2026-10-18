@@ -41,7 +41,6 @@ def main():
         pos = torch.full((batch,), length - 1, device=device, dtype=torch.int32)
         scratch = torch.empty(batch, qheads, 8, dim, device=device)
         lse = torch.empty(batch, qheads, 8, device=device)
-        splits = torch.full((batch,), 8, device=device, dtype=torch.int32)
         out = torch.empty_like(q)
         for quant in args.formats.split(","):
             pool = MHAKVCache(heads, 1, dim, slots, 1, q.dtype, device, kv_quant=quant)
@@ -54,7 +53,7 @@ def main():
 
             def decode():
                 return decode_paged_attention(q, kc, vc, indptr, loc, pos,
-                    scratch, lse, splits, 8, dim ** -.5, out=out,
+                    scratch, lse, dim ** -.5, out=out, max_kv_splits=8,
                     k_scale=pool.k_scale(0), v_scale=pool.v_scale(0), **extra)
 
             decode()

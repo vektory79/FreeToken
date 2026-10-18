@@ -90,8 +90,10 @@ def create_fa_backend(config: ModelConfig):
     BackendInfo(
         supported_types=frozenset({AttnType.FULL, AttnType.SWA}),
         consumes_attn_spec=True,
-        supports_fp8_kv=False,
-        supports_nvfp4_kv=False,
+        # The paged/decode/extend kernels dequantize fp8 rows and packed nvfp4 codes
+        # on load (kernel/triton/attention.py + kv_quant.py/kv_nvfp4.py).
+        supports_fp8_kv=True,
+        supports_nvfp4_kv=True,
     ),
 )
 def create_triton_backend(config: ModelConfig):
