@@ -1,6 +1,9 @@
 # TASK: round-5 - порты D1-D5: восстановление функциональности после ре-платформы ggml
 
-Status: PLANNED. Контекст слияния и карта портов -
+Status: IN PROGRESS - фаза 1 (D4) готова 2026-10-21 (коммит 9314c9b:
+boot-smoke PASS, decode медиана 21.00 tok/s, кросс-валидация 38/38); фаза 2
+(D3) CPU-готова, ждёт GPU-приёмки; фазы 3 (D1), 4 (D2), 5 (D5) - в плане.
+Контекст слияния и карта портов -
 [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);
 процедура интеграционных волн -
 [merge-wave-procedure](../../topics/merge-wave-procedure.md). Якоря
@@ -171,9 +174,10 @@ glm5next-GGUF падает с сырым ImportError.
 
 Что потеряно: main переписал offload-кэш на per-format slot pools и
 переписал CPU-executor. Из engine.py удалены веточные хелперы: partition
-gate, gguf hybrid rejection, T2 helpers, NS-knob, plural-cache state -
+gate, gguf hybrid rejection, T2 helpers, plural-cache state -
 каждый нужно ре-имплементить в новом виде или признать неактуальным;
-решение зафиксировать в kb.
+решение зафиксировать в kb. (NS-knob в этот список не входит: он жил в
+kernel/triton/mhc.py, db0f6b3, не в engine.py.)
 
 Шаги:
 
