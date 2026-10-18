@@ -7,7 +7,8 @@ boot-smoke PASS, decode медиана 21.00 tok/s, кросс-валидаци�
 e2e 5568 cached / 0 полных промахов); фаза 3 (D1) закрыта NO-GO 2026-10-21 (все 4 веточных
 выигрыша ядер перекрыты ggml нативно или опровергнуты замерами:
 [round5-d1-kernel-wins-no-go](../../topics/round5-d1-kernel-wins-no-go.md));
-фазы 4 (D2), 5 (D5) - в плане.
+фаза 4 (D2) готова 2026-10-21 (коммит 7bc68b0: verify 347/347 exact, e2e-картинка
+PASS, boot --mmproj READY 142 с; см. раздел 6); фаза 5 (D5) - в плане.
 Контекст слияния и карта портов -
 [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);
 процедура интеграционных волн -
@@ -275,9 +276,19 @@ SPLIT=128 оптимален (T=512: 64 -29% / 32 -84%; T=8128: -40% / -107%; T=
 новый torch/triton меняют ландшафт; часть выигрышей может перекрыться
 оптимизациями main - решает замер.
 
-## 6. Фаза 4 - порт D2: возврат mmproj-зрения (независимая)
+## 6. Фаза 4 - порт D2: возврат mmproj-зрения - ГОТОВО 2026-10-21, коммит 7bc68b0
 
-Цель: мульти-модальный путь (изображения) снова работает.
+Статус: готово 2026-10-21, коммит 7bc68b0 (волна 20; 4 файла:
+checkpoint/convert.py, models/gguf/reader.py, verify_mmproj_tensors.py,
+test_glm5_next_gguf.py). Приёмка: verify 348 тензоров 347/347 параметров exact
+(max_abs_diff 0); boot raw GGUF + --mmproj READY 142 с (мультимодальность ON,
+text chat 200, decode 17.63 tok/s); e2e-картинка - осмысленный ответ; 6
+carrier-тестов разморожены и зелёные (fails-before: 5x TypeError extra_kvs +
+1x ImportError _pack_kv); контрольная батарея 2 failed (базлайн-пара) /
+2066 passed / 825 skipped. Уроки -
+[round5-d2-mmproj-vision-port](../../topics/round5-d2-mmproj-vision-port.md).
+
+Цель (исходная): мульти-модальный путь (изображения) снова работает.
 
 Что потеряно: веточный mmproj-конвейер трогался удалённых файлов
 (dequant.py и др.); реестры визионных архитектур уцелели в
@@ -348,12 +359,24 @@ kv_nvfp4/kv_quant зелёные и активные.
   лестницы);
 - гибрид даёт измеренный декод: 27.71 tok/s против offload 21.00 на том же стеке
   (+32%; старый стек 16.67 = +66%);
-- ядра D1 измерены: NO-GO - не нужен ни один порт (фаза 3, статус в разделе 5).
+- ядра D1 измерены: NO-GO - не нужен ни один порт (фаза 3, статус в разделе 5);
+- mmproj-зрение e2e: PASS (фаза 4, 7bc68b0: e2e-картинка осмысленная,
+  verify 347/347 exact, boot --mmproj READY 142 с - статус в разделе 6).
 
 Осталось:
 
-- mmproj-зрение e2e (фаза 4, D2);
-- nvfp4-KV доступен минимум на triton (фаза 5, D5).
+- nvfp4-KV доступен минимум на triton (фаза 5, D5);
+- OPEN residual (новый пункт порт-долга, вне D1-D5): gguf->FTW boot - ЛЮБОЙ
+  конвертнутый FTW не поднимается: checkpoint_quant_config
+  (models/register.py:458) строит таблицу ggml-типов из
+  gguf_tensor_index(hf_config.model_path) (строка 469), но для FTW model_path =
+  carrier source_metadata.gguf (metadata-only, tensor_count=0) -> пустая
+  таблица -> KeyError "GGUF has no tensor 'token_embd'"
+  (layers/quantization/configs/gguf.py:42, вызов из scheme_for :58).
+  Pre-existing (воспроизводится на любом конвертнутом FTW, включая text-only);
+  D4-boot-smoke не проявил - гнался только raw GGUF. Направление фикса:
+  FTW-ветвящийся источник dense-типов (мета FTW-индекса) либо docs-запрет
+  gguf->FTW до фикса; reconversion не поможет. Фикс - отдельной задачей.
 
 Статусы всех портов обновлены в
 [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);

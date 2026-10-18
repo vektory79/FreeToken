@@ -14,8 +14,9 @@ tags: [merge, round5, ggml, replatform, slot-pools, deferred-ports, nvfp4-kv, gl
 вендоренные ggml-ядра (ggml-cuda / ggml-cpu) и квант-пакет `layers/quantization/`.
 Веточные победы, сделанные на старом стеке, на новом НЕ работают. Рамка раунда -
 **minimal green merge**: merge-коммит делает зелёными только сборку и тесты на новых
-механиках main'а; всё глубокое отложено в порт-долг D1-D5; статусы: D4 и D3 готовы,
-D1 закрыт NO-GO (2026-10-21), D2 и D5 - не начато. Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
+механиках main'а; всё глубокое отложено в порт-долг D1-D5; статусы: D4, D3 и D2 готовы,
+D1 закрыт NO-GO (2026-10-21), D5 - не начато; открытый остаток - gguf->FTW boot
+(раздел «Открыто» ниже). Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
 процедурные уроки волны - в [merge-wave-procedure.md](merge-wave-procedure.md).
 
 ## Что поменял main (дельта upstream, влитая раундом 5)
@@ -50,7 +51,7 @@ D1 закрыт NO-GO (2026-10-21), D2 и D5 - не начато. Эта ста�
 Бухгалтерию скип-маркеров и остальные процедурные уроки см. в
 [merge-wave-procedure.md](merge-wave-procedure.md), раздел «Раунд 5».
 
-## Порт-долг D1-D5 (D4 и D3 готовы, D1 закрыт NO-GO, D2 и D5 - не начато)
+## Порт-долг D1-D5 (D4, D3 и D2 готовы, D1 закрыт NO-GO, D5 - не начато)
 
 ### D1. Веточные победы ядра на вендоренном ggml
 
@@ -74,12 +75,32 @@ mhc - текущий SPLIT=128 оптимален (64 теряет 29-40% на �
 обнуляются до порта. Методика и полные конфиги: [prefill-throughput.md](prefill-throughput.md);
 машиночитаемые якоря - [../baselines/README.md](../baselines/README.md).
 
-### D2. mmproj-видение на поверхностях layers/quantization/*
+### D2. mmproj-видение на поверхностях layers/quantization/* - готово 2026-10-21, коммит 7bc68b0
+
+Статус: готово 2026-10-21, коммит 7bc68b0: verify 348 тензоров 347/347 параметров
+exact (max_abs_diff 0), e2e-картинка PASS (осмысленный ответ), boot raw GGUF +
+--mmproj READY 142 с (мультимодальность ON, decode 17.63 tok/s); 6 carrier-тестов
+разморожены и зелёные (fails-before: 5x TypeError extra_kvs + 1x ImportError
+_pack_kv). Уроки и эскалация -
+[round5-d2-mmproj-vision-port.md](round5-d2-mmproj-vision-port.md).
 
 Веточная mmproj-работа опиралась на models/gguf/dequant.py, который main удалил;
 видение надо переложить на новый квант-пакет. Реестры vision-тензорных карт
 пережили re-platform в [models/gguf/config.py](../../python/freetoken/models/gguf/config.py).
 Исходный кейс и проверенные карты тензоров - [../cases/gguf-glm5next-vision/TASK.md](../cases/gguf-glm5next-vision/TASK.md).
+
+### Открыто: gguf->FTW boot residual (новый пункт порт-долга)
+
+Найдено волной D2 (2026-10-21), pre-existing - не специфика D2 и не D4-банки:
+ЛЮБОЙ сконвертированный gguf->FTW чекпойнт не бутится на новом стеке, включая
+text-only. checkpoint_quant_config ([models/register.py:458](../../python/freetoken/models/register.py))
+строит таблицу ggml-типов из gguf_tensor_index(hf_config.model_path) (строка 469),
+но для FTW model_path = carrier source_metadata.gguf (metadata-only,
+tensor_count=0) -> пустая таблица -> KeyError "GGUF has no tensor 'token_embd'"
+(_part_types, [layers/quantization/configs/gguf.py:42](../../python/freetoken/layers/quantization/configs/gguf.py),
+вызов из scheme_for, строка 58). D4-boot-smoke не проявил: гнался только raw GGUF.
+Направление фикса: FTW-ветвящийся источник dense-типов (мета FTW-индекса) или
+docs-запрет gguf->FTW до фикса; reconversion не поможет. Фикс - отдельной задачей.
 
 ### D3. Гибрид/offload на per-format слот-пулах - готово 2026-10-21, коммит 393b682
 

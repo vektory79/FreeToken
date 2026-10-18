@@ -21,6 +21,7 @@
 | [glm5next-gguf-loader-port.md](glm5next-gguf-loader-port.md) | Как порт D4 (коммит 9314c9b) вернул glm5next GGUF-сервинг на вендоренном ggml: дублирующийся ключ схемы, GPU-касты под op_dequantize, pad_rows MMQ-хвоста, GGUF->FTW стриминг, corr-методика кросс-валидации |
 | [hybrid-moe-slot-pools-port.md](hybrid-moe-slot-pools-port.md) | Как порт D3 (коммит 393b682) закрылся тремя гейтами конфига поверх слот-пулов main: format screen, header-отказ hybrid, auto floor gate; T2 не возвращён; гибрид 27.71 tok/s против offload 21.00 (+32%) |
 | [round5-d1-kernel-wins-no-go.md](round5-d1-kernel-wins-no-go.md) | Почему порт D1 (grouped MMQ, m-tile, dense N-split, mhc NS) закрыт NO-GO на вендоренном ggml: 241-572 GB/s эффективных при 169-227 TF/s = ALU-крыша; SPLIT=128 оптимален; N-split -1.8..-16.5%; пять уроков о непереносимости старых процентов |
+| [round5-d2-mmproj-vision-port.md](round5-d2-mmproj-vision-port.md) | Как порт D2 (коммит 7bc68b0) вернул mmproj-зрение: ампутация ре-платформы точечная (3 стыка), collision-гвардия _pack_kv, verify 347/347; эскалация - gguf->FTW carrier не несёт тензоры (register.py:469) |
 | [decode-chain-microfusion.md](decode-chain-microfusion.md) | Почему сокращение пусков ядер не равно ускорению; четыре микрофьюжн-кандидата декода отклонены на железе 2026-09-28; дискриминатор - CTAs/SM, а не счётчик пусков |
 
 Правила статей: YAML-шапка (title/date/hardware/branch-commits/status/tags),
