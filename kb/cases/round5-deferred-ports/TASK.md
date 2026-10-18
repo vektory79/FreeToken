@@ -1,14 +1,16 @@
 # TASK: round-5 - порты D1-D5: восстановление функциональности после ре-платформы ggml
 
-Status: IN PROGRESS - фаза 1 (D4) готова 2026-10-21 (коммит 9314c9b:
-boot-smoke PASS, decode медиана 21.00 tok/s, кросс-валидация 38/38); фаза 2
-(D3) готова 2026-10-21 (коммит 393b682: 786k гибридный рецепт бут x2 без
-лестницы, гибрид 27.71 tok/s против offload 21.00 на том же стеке, Fix-3
-e2e 5568 cached / 0 полных промахов); фаза 3 (D1) закрыта NO-GO 2026-10-21 (все 4 веточных
-выигрыша ядер перекрыты ggml нативно или опровергнуты замерами:
+Status: DONE 2026-10-21 - все пять фаз закрыты. Фаза 1 (D4) готова 2026-10-21
+(коммит 9314c9b: boot-smoke PASS, decode медиана 21.00 tok/s, кросс-валидация
+38/38); фаза 2 (D3) готова 2026-10-21 (коммит 393b682: 786k гибридный рецепт бут
+x2 без лестницы, гибрид 27.71 tok/s против offload 21.00 на том же стеке, Fix-3
+e2e 5568 cached / 0 полных промахов); фаза 3 (D1) закрыта NO-GO 2026-10-21 (все
+4 веточных выигрыша ядер перекрыты ggml нативно или опровергнуты замерами:
 [round5-d1-kernel-wins-no-go](../../topics/round5-d1-kernel-wins-no-go.md));
 фаза 4 (D2) готова 2026-10-21 (коммит 7bc68b0: verify 347/347 exact, e2e-картинка
-PASS, boot --mmproj READY 142 с; см. раздел 6); фаза 5 (D5) - в плане.
+PASS, boot --mmproj READY 142 с; см. раздел 6); фаза 5 (D5) готова 2026-10-21
+(коммит 660c814: -p no:skipping 8 failed -> 36 passed, A/B Qwen3.8 3.46x без
+деградации, greedy 11/12 byte-identical; см. раздел 7).
 Контекст слияния и карта портов -
 [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);
 процедура интеграционных волн -
@@ -309,7 +311,26 @@ models/gguf/config.py, но кодовая база под ними ушла.
 в проверке 347/347), e2e-запрос с картинкой возвращает осмысленный ответ,
 юнит-тесты конвертации зелёные.
 
-## 7. Фаза 5 - порт D5: nvfp4-KV для generic attention-бэкендов (независимая)
+## 7. Фаза 5 - порт D5: nvfp4-KV для generic attention-бэкендов - ГОТОВО 2026-10-21, коммит 660c814
+
+Статус: готово 2026-10-21, коммит 660c814 (волны 22-23; 8 файлов:
+kernel/triton/attention.py, attention/triton.py, attention/__init__.py,
+tests/engine/test_kv_quant_config.py, tests/kernels/test_kv_nvfp4.py,
+tests/kernels/test_triton_attention.py, benchmarks/bench_kv_quant.py, docs/cli.md).
+Приёмка: ре-ленд load_nvfp4 (decode/extend/split/paged) НА текущую структуру ядер
+(sinks/sliding-window/split-caps сохранены, None-шкалы байт-в-байт),
+supports_fp8_kv+nvfp4_kv flipped вместе; test_kv_quant_config.py -p no:skipping
+8 failed -> 36 passed; GPU: test_kv_nvfp4 115 passed (включая +32
+sliding-window-комбо и 2 валидационных негатив-теста из ревью),
+test_triton_attention 49 passed, test_kv_fp8 12 passed (волна 22); контрольная
+батарея 2 failed (базлайн-пара) / 2079 passed / 850 skipped. Boot A/B:
+RadixArk/Qwen3.8-27B-NVFP4-FTW (qwen3_5, pool FULL, head_dim 256): triton+nvfp4
+бут без reject-а, KV 231954 ток (4.09 GiB) против bf16 67049 ток = 3.46x; greedy
+12 задач temp 0 max_tokens 768: 11/12 byte-identical, 1 argmax-flip на открытой
+перефразе (оба ответа корректны); needle @30% глубины найден идентично
+(ZX-7412-KM). fa/fi/trtllm - отдельные PR (внешнему kernel нужна наша
+layout-схема). Уроки -
+[round5-d5-nvfp4-kv-generic](../../topics/round5-d5-nvfp4-kv-generic.md).
 
 Цель: упакованный NVFP4 KV-кэш снова декодируют не только dsa/qsa_sparse.
 
@@ -363,9 +384,17 @@ kv_nvfp4/kv_quant зелёные и активные.
 - mmproj-зрение e2e: PASS (фаза 4, 7bc68b0: e2e-картинка осмысленная,
   verify 347/347 exact, boot --mmproj READY 142 с - статус в разделе 6).
 
-Осталось:
+Сделано (дополнено финальной сверкой 2026-10-21):
 
-- nvfp4-KV доступен минимум на triton (фаза 5, D5);
+- nvfp4-KV доступен минимум на triton (фаза 5, D5, коммит 660c814: -p no:skipping
+  8 failed -> 36 passed, A/B Qwen3.8 3.46x без деградации, 11/12 byte-identical);
+
+Остатки (вне D1-D5, каждый - отдельная задача/PR):
+
+- fa / fi / trtllm nvfp4-KV: внешним kernel'ам нужна наша layout-схема
+  (row fp32 + block e4m3-u8/16 + low-nibble first) - отдельные PR с тестом и A/B;
+- g.2: ре-ленд test_cpu_moe_gguf_iq (сидит на удалённом models/gguf/dequant);
+- 11 до-существующих битых kb-ссылок (сек. 8) - первый docs-коммит;
 - OPEN residual (новый пункт порт-долга, вне D1-D5): gguf->FTW boot - ЛЮБОЙ
   конвертнутый FTW не поднимается: checkpoint_quant_config
   (models/register.py:458) строит таблицу ggml-типов из
@@ -382,3 +411,7 @@ kv_nvfp4/kv_quant зелёные и активные.
 [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);
 каждый порт - своя серия коммитов по правилам репо; push - только
 пользователь.
+
+Статус кейса: DONE 2026-10-21 - все пять портов закрыты (D4 9314c9b, D3 393b682,
+D1 NO-GO 415b84e, D2 7bc68b0, D5 660c814); остатки перенесены в отдельные
+задачи (список выше).

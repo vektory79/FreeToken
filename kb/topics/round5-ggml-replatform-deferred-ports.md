@@ -14,9 +14,9 @@ tags: [merge, round5, ggml, replatform, slot-pools, deferred-ports, nvfp4-kv, gl
 вендоренные ggml-ядра (ggml-cuda / ggml-cpu) и квант-пакет `layers/quantization/`.
 Веточные победы, сделанные на старом стеке, на новом НЕ работают. Рамка раунда -
 **minimal green merge**: merge-коммит делает зелёными только сборку и тесты на новых
-механиках main'а; всё глубокое отложено в порт-долг D1-D5; статусы: D4, D3 и D2 готовы,
-D1 закрыт NO-GO (2026-10-21), D5 - не начато; открытый остаток - gguf->FTW boot
-(раздел «Открыто» ниже). Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
+механиках main'а; всё глубокое отложено в порт-долг D1-D5; кейс ЗАВЕРШЁН 2026-10-21 -
+все пять портов закрыты (D4, D3, D2, D5 готовы, D1 закрыт NO-GO); открытый остаток -
+gguf->FTW boot (раздел «Открыто» ниже). Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
 процедурные уроки волны - в [merge-wave-procedure.md](merge-wave-procedure.md).
 
 ## Что поменял main (дельта upstream, влитая раундом 5)
@@ -51,7 +51,7 @@ D1 закрыт NO-GO (2026-10-21), D5 - не начато; открытый о�
 Бухгалтерию скип-маркеров и остальные процедурные уроки см. в
 [merge-wave-procedure.md](merge-wave-procedure.md), раздел «Раунд 5».
 
-## Порт-долг D1-D5 (D4, D3 и D2 готовы, D1 закрыт NO-GO, D5 - не начато)
+## Порт-долг D1-D5 (кейс завершён 2026-10-21: все пять портов закрыты)
 
 ### D1. Веточные победы ядра на вендоренном ggml
 
@@ -136,21 +136,21 @@ load_ftw_banks_to_device, урок раунда 4 - см.
 [merge-wave-procedure.md](merge-wave-procedure.md)), сырой ImportError заменён
 внятным диагностическим сообщением.
 
-### D5. Re-land generic-triton fp8/nvfp4-KV
+### D5. Re-land generic-triton fp8/nvfp4-KV - готово 2026-10-21, коммит 660c814
 
-После переписывания attention в main'е упакованный NVFP4-KV декодируют только
-dsa и qsa_sparse ([attention/__init__.py](../../python/freetoken/attention/__init__.py):
-supports_nvfp4_kv=True только у них; решение проводит engine через
-_backend_supports_kv_quant / _validate_attention_backend_choice); triton / fa / fi /
-trtllm отклоняют nvfp4 при старте. Re-land - это: вернуть generic-triton путь к
-уцелевшему nvfp4-KV store-стеку ([kernel/triton/kv_nvfp4.py](../../python/freetoken/kernel/triton/kv_nvfp4.py),
-[kernel/triton/kv_quant.py](../../python/freetoken/kernel/triton/kv_quant.py),
-[kvcache/mha_pool.py](../../python/freetoken/kvcache/mha_pool.py)) и в том же
-порте: (а) реактивировать два bsa-half теста в
-[test_kv_quant_config.py](../../tests/engine/test_kv_quant_config.py) (строки 176
-и 248, D5-skip'ы - пробным запуском подтверждено, что тесты проходят без скипа);
-(б) закрыть активным покрытием уцелевший nvfp4-KV store-стек, пока у него нет
-пользователей среди бэкендов.
+Статус: готово 2026-10-21, коммит 660c814: store-стек пережил re-platform
+байт-в-байт, потерян был только read-путь generic-triton; load_nvfp4
+(decode/extend/split/paged) ре-ленднут НА текущую структуру ядер
+(sinks/sliding-window/split-caps сохранены, None-шкалы байт-в-байт),
+supports_fp8_kv + supports_nvfp4_kv у triton flipped вместе. Метрика спеки:
+[test_kv_quant_config.py](../../tests/engine/test_kv_quant_config.py)
+`-p no:skipping` 8 failed -> 36 passed; GPU: test_kv_nvfp4 115 passed,
+test_triton_attention 49 passed. Качественный A/B: Qwen3.8-27B-NVFP4-FTW (dense
+GDN+FULL; GLM-5.3 не годится - dsa): 3.46x ужатие KV без деградации, greedy
+11/12 byte-identical (1 argmax-flip на открытой перефразе), needle @30% найден
+идентично. fa / fi / trtllm - отдельные PR (внешнему kernel нужна наша
+layout-схема). Уроки -
+[round5-d5-nvfp4-kv-generic.md](round5-d5-nvfp4-kv-generic.md).
 
 ## Происхождение
 
