@@ -2,7 +2,9 @@
 
 Status: IN PROGRESS - фаза 1 (D4) готова 2026-10-21 (коммит 9314c9b:
 boot-smoke PASS, decode медиана 21.00 tok/s, кросс-валидация 38/38); фаза 2
-(D3) CPU-готова, ждёт GPU-приёмки; фазы 3 (D1), 4 (D2), 5 (D5) - в плане.
+(D3) готова 2026-10-21 (коммит 393b682: 786k гибридный рецепт бут x2 без
+лестницы, гибрид 27.71 tok/s против offload 21.00 на том же стеке, Fix-3
+e2e 5568 cached / 0 полных промахов); фазы 3 (D1), 4 (D2), 5 (D5) - в плане.
 Контекст слияния и карта портов -
 [round5-ggml-replatform-deferred-ports](../../topics/round5-ggml-replatform-deferred-ports.md);
 процедура интеграционных волн -
@@ -167,9 +169,24 @@ glm5next-GGUF падает с сырым ImportError.
 могут отсутствовать в новых layers/quantization/configs - тогда
 минимальный набор форматов для старта модели + расширение в D1.
 
-## 4. Фаза 2 - порт D3: гибрид/offload поверх slot pools (включая возврат T2)
+## 4. Фаза 2 - порт D3: гибрид/offload поверх slot pools - ГОТОВО 2026-10-21, коммит 393b682
 
-Цель: гибридный MoE-режим (CPU+GPU сплит по парам (слой, эксперт)) снова
+Статус: готово 2026-10-21, коммит 393b682 (волны 8-17). Порт не понадобился -
+main УЖЕ вёз гибрид на новом стеке; вернулись три fail-fast гейта (format
+screen CPU-executor, header-отказ hybrid на непроверяемом gguf, pre-load auto
+floor gate), T2 НЕ возвращён (однопульный executor, глобальный бюджет).
+Приёмка (RTX 5090, UD-Q3_K_XL): 786k рецепт - `--moe-strategy hybrid
+--moe-cache-auto --kv-reserve-tokens 786432 --kv-cache-dtype nvfp4
+--memory-ratio 0.85 --max-prefill-length 4096 --max-running-requests 1
+--moe-cpu-threads 16 --disable-moe-prefill-overlap` - бут x2 без лестницы
+(ready 119/135 с, 3 пула 29-1103 слотов, гейты молчат); decode гибрид 27.71
+tok/s медиана против offload 21.00 на том же стеке (+32%), против старого
+стека 16.67 (+66%); cap-0 CPU-лег ~49.6 GB/s (~1.8x старого); Fix-3 e2e
+5568 cached / 0 полных промахов; g.3 (test_mixed_expert_formats.py) 132
+passed; g.2 отложен (D1-deferred - сидит на удалённом models/gguf/dequant).
+Уроки - [hybrid-moe-slot-pools-port](../../topics/hybrid-moe-slot-pools-port.md).
+
+Цель (исходная): гибридный MoE-режим (CPU+GPU сплит по парам (слой, эксперт)) снова
 работает на новом кэше; хост-доставка T2 возвращена.
 
 Что потеряно: main переписал offload-кэш на per-format slot pools и

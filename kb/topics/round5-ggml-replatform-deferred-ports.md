@@ -14,8 +14,8 @@ tags: [merge, round5, ggml, replatform, slot-pools, deferred-ports, nvfp4-kv, gl
 вендоренные ggml-ядра (ggml-cuda / ggml-cpu) и квант-пакет `layers/quantization/`.
 Веточные победы, сделанные на старом стеке, на новом НЕ работают. Рамка раунда -
 **minimal green merge**: merge-коммит делает зелёными только сборку и тесты на новых
-механиках main'а; всё глубокое отложено в порт-долг D1-D5; статус: D4 готов
-(2026-10-21), остальные - не начато. Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
+механиках main'а; всё глубокое отложено в порт-долг D1-D5; статусы: D4 и D3
+готовы (2026-10-21), остальные - не начато. Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
 процедурные уроки волны - в [merge-wave-procedure.md](merge-wave-procedure.md).
 
 ## Что поменял main (дельта upstream, влитая раундом 5)
@@ -50,7 +50,7 @@ tags: [merge, round5, ggml, replatform, slot-pools, deferred-ports, nvfp4-kv, gl
 Бухгалтерию скип-маркеров и остальные процедурные уроки см. в
 [merge-wave-procedure.md](merge-wave-procedure.md), раздел «Раунд 5».
 
-## Порт-долг D1-D5 (D4 готов, остальные - не начато)
+## Порт-долг D1-D5 (D4 и D3 готовы, остальные - не начато)
 
 ### D1. Веточные победы ядра на вендоренном ggml
 
@@ -72,15 +72,23 @@ tags: [merge, round5, ggml, replatform, slot-pools, deferred-ports, nvfp4-kv, gl
 пережили re-platform в [models/gguf/config.py](../../python/freetoken/models/gguf/config.py).
 Исходный кейс и проверенные карты тензоров - [../cases/gguf-glm5next-vision/TASK.md](../cases/gguf-glm5next-vision/TASK.md).
 
-### D3. Глубокая адаптация гибрида/offload к per-format слот-пулам
+### D3. Гибрид/offload на per-format слот-пулах - готово 2026-10-21, коммит 393b682
 
-В [engine/engine.py](../../python/freetoken/engine/engine.py) веточные хвосты
+Статус: готово 2026-10-21, коммит 393b682. Порт не понадобился: main УЖЕ вёз
+гибрид на новом стеке, вернулись только три fail-fast гейта конфига (format
+screen CPU-executor, header-отказ hybrid на непроверяемом gguf, pre-load
+auto floor gate); T2-хелперы НЕ возвращены (однопульный executor с глобальным
+бюджетом). Приёмка: 786k гибридный рецепт бут x2 без лестницы (ready 119/135 с,
+3 пула 29-1103 слотов), гибридный декод 27.71 tok/s против offload 21.00 (+32%)
+на том же стеке. Уроки порта -
+[hybrid-moe-slot-pools-port.md](hybrid-moe-slot-pools-port.md).
+
+Исходный план (до диспозиции): в [engine/engine.py](../../python/freetoken/engine/engine.py) веточные хвосты
 сброшены по правилу «main выигрывает» как отложенные: partition gate ветки,
 gguf hybrid rejection, хелперы T2 (host delivery), plural-cache state. NS-knob
 в этот список не входит - он жил в kernel/triton/mhc.py (db0f6b3), не в engine.py.
 Оставлено в слитном дереве: kv_quant-гейты, mmproj-kwargs, gguf strategy-гейты.
-Порт должен заново связать эти механизмы с per-format слот-пулами #689/#700;
-экономика гибрида, под которую это затачивалось, - [moe-hybrid-cost-model.md](moe-hybrid-cost-model.md),
+Экономика гибрида, под которую это затачивалось, - [moe-hybrid-cost-model.md](moe-hybrid-cost-model.md),
 кейс T2 - [../cases/decode-t2-host-delivery/TASK.md](../cases/decode-t2-host-delivery/TASK.md).
 
 ### D4. glm5next GGUF-загрузчик - готово 2026-10-21, коммит 9314c9b

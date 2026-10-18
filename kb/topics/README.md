@@ -19,6 +19,7 @@
 | [merge-wave-procedure.md](merge-wave-procedure.md) | Регламент слияния origin/main и upstream/main в ветку: волны, правила конфликтов, резолв целевого remote, продолжение прерванной волны |
 | [round5-ggml-replatform-deferred-ports.md](round5-ggml-replatform-deferred-ports.md) | Что main пере-платформировал в GGUF-стеке в раунде 5 (vendored ggml, слот-пулы, deps) и карта порт-долга D1-D5 ветки со статусами |
 | [glm5next-gguf-loader-port.md](glm5next-gguf-loader-port.md) | Как порт D4 (коммит 9314c9b) вернул glm5next GGUF-сервинг на вендоренном ggml: дублирующийся ключ схемы, GPU-касты под op_dequantize, pad_rows MMQ-хвоста, GGUF->FTW стриминг, corr-методика кросс-валидации |
+| [hybrid-moe-slot-pools-port.md](hybrid-moe-slot-pools-port.md) | Как порт D3 (коммит 393b682) закрылся тремя гейтами конфига поверх слот-пулов main: format screen, header-отказ hybrid, auto floor gate; T2 не возвращён; гибрид 27.71 tok/s против offload 21.00 (+32%) |
 | [decode-chain-microfusion.md](decode-chain-microfusion.md) | Почему сокращение пусков ядер не равно ускорению; четыре микрофьюжн-кандидата декода отклонены на железе 2026-09-28; дискриминатор - CTAs/SM, а не счётчик пусков |
 
 Правила статей: YAML-шапка (title/date/hardware/branch-commits/status/tags),
