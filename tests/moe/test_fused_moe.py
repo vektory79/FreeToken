@@ -369,3 +369,85 @@ def test_fused_topk_softmax_is_cuda_graph_capturable():
     torch.cuda.synchronize()
     assert (ids[:3] != -1).all()
     assert (ids[3:] == -1).all()
+
+
+# moved from tests/kernels/test_gguf_quant.py + tests/models/test_gguf_expert_banks.py
+# (both retired by the round-5 test-hygiene wave): the producers below are live on
+# the vendored-ggml stack, only the old branch kernels they used to feed are gone.
+
+
+def test_moe_vec_chunk_cap():
+    from freetoken.layers.moe import _MOE_VEC_MAX_GRID, _assert_moe_vec_chunk
+
+    _assert_moe_vec_chunk(4096, 8)  # default max-prefill-length is unaffected
+    _assert_moe_vec_chunk(8191, 8)  # the cap itself
+    _assert_moe_vec_chunk(65535, 1)  # the exact grid boundary passes
+    with pytest.raises(ValueError, match="max-prefill-length"):
+        _assert_moe_vec_chunk(8192, 8)
+    # boundary-exact: 65536 = the first grid value the moe_vec kernel cannot index
+    with pytest.raises(ValueError, match="65536 exceeds the ggml moe_vec grid limit 65535"):
+        _assert_moe_vec_chunk(65536, 1)
+    assert _MOE_VEC_MAX_GRID == 65535
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("bs", (4, 8, 16, 32))
+def test_moe_align_trio_contract(bs):
+    # the trio every grouped MoE consumer gets from moe_align_block_size: int32
+    # buffers, sentinel fill = numel (NOT -1), numel = pairs + (E+1)*(bs-1) whenever
+    # pairs >= E+1, and expert_ids inside the padded region are real expert ids (the
+    # pad bin E is what kernel-side expert bounds must keep dropping). Swept over
+    # the block sizes the grouped paths run at.
+    from freetoken.moe.fused import moe_align_block_size
+
+    tokens, top_k, experts = 40, 8, 288
+    topk_ids = torch.randint(0, experts, (tokens, top_k), dtype=torch.int32, device="cuda")
+    sorted_ids, expert_ids, npp = moe_align_block_size(topk_ids, bs, experts)
+
+    pairs = topk_ids.numel()
+    assert sorted_ids.dtype == expert_ids.dtype == npp.dtype == torch.int32
+    assert sorted_ids.numel() == pairs + (experts + 1) * (bs - 1)
+    assert expert_ids.numel() == (sorted_ids.numel() + bs - 1) // bs
+    assert npp.shape == (1,)
+
+    sentinel = sorted_ids == pairs  # the producer's sentinel fill is topk_ids.numel()
+    assert sentinel.any(), "pad slots must carry the numel sentinel"
+    assert not (sorted_ids[~sentinel] >= pairs).any(), "real entries are pair indices"
+    total_padded = int(npp.item())
+    assert total_padded % bs == 0 and total_padded <= pairs + experts * bs
+    live = expert_ids[: total_padded // bs]
+    assert (live >= 0).all() and (live < experts).all(), "pad bin ids must not reach the kernel"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("bs", (4, 8, 16, 32))
+@pytest.mark.parametrize("tokens", (40, 137))  # 320 and 1096 pairs: small and large producer paths
+def test_moe_align_tail_contract(tokens, bs):
+    # TP2 tail pin, driven through the TRITON producer directly (the fused wrapper
+    # would pick the sgl_kernel op when it is installed): grouped kernels launch
+    # bins past num_tokens_post_pad (their grid covers the padded buffer), so the
+    # producer must leave NO uninitialized slots. sorted_token_ids[npp:] carries
+    # the numel sentinel and expert_ids[npp/bs:] carries the sentinel expert id
+    # (num_experts), which a consumer's expert bound drops even before the >=
+    # boundary check rejects the bin. Swept over the block-size set.
+    from freetoken.kernel.triton.moe_align import moe_align_block_size as triton_align
+
+    top_k, experts = 8, 288
+    topk_ids = torch.randint(0, experts, (tokens, top_k), dtype=torch.int32, device="cuda")
+    sorted_ids, expert_ids, npp = triton_align(topk_ids, bs, experts)
+
+    pairs = topk_ids.numel()
+    total = int(npp.item())
+    assert total % bs == 0
+    tail = sorted_ids[total:]
+    assert tail.numel() > 0
+    assert (tail == pairs).all(), "sorted tail must carry the numel sentinel"
+    tb = total // bs
+    live = expert_ids[:tb]
+    assert (live >= 0).all() and (live < experts).all(), "live blocks carry real expert ids"
+    pad = expert_ids[tb:]
+    assert pad.numel() > 0
+    assert (pad == experts).all(), "expert_ids tail must carry the sentinel expert id"
+    # belt (boundary check): bins starting at/after total are rejected; the first
+    # such bin is tb and the producer's sentinel values make it a safe read
+    assert expert_ids.numel() > tb and tb * bs >= total

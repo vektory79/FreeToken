@@ -1,10 +1,11 @@
-"""Phase 5: glm5next gguf expert banks -> offload path.
+"""Phase 5: glm5next gguf expert banks -> offload path (historical suite).
 
 Covers the hook resolution (weight.py -> models/gguf/experts.load_gguf_expert_banks),
 per-layer ggml-type preservation, bank geometry vs BLOCK_SHAPE, the provider
-dispatch (expert_banks fmt "gguf"), sizing, the issue-#186 moe_vec chunk cap, and
-a GPU smoke that pushes the fixture banks through an OffloadMoeCache into the
-borrowed ggml kernel. The 147 GB checkpoint is never opened (iter fixture only).
+dispatch (expert_banks fmt "gguf"), sizing, and a GPU smoke that pushes the fixture
+banks through an OffloadMoeCache into the borrowed ggml kernel. The 147 GB
+checkpoint is never opened (iter fixture only). The live moe_vec chunk-cap test
+moved to tests/moe/test_fused_moe.py.
 """
 
 from __future__ import annotations
@@ -39,8 +40,8 @@ from test_glm5_next_gguf import (  # reuse the iter fixture + writer helpers
 # The loader-side coverage D4 owns (bank verbatim-ness, missing-bank loudness,
 # dense-layer reject) lives in test_glm5_next_gguf.py now.
 pytest.skip(
-    "glm5next expert-banks suite rides the old expert-sources API; re-land with the "
-    "expert-banks deferred port",
+    "old expert-sources API removed by the re-platform for good; coverage moved to "
+    "tests/models/test_glm5_next_gguf.py (:1192/:1213/:1225)",
     allow_module_level=True,
 )
 
@@ -121,20 +122,6 @@ def test_bank_bytes_estimate_gguf():
     down = _H * (_EFF // 256) * 210  # conservative Q6_K rows
     assert est == cfg.num_moe_layers * _NE * (gate_up + down)
     assert (BLOCK_SHAPE[18][1], BLOCK_SHAPE[23][1], BLOCK_SHAPE[14][1]) == (98, 136, 210)
-
-
-def test_moe_vec_chunk_cap():
-    from freetoken.layers.moe import _MOE_VEC_MAX_GRID, _assert_moe_vec_chunk
-
-    _assert_moe_vec_chunk(4096, 8)  # default max-prefill-length is unaffected
-    _assert_moe_vec_chunk(8191, 8)  # the cap itself
-    _assert_moe_vec_chunk(65535, 1)  # the exact grid boundary passes
-    with pytest.raises(ValueError, match="max-prefill-length"):
-        _assert_moe_vec_chunk(8192, 8)
-    # boundary-exact: 65536 = the first grid value the moe_vec kernel cannot index
-    with pytest.raises(ValueError, match="65536 exceeds the ggml moe_vec grid limit 65535"):
-        _assert_moe_vec_chunk(65536, 1)
-    assert _MOE_VEC_MAX_GRID == 65535
 
 
 def test_cpu_executor_claims_gguf():

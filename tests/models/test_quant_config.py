@@ -26,6 +26,7 @@ from freetoken.layers import set_rope_device
 from freetoken.layers.quantization import (
     CompressedTensorsConfig,
     Fp8BlockConfig,
+    KernelSelectionError,
     ModelOptConfig,
     MoEConfig,
     Mxfp4Config,
@@ -389,7 +390,6 @@ def test_probed_layers_get_the_method_their_config_says(case: Case, monkeypatch)
         case.check(model, idx)
 
 
-@pytest.mark.skip(reason="D2: branch hybrid/mxfp4 kernel-table expectations predate main's quantization registry; re-land deferred")
 def test_hybrid_explicit_kernel_error_names_the_usable_alternative(monkeypatch):
     """A GPU-only kernel requested under hybrid must say which kernel would run here; the bare rejection sent the user hunting through the kernel tables."""
     from freetoken.kernel import backend
@@ -402,7 +402,11 @@ def test_hybrid_explicit_kernel_error_names_the_usable_alternative(monkeypatch):
         select_kernel(Nvfp4MoEMethod.candidates, "b12x", cfg)
 
 
-@pytest.mark.skip(reason="D2: branch hybrid/mxfp4 kernel-table expectations predate main's quantization registry; re-land deferred")
+@pytest.mark.skip(
+    "stale pin: the triton fp8-block kernel gained a CPU executor format "
+    "(fp8_block.py cpu_format='fp8_block', coverage tests/moe/test_cpu_moe_fp8_block.py), "
+    "so 'GPU-only' no longer holds - a new test under the current contract is needed"
+)
 def test_hybrid_explicit_fp8_kernel_error_reports_an_empty_table():
     """fp8 experts ship one kernel and it decodes on the GPU only: the explicit request must say no kernel can run here, not name an alternative that does not exist."""
     cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=Fp8BlockConfig.SCHEMES["BLOCK"], strategy="hybrid", decode_target="cpu")
@@ -410,7 +414,11 @@ def test_hybrid_explicit_fp8_kernel_error_reports_an_empty_table():
         select_kernel(Fp8BlockMoEMethod.candidates, "triton", cfg)
 
 
-@pytest.mark.skip(reason="D2: branch hybrid/mxfp4 kernel-table expectations predate main's quantization registry; re-land deferred")
+@pytest.mark.skip(
+    "stale pin: the triton fp8-block kernel gained a CPU executor format "
+    "(fp8_block.py cpu_format='fp8_block', coverage tests/moe/test_cpu_moe_fp8_block.py), "
+    "so auto no longer rejects the table - a new test under the current contract is needed"
+)
 def test_hybrid_auto_fp8_kernel_error_lists_what_was_skipped():
     """The auto branch's rejection carries the same per-kernel reasons the explicit path got."""
     cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=Fp8BlockConfig.SCHEMES["BLOCK"], strategy="hybrid", decode_target="cpu")
@@ -432,11 +440,12 @@ def test_nvfp4_auto_selection_still_lands_on_triton(monkeypatch):
     assert select_kernel(Nvfp4MoEMethod.candidates, "triton", cfg).name == "triton"
 
 
-@pytest.mark.skip(reason="D2: branch hybrid/mxfp4 kernel-table expectations predate main's quantization registry; re-land deferred")
 def test_mxfp4_auto_selection_picks_by_expert_biases():
     """The same helper over the second kind: gpt-oss experts (bias, interleaved) get the gpt-oss kernel, plain ones the standard kernel."""
+    # act_block: the W4A8 triton kernel needs the fp8 activation quant block the
+    # dialect sets (configs/fp8.py); without it no mxfp4 kernel is usable at all
     for has_bias, expected in ((False, "triton"), (True, "triton_gptoss")):
-        cfg = MoEConfig(num_experts=128, hidden=2880, intermediate=2880, top_k=8, scheme=Mxfp4Config.SCHEME, strategy="offload", decode_target="gpu", has_bias=has_bias, interleaved=has_bias)
+        cfg = MoEConfig(num_experts=128, hidden=2880, intermediate=2880, top_k=8, scheme=Mxfp4Config.SCHEME, strategy="offload", decode_target="gpu", has_bias=has_bias, interleaved=has_bias, act_block=128)
         assert select_kernel(Mxfp4MoEMethod.candidates, "auto", cfg).name == expected, has_bias
 
 

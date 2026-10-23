@@ -1,15 +1,11 @@
 """CPU MoE executor -- GGUF K-quant expert banks (IQ3_XXS / IQ4_XS / Q6_K).
 
-The CPU GEMV (the gguf section of csrc/cpu_moe/cpu_moe_ext.cpp) dequantizes the
-packed 256-wide blocks on the fly, reading the same pinned per-role banks the GPU
-offload path streams. Two dot tiers: the scalar fp32-LUT kernels over bf16
-activations (correctness reference + fallback) and, by default (AVX2+FMA CPUs,
-FREETOKEN_GGUF_DOT_TIER=scalar|avx2 overrides), the verbatim ggml AVX2 integer
-kernels (W4A8-K: activations q8_K-quantized once per row and reused across the
-expert dots -- the same one-shot prepare the nvfp4/q4_0 W4A8 paths use). Parity
-reference is the venv gguf-py ``dequantize`` (fp32; proven vs the CUDA kernels in
-tests/kernels/test_gguf_quant.py), with the tier's activation prep mirrored via
-_q8_k_roundtrip so reference and kernel consume the same integer activations.
+The CPU GEMV delegates to the ggml-cpu row kernels (csrc/cpu_moe/kernels/gguf.cpp):
+each kernel's from_float prepares activations in its own vec_dot type (q8_K for
+the K-quants, once per row and reused across the expert dots), so the reference
+mirrors that prep unconditionally via _q8_k_roundtrip. Parity reference is the
+vendored third_party.gguf.quants.dequantize (fp32; the CPU-path reference per
+the D4 conventions).
 The accepted dequant contract is the per-element dfloat bound
 ``8 * 2^-11 * factor * |d| + 1e-3`` (factor = _DEQUANT_FACTOR per format); the
 parity tests propagate it through the GEMV and additionally carry a tight rel
@@ -29,20 +25,19 @@ import numpy as np
 import pytest
 import torch
 
-gguf = pytest.importorskip("gguf", reason="D1: branch gguf CUDA/CPU kernel wins (grouped MMQ, m-tile, q8_0 N-split) removed by main's vendored-ggml re-platform (#690); port deferred")
+from freetoken.third_party.gguf.constants import GGMLQuantizationType, GGML_QUANT_SIZES
+from freetoken.third_party.gguf.quants import dequantize as reference_dequantize
 
-pytest.importorskip(
-    "freetoken.models.gguf.dequant",
-    reason="D1: branch gguf CUDA/CPU kernel wins (grouped MMQ, m-tile, q8_0 N-split) removed by main's vendored-ggml re-platform (#690); port deferred",
-)
-
-from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K
+# the D1-branch reference dequant (models/gguf/dequant) is gone; the vendored
+# gguf-py copy is the CPU-path parity reference per the D4 conventions
+GGML_IQ3_XXS = GGMLQuantizationType.IQ3_XXS
+GGML_IQ4_XS = GGMLQuantizationType.IQ4_XS
+GGML_Q6_K = GGMLQuantizationType.Q6_K
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
-# max |value| per element as a multiple of the block's fp16 d (from the gguf-py
-# dequant formulas); mirrors tests/kernels/test_gguf_quant.py::_DEQUANT_FACTOR for
-# the three formats the CPU GEMV serves.
+# max |value| per element as a multiple of the block's fp16 d (from the vendored
+# gguf-py dequant formulas) for the three formats the CPU GEMV serves.
 _DEQUANT_FACTOR = {
     GGML_IQ3_XXS: 8.0 * 118.0,
     GGML_IQ4_XS: 32.0 * 127.0,
@@ -57,7 +52,7 @@ _ROLE_SEED = {"gate": 1, "up": 2, "down": 3}
 # ------------------------------- pack helpers -------------------------------
 # Byte-exact block layouts from the vendored ggml-common.h (block_q6_K :104,
 # block_iq3_xxs :137, block_iq4_xs :181). fp16 scale fields are constructed
-# (not random bytes), mirroring _FP16_SCALE_FIELDS in tests/kernels/test_gguf_quant.py.
+# (not random bytes), per the vendored gguf-py dequant formulas.
 
 
 def _pack_q6_k(ql: torch.Tensor, qh: torch.Tensor, scales: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
@@ -163,9 +158,9 @@ def _role_bank(uniform: bool, E: int, rows: int, ne0: int, qtype: int, seed: int
 
 
 def _dequant_role(packed: torch.Tensor, qtype: int, ne0: int) -> torch.Tensor:
-    """[E, rows, nb*rb] packed -> [E, rows, ne0] fp32 via the venv gguf-py reference."""
+    """[E, rows, nb*rb] packed -> [E, rows, ne0] fp32 via the vendored reference."""
     raw = packed.contiguous().reshape(-1).numpy()
-    flat = gguf.dequantize(raw, gguf.GGMLQuantizationType(qtype)).astype(np.float32)
+    flat = reference_dequantize(raw, GGMLQuantizationType(qtype)).astype(np.float32)
     return torch.from_numpy(flat.copy()).reshape(packed.shape[0], packed.shape[1], ne0)
 
 
@@ -187,52 +182,38 @@ def _q8_k_roundtrip(x: torch.Tensor) -> torch.Tensor:
 
 
 def _gguf_i8_active(ex) -> bool:
-    """Whether the executor picked the W4A8-K (avx2) integer dot tier."""
-    return "avx2-w4a8k" in getattr(ex, "isa", "")
-
-
-def _host_has_avx2_fma() -> bool:
-    """Host-side mirror of the C++ gate (__builtin_cpu_supports("avx2") &&
-    ("fma")): the W4A8-K tier engages only when BOTH are present, whatever the
-    FREETOKEN_GGUF_DOT_TIER override asks for (pick_gguf_dot_tier caps down)."""
-    try:
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if line.split(":")[0].strip() == "flags":
-                    flags = set(line.split(":")[1].split())
-                    return "avx2" in flags and "fma" in flags
-    except OSError:
-        pass
-    return False
-
-
-_HOST_AVX2 = _host_has_avx2_fma()
+    """The ggml-cpu vec_dot kernels consume q8_K-quantized activations by design
+    (each kernel's from_float prepares its own vec_dot type); always mirror it."""
+    return True
 
 
 def _make_gguf_cache(types, L: int, E: int, H: int, I: int, seed: int = 0, uniform: bool = False):
     """Pinned per-role gguf banks + the cache stub the executor reads.
 
-    Per-role geometry (glm5next): gate/up are I rows packed over ne0 = H; down is H
-    rows packed over ne0 = I -- the asymmetry square fixtures mask."""
+    ``types`` is one (gate, up, down) triple for every layer, or a list of L
+    triples. Per-role geometry (glm5next): gate/up are I rows packed over
+    ne0 = H; down is H rows packed over ne0 = I -- the asymmetry square fixtures
+    mask. The executor reads one MERGED gate_up bank per layer (gate rows, then
+    up rows), the layout the FTW converter writes."""
     from freetoken.kernel.pinned import alloc_pinned_tensor
 
-    gate_t, up_t, down_t = types
-    banks = {}
-    for role, rows, ne0, qtype in (
-        ("gate", I, H, gate_t),
-        ("up", I, H, up_t),
-        ("down", H, I, down_t),
-    ):
-        per_layer = []
-        for layer in range(L):
-            packed = _role_bank(uniform, E, rows, ne0, qtype, seed * 1000 + 17 * layer + _ROLE_SEED[role])
-            pinned = alloc_pinned_tensor(*packed.shape, dtype=torch.uint8)
-            pinned.copy_(packed)
-            per_layer.append(pinned)
-        banks[role] = per_layer
+    triples = list(types) if types and isinstance(types[0], (tuple, list)) else [tuple(types)] * L
+    assert len(triples) == L, (len(triples), L)
+    banks = {"gate_up": [], "down": []}
+    for layer, (gate_t, up_t, down_t) in enumerate(triples):
+        gate = _role_bank(uniform, E, I, H, gate_t, seed * 1000 + 17 * layer + _ROLE_SEED["gate"])
+        up = _role_bank(uniform, E, I, H, up_t, seed * 1000 + 17 * layer + _ROLE_SEED["up"])
+        merged = torch.cat([gate, up], dim=1)  # [E, 2I, rb(H)]: gate rows, then up rows
+        pinned = alloc_pinned_tensor(*merged.shape, dtype=torch.uint8)
+        pinned.copy_(merged)
+        banks["gate_up"].append(pinned)
+        down = _role_bank(uniform, E, H, I, down_t, seed * 1000 + 17 * layer + _ROLE_SEED["down"])
+        pinned = alloc_pinned_tensor(*down.shape, dtype=torch.uint8)
+        pinned.copy_(down)
+        banks["down"].append(pinned)
     return SimpleNamespace(
         quant_format="gguf",
-        gguf_types=[tuple(types)] * L,
+        gguf_types=triples,
         bank_sources=banks,
         num_layers=L,
         num_experts=E,
@@ -251,9 +232,11 @@ def _reference_decode(banks, types, layer, hidden, w, ids, top_k, q8k_acts=False
     dot, so reference and kernel consume the SAME integer activations and the
     residual is weight-dequant + accumulation error only (harness-grade parity)."""
     gate_t, up_t, down_t = types
-    gate_w = _dequant_role(banks["gate"][layer], gate_t, hidden.shape[-1])  # [E, I, H]
-    up_w = _dequant_role(banks["up"][layer], up_t, hidden.shape[-1])  # [E, I, H]
-    down_w = _dequant_role(banks["down"][layer], down_t, banks["gate"][layer].shape[1])  # [E, H, I]
+    # the executor reads one merged gate_up bank (gate rows, then up rows)
+    merged = banks["gate_up"][layer]
+    gate_w = _dequant_role(merged[:, : merged.shape[1] // 2], gate_t, hidden.shape[-1])  # [E, I, H]
+    up_w = _dequant_role(merged[:, merged.shape[1] // 2 :], up_t, hidden.shape[-1])  # [E, I, H]
+    down_w = _dequant_role(banks["down"][layer], down_t, merged.shape[1] // 2)  # [E, H, I]
     x = hidden.float()
     if q8k_acts:
         x = _q8_k_roundtrip(x)
@@ -309,6 +292,7 @@ def _dfloat_bound(ref, extras, w, ids, hidden, factor_gu, factor_dn, dmax=2.0):
 
 
 def _run_executor(cache, top_k, bs, H, dev, seed, layer=0, x_scale=0.5, ids=None):
+    from freetoken.layers.quantization.moe.gguf import cpu_spec_for_types
     from freetoken.moe.cpu_executor import CpuMoeExecutor
 
     ex = CpuMoeExecutor(
@@ -319,6 +303,8 @@ def _run_executor(cache, top_k, bs, H, dev, seed, layer=0, x_scale=0.5, ids=None
         num_threads=2,
         max_tokens=bs,
         device=dev,
+        # what engine.py hands the executor: each layer's quant-method cpu_spec
+        layer_formats=[cpu_spec_for_types(t[0], t[2]) for t in cache.gguf_types],
     )
     gen = torch.Generator().manual_seed(seed)
     hidden = (torch.randn(bs, H, generator=gen) * x_scale).to(torch.bfloat16)
@@ -343,7 +329,7 @@ def test_cpu_moe_gguf_parity_vs_gguf_py(qtype):
     types = (qtype, qtype, qtype)
     cache = _make_gguf_cache(types, L, E, H, I, seed=100 + qtype)
     ex, cpu_out, hidden, w, ids = _run_executor(cache, top_k, bs, H, dev, seed=400 + qtype, layer=1)
-    assert ex.quant_format == _TYPE_NAMES[qtype]
+    assert ex.quant_format == "gguf"
 
     # The W4A8-K (avx2) tier quantizes the activations, so the reference mirrors
     # that prep; the scalar tier keeps the raw bf16 activations. Either way the
@@ -375,7 +361,8 @@ def test_cpu_moe_gguf_uniform_analytic(qtype):
     types = (qtype, qtype, qtype)
     cache = _make_gguf_cache(types, L, E, H, I, seed=3, uniform=True)
 
-    gate_w = _dequant_role(cache.bank_sources["gate"][0], qtype, H)
+    merged = cache.bank_sources["gate_up"][0]
+    gate_w = _dequant_role(merged[:, : merged.shape[1] // 2], qtype, H)
     value = gate_w[0, 0, 0].item()
     assert (gate_w == value).all(), f"fixture not uniform for {_TYPE_NAMES[qtype]}"
 
@@ -395,102 +382,6 @@ def test_cpu_moe_gguf_uniform_analytic(qtype):
 
     rel = (cpu_out[0] - want).abs().max() / (want.abs().max() + 1e-3)
     assert rel < 5e-3, f"{_TYPE_NAMES[qtype]} analytic rel err {rel.item()} (w={value})"
-
-
-@pytest.mark.skipif(
-    not _HOST_AVX2,
-    reason="the avx2 W4A8-K tier engages only on AVX2+FMA hosts (the tier override "
-    "caps down to scalar elsewhere, so the A/B would compare scalar vs scalar)",
-)
-@pytest.mark.parametrize(
-    "qtype", (GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q6_K), ids=["iq3_xxs", "iq4_xs", "q6_k"]
-)
-def test_cpu_moe_gguf_i8_tier_ab(qtype, monkeypatch):
-    """Tier A/B on the SAME fixture (identical banks + inputs, only the tier env
-    differs): FREETOKEN_GGUF_DOT_TIER=avx2 (the verbatim ggml W4A8-K kernels) vs
-    scalar (the bf16 fp32-LUT reference tier).
-
-    Acceptance mirrors the ggml microbench harness: against the q8_K-MIRRORED fp32
-    reference (same integer activations on both sides) the avx2 tier must sit at
-    harness-grade parity inside the propagated dfloat bound; the scalar tier must
-    keep its pre-existing parity vs the raw-bf16 reference; and the two tiers may
-    differ only by the activation-quantization error the W4A8-K tier introduces
-    (triangle bound over the two references). The rel bar is 3e-3, not the
-    harness's 1e-3: the harness fed IDENTICAL fp32 activations to both kernels,
-    while this pipeline re-quantizes the bf16 intermediate for the down leg, where
-    the C-vs-torch expf/silu ulp drift flips a bf16 rounding and q6_K's single
-    down block re-derives its amax (measured 1.3e-3 worst case, q6_K). The ISA
-    discriminator value is unchanged: any sign/LUT/scale bug in the ported
-    kernels sits at O(1) relative, two orders above the bar.
-
-    Skipped on hosts without AVX2+FMA: there the tier override caps down to
-    scalar (pick_isa's cap-down semantics) and the A/B would compare scalar
-    against scalar."""
-    bs, top_k, L, E, H, I = 3, 3, 2, 8, 512, 256
-    dev = torch.device("cuda")
-    types = (qtype, qtype, qtype)
-
-    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "avx2")
-    cache = _make_gguf_cache(types, L, E, H, I, seed=200 + qtype)
-    ex_avx, out_avx, hidden, w, ids = _run_executor(
-        cache, top_k, bs, H, dev, seed=500 + qtype, layer=1
-    )
-    assert "avx2-w4a8k" in ex_avx.isa, ex_avx.isa
-
-    # Cap-down invariant: the selected tier never exceeds CPU support. Auto must
-    # pick the W4A8-K tag exactly when the host has AVX2+FMA (asserted via the
-    # isa tag), so the forced-avx2 run above engages through the cap on this
-    # host -- and on a non-AVX2 host the override would cap to scalar instead
-    # of SIGILLing on the ggml kernels.
-    monkeypatch.delenv("FREETOKEN_GGUF_DOT_TIER", raising=False)
-    ex_auto, _, _, _, _ = _run_executor(
-        _make_gguf_cache(types, L, E, H, I, seed=200 + qtype),
-        top_k, bs, H, dev, seed=500 + qtype, layer=1,
-    )
-    assert ("avx2-w4a8k" in ex_auto.isa) == _HOST_AVX2, ex_auto.isa
-
-    monkeypatch.setenv("FREETOKEN_GGUF_DOT_TIER", "scalar")
-    ex_sc, out_sc, _, _, _ = _run_executor(
-        _make_gguf_cache(types, L, E, H, I, seed=200 + qtype),
-        top_k, bs, H, dev, seed=500 + qtype, layer=1,
-    )
-    assert "avx2-w4a8k" not in ex_sc.isa, ex_sc.isa
-
-    ref_q8, extras_q8 = _reference_decode(
-        cache.bank_sources, types, 1, hidden, w, ids, top_k, q8k_acts=True
-    )
-    ref_bf16, extras_bf16 = _reference_decode(cache.bank_sources, types, 1, hidden, w, ids, top_k)
-
-    rel_q8 = (out_avx - ref_q8).abs().max() / (ref_q8.abs().max() + 1e-6)
-    assert rel_q8 < 3e-3, (
-        f"{_TYPE_NAMES[qtype]} avx2 tier rel err vs the q8_K-mirrored reference "
-        f"{rel_q8.item()} (harness discriminator)"
-    )
-    bound_q8 = _dfloat_bound(
-        ref_q8, extras_q8, w, ids, hidden, _DEQUANT_FACTOR[qtype], _DEQUANT_FACTOR[qtype]
-    )
-    dev_q8 = (out_avx - ref_q8).abs()
-    assert (dev_q8 <= bound_q8).all(), (
-        f"{_TYPE_NAMES[qtype]} avx2 tier: max abs dev {dev_q8.max():.6g} exceeds the "
-        f"propagated dfloat bound {bound_q8.max():.6g}"
-    )
-
-    rel_sc = (out_sc - ref_bf16).abs().max() / (ref_bf16.abs().max() + 1e-6)
-    assert rel_sc < 2e-2, f"{_TYPE_NAMES[qtype]} scalar tier rel err {rel_sc.item()}"
-
-    # Tier-to-tier difference == the q8_K activation quantization the W4A8-K tier
-    # introduces (plus each tier's own tolerated error): triangle over the two
-    # references. A tier bug shows up far outside this envelope.
-    act_gap = (ref_q8 - ref_bf16).abs()
-    bound_sc = _dfloat_bound(
-        ref_bf16, extras_bf16, w, ids, hidden, _DEQUANT_FACTOR[qtype], _DEQUANT_FACTOR[qtype]
-    )
-    d_tiers = (out_avx - out_sc).abs()
-    envelope = bound_q8 + bound_sc + act_gap + 1e-3
-    assert (d_tiers <= envelope).all(), (
-        f"{_TYPE_NAMES[qtype]} tier A/B: max |avx2 - scalar| {d_tiers.max():.6g} exceeds "
-        f"the quantization envelope {envelope.max():.6g}"
-    )
 
 
 # The three real glm5next per-projection signatures (gate, up, down): the three
@@ -516,6 +407,7 @@ def test_cpu_moe_gguf_per_projection_formats(types):
     dev = torch.device("cuda")
     cache = _make_gguf_cache(types, L, E, H, I, seed=7)
 
+    from freetoken.layers.quantization.moe.gguf import cpu_spec_for_types
     from freetoken.moe.cpu_executor import CpuMoeExecutor
 
     ex = CpuMoeExecutor(
@@ -526,9 +418,9 @@ def test_cpu_moe_gguf_per_projection_formats(types):
         num_threads=2,
         max_tokens=bs,
         device=dev,
+        layer_formats=[cpu_spec_for_types(t[0], t[2]) for t in cache.gguf_types],
     )
-    assert ex.quant_format == _TYPE_NAMES[types[0]]
-    assert ex.fmt_up == _TYPE_NAMES[types[1]] and ex.fmt_down == _TYPE_NAMES[types[2]]
+    assert ex.quant_format == "gguf"
 
     gen = torch.Generator().manual_seed(11)
     hidden = (torch.randn(bs, H, generator=gen) * 0.5).to(torch.bfloat16)
@@ -612,29 +504,18 @@ def test_cpu_moe_gguf_out_of_range_expert_is_skipped():
     )
 
 
-def test_cpu_moe_gguf_unsupported_type_fails_loudly():
-    """A gguf type without a CPU GEMV (e.g. Q3_K = 11) must raise, not mis-decode."""
-    from freetoken.moe.cpu_executor import _split_gguf_formats
-
-    cache = SimpleNamespace(gguf_types=[(11, 11, 11)])
-    with pytest.raises(NotImplementedError, match="no CPU GEMV"):
-        _split_gguf_formats("gguf", cache)
-
-
-def test_cpu_moe_gguf_gate_row_bytes_not_block_multiple_fails_loudly():
-    """A gate bank whose row bytes are not an exact multiple of the gate format's
-    block bytes must assert BEFORE H is floor-derived from row_bytes // rb: a
-    silent floor would under-derive H and mis-address every row."""
+def test_cpu_moe_gguf_mislabeled_type_fails_loudly():
+    """A layer_formats spec whose declared type disagrees with the bank's packed
+    row geometry must raise at executor construction, never mis-decode (the
+    row-bytes guard reads the type the spec declares)."""
     from freetoken.moe.cpu_executor import CpuMoeExecutor
 
-    bs, L, E, H, I = 2, 1, 8, 1024, 256
+    bs, L, E, H, I = 2, 1, 8, 512, 256
     dev = torch.device("cuda")
-    qtype = GGML_IQ3_XXS
-    cache = _make_gguf_cache((qtype, qtype, qtype), L, E, H, I, seed=31)
-    rb = BLOCK_SHAPE[qtype][1]  # the same table the resolver reads
-    bad = 3 * rb + 2  # 3 full blocks plus 2 stray bytes
-    cache.bank_sources["gate"] = [b[..., :bad] for b in cache.bank_sources["gate"]]
-    with pytest.raises(AssertionError, match=rf"{bad}, {rb}, '{_TYPE_NAMES[qtype]}'"):
+    cache = _make_gguf_cache((GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ3_XXS), L, E, H, I, seed=47)
+    # the down bank holds iq3_xxs rows; declaring q6_K must fail the row-bytes check
+    specs = [("gguf", {"gate_up_type": GGML_IQ3_XXS, "down_type": GGML_Q6_K})]
+    with pytest.raises(ValueError, match=r"down bank .* is not .* rows of 256 values"):
         CpuMoeExecutor(
             cache,
             top_k=2,
@@ -643,6 +524,34 @@ def test_cpu_moe_gguf_gate_row_bytes_not_block_multiple_fails_loudly():
             num_threads=2,
             max_tokens=bs,
             device=dev,
+            layer_formats=specs,
+        )
+
+
+def test_cpu_moe_gguf_gate_row_bytes_not_block_multiple_fails_loudly():
+    """A gate_up bank whose row bytes are not an exact multiple of the declared
+    format's block bytes must raise at executor construction, before any row is
+    addressed: a silent floor of row_bytes // rb would under-derive the geometry
+    and mis-address every row."""
+    from freetoken.moe.cpu_executor import CpuMoeExecutor
+
+    bs, L, E, H, I = 2, 1, 8, 1024, 256
+    dev = torch.device("cuda")
+    qtype = GGML_IQ3_XXS
+    cache = _make_gguf_cache((qtype, qtype, qtype), L, E, H, I, seed=31)
+    rb = GGML_QUANT_SIZES[qtype][1]  # type_size: packed bytes per 256-element block
+    bad = 3 * rb + 2  # 3 full blocks plus 2 stray bytes
+    cache.bank_sources["gate_up"] = [b[..., :bad] for b in cache.bank_sources["gate_up"]]
+    with pytest.raises(ValueError, match=r"gate_up bank .* is not .* rows of 1024 values"):
+        CpuMoeExecutor(
+            cache,
+            top_k=2,
+            activation="silu",
+            apply_router_weight_on_input=False,
+            num_threads=2,
+            max_tokens=bs,
+            device=dev,
+            layer_formats=[("gguf", {"gate_up_type": qtype, "down_type": qtype})],
         )
 
 
@@ -661,7 +570,7 @@ def test_cpu_moe_gguf_short_expert_bank_fails_loudly():
     cache.bank_sources["down"] = [b[:short] for b in cache.bank_sources["down"]]
     with pytest.raises(
         NotImplementedError,
-        match=rf"down bank has {short} expert rows but the cache declares num_experts={E}",
+        match=rf"down bank on layer 0 has {short} expert rows but the cache declares num_experts={E}",
     ):
         CpuMoeExecutor(
             cache,
@@ -671,22 +580,61 @@ def test_cpu_moe_gguf_short_expert_bank_fails_loudly():
             num_threads=2,
             max_tokens=bs,
             device=dev,
+            layer_formats=[("gguf", {"gate_up_type": qtype, "down_type": qtype})],
         )
 
 
-def test_cpu_moe_gguf_diverging_layer_types_fail_loudly():
-    """One layer whose (gate, up, down) triple diverges from layer 0 must fail
-    loudly: the executor reads types[0] for the whole signature partition."""
-    from freetoken.moe.cpu_executor import _split_gguf_formats
+def test_cpu_moe_gguf_short_non_rep_layer_bank_fails_loudly():
+    """The short-bank guard must sweep every layer, not just the rep one the
+    ctor derived the geometry from: rep layer 0 is whole here, so only the
+    all-layer sweep catches a short layer-1 bank before the C++ skip guard
+    reads out of bounds."""
+    from freetoken.layers.quantization.moe.gguf import cpu_spec_for_types
+    from freetoken.moe.cpu_executor import CpuMoeExecutor
 
-    base = (GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ4_XS)
-    diverging = (GGML_IQ4_XS, GGML_IQ4_XS, GGML_Q6_K)  # (23, 23, 14) at layer 2
-    cache = SimpleNamespace(gguf_types=[base, base, diverging])
+    bs, L, E, H, I = 2, 2, 8, 512, 256
+    dev = torch.device("cuda")
+    qtype = GGML_Q6_K
+    cache = _make_gguf_cache((qtype, qtype, qtype), L, E, H, I, seed=39)
+    short = E - 1
+    cache.bank_sources["down"][1] = cache.bank_sources["down"][1][:short]
     with pytest.raises(
-        NotImplementedError, match="must be uniform within a partition"
-    ) as excinfo:
-        _split_gguf_formats("gguf", cache)
-    assert f"[(2, {tuple(diverging)})]" in str(excinfo.value)
+        NotImplementedError,
+        match=rf"down bank on layer 1 has {short} expert rows but the cache declares num_experts={E}",
+    ):
+        CpuMoeExecutor(
+            cache,
+            top_k=2,
+            activation="silu",
+            apply_router_weight_on_input=False,
+            num_threads=2,
+            max_tokens=bs,
+            device=dev,
+            layer_formats=[cpu_spec_for_types(qtype, qtype) for _ in range(L)],
+        )
+
+
+def test_cpu_moe_gguf_diverging_layer_types_decode_per_layer():
+    """Layers with different (gate, up, down) triples decode each under its own
+    spec: the caller's per-layer layer_formats carry the types (the old
+    uniform-partition contract is gone - mixed files are the supported shape,
+    covered end-to-end by test_mixed_expert_formats.py)."""
+    bs, top_k, L, E, H, I = 2, 3, 2, 8, 512, 256
+    dev = torch.device("cuda")
+    types = [(GGML_IQ3_XXS, GGML_IQ3_XXS, GGML_IQ4_XS), (GGML_IQ4_XS, GGML_IQ4_XS, GGML_Q6_K)]
+    cache = _make_gguf_cache(types, L, E, H, I, seed=41)
+    ex, out0, hidden, w, ids = _run_executor(cache, top_k, bs, H, dev, seed=43, layer=0)
+    ref0, _ = _reference_decode(
+        cache.bank_sources, types[0], 0, hidden, w, ids, top_k, q8k_acts=_gguf_i8_active(ex)
+    )
+    rel0 = (out0 - ref0).abs().max() / (ref0.abs().max() + 1e-6)
+    assert rel0 < 2e-2, f"layer 0 {types[0]} rel err {rel0.item()}"
+    out1 = ex.decode(1, hidden.to(dev), w.to(dev), ids.to(dev)).float().cpu()
+    ref1, _ = _reference_decode(
+        cache.bank_sources, types[1], 1, hidden, w, ids, top_k, q8k_acts=_gguf_i8_active(ex)
+    )
+    rel1 = (out1 - ref1).abs().max() / (ref1.abs().max() + 1e-6)
+    assert rel1 < 2e-2, f"layer 1 {types[1]} rel err {rel1.item()}"
 
 
 if __name__ == "__main__":
@@ -702,5 +650,7 @@ if __name__ == "__main__":
         print(f"gguf cpu gemv per-projection {'-'.join(_TYPE_NAMES[t] for t in sig)} OK")
     test_cpu_moe_gguf_out_of_range_expert_is_skipped()
     print("gguf cpu gemv out-of-range skip OK")
-    test_cpu_moe_gguf_unsupported_type_fails_loudly()
-    print("gguf cpu gemv unsupported-type OK")
+    test_cpu_moe_gguf_mislabeled_type_fails_loudly()
+    print("gguf cpu gemv mislabeled-type OK")
+    test_cpu_moe_gguf_diverging_layer_types_decode_per_layer()
+    print("gguf cpu gemv per-layer types OK")

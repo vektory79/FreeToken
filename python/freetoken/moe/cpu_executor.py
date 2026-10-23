@@ -471,7 +471,17 @@ class CpuMoeExecutor:
 
         gate_up, down = banks["gate_up"], banks["down"]
         H, I = int(down[rep].shape[1]), int(gate_up[rep].shape[1] // 2)
-        for role, t, ggml_type, k in (("gate_up", gate_up[rep], gate_up_type, H), ("down", down[rep], down_type, I)):
+        for role, bank, ggml_type, k in (("gate_up", gate_up, gate_up_type, H), ("down", down, down_type, I)):
+            # the C++ skip guard bounds e by the CONFIGURED count: a shorter bank
+            # would read out of bounds, so fail at construction instead - on every
+            # layer, not just the rep one the geometry above was derived from
+            for layer_id, t in enumerate(bank):
+                if t.shape[0] < self.num_experts:
+                    raise NotImplementedError(
+                        f"{role} bank on layer {layer_id} has {t.shape[0]} expert rows "
+                        f"but the cache declares num_experts={self.num_experts}"
+                    )
+            t = bank[rep]
             dtype = float_dtype(ggml_type) if float_dtype(ggml_type) is not None else torch.uint8
             if t.dtype != dtype or t.shape[-1] * t.element_size() != row_bytes(ggml_type, k):
                 raise ValueError(f"MoE layer {rep} {role} bank {tuple(t.shape)} {t.dtype} is not {type_name(ggml_type)} rows of {k} values")
