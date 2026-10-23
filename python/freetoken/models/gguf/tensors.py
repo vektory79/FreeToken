@@ -29,6 +29,14 @@ def matrix(info: GgufTensorInfo) -> torch.Tensor:
     return packed_rows(info) if is_quantized(info.ggml_type) else float_tensor(info)
 
 
+def untile(t: torch.Tensor, num_k_heads: int, head_dim: int, dim: int = 0) -> torch.Tensor:
+    """Tiled value heads (k-head minor) back to grouped (k-head major) along ``dim``."""
+    n = t.shape[dim]
+    r = n // (num_k_heads * head_dim)
+    idx = torch.arange(n).view(r, num_k_heads, head_dim).transpose(0, 1).reshape(n)
+    return t.index_select(dim, idx)
+
+
 def fused(prefix: str, infos: list[GgufTensorInfo], parts: list[torch.Tensor], k: int, pad_to: int = 0) -> Iterator[tuple[str, torch.Tensor]]:
     """One fused module: float parts concatenated into ``weight``; with any quantized part, one matrix per ggml-type run (float runs as bf16 rows, quantized runs packed)."""
     types = [i.ggml_type for i in infos]
@@ -53,4 +61,4 @@ def fused(prefix: str, infos: list[GgufTensorInfo], parts: list[torch.Tensor], k
         yield f"{prefix}.{segment_param(i)}", torch.cat([*rows, *tail], dim=0)
 
 
-__all__ = ["float_tensor", "fused", "matrix", "packed_rows"]
+__all__ = ["float_tensor", "fused", "matrix", "packed_rows", "untile"]

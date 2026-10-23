@@ -185,30 +185,6 @@ def _match_payload_crc(data, alg: str | None, crc: int) -> bool:
     return False
 
 
-def _calc_payload_crc_iovecs(bufs, need: int, alg: str) -> int:
-    """Chained checksum over a record's iovec list, covering exactly `need` payload
-    bytes - the zero padding tail is excluded, matching the assembled-path crc."""
-    if alg != _CRC32C_ALG:
-        data = bytearray()            # legacy algorithms are never produced today
-        left = need
-        for b in bufs:
-            if left <= 0:
-                break
-            take = min(left, len(b))
-            data += b[:take]
-            left -= take
-        return zlib.crc32(bytes(data))
-    crc = 0
-    left = need
-    for b in bufs:
-        if left <= 0:
-            break
-        take = min(left, len(b))
-        crc = crc32c.crc32c(b[:take], crc)   # chained; GIL released above 32 KiB
-        left -= take
-    return crc
-
-
 class _PendingVolume:
     """Reserved-but-unjournaled blob volume shared by the flush pipeline threads: the
     builder adds each reserved span before the cap check of the next one, the writer

@@ -7,9 +7,9 @@ reads the public control plane (``/health``, ``/v1/stats``, ``/v1/cache/status``
 and ``/cache`` drives ``POST /v1/cache/rebuild``. There is no shell-private server interface, so
 ``ft shell`` can attach to any server, in this process or on another machine.
 
-Transport follows what the repo already does: the ``openai`` SDK for generation (like
-``freetoken.benchmark.client``), stdlib ``urllib`` for the control-plane JSON (like ``ft ctl``
-and the daemon). Nothing here imports torch -- attaching to a remote server costs a few
+Transport follows what the repo already does: the ``openai`` SDK for generation, stdlib
+``urllib`` for the control-plane JSON (like ``ft ctl`` and the daemon). Nothing here imports
+torch -- attaching to a remote server costs a few
 milliseconds of imports, not a CUDA context.
 """
 

@@ -1,4 +1,3 @@
-import logging
 import os
 from typing import TYPE_CHECKING, Iterator, Tuple
 
@@ -25,12 +24,6 @@ TopK = Tuple[torch.Tensor, torch.Tensor]
 # default. Set FREETOKEN_HYBRID_OVERLAP=0 to force the serial path (CPU sync before the
 # GPU work) -- a measurement-only escape hatch to A/B the overlap benefit.
 _HYBRID_OVERLAP = os.getenv("FREETOKEN_HYBRID_OVERLAP", "1") != "0"
-
-# Bare stdlib logger: freetoken's init_logger does not wire it, so these lines never
-# reach ft serve boot logs - acceptable for the one-time liveness marker, which the
-# A/B wave confirms via the sitecustomize probe or nsys kernel names instead.
-_log = logging.getLogger(__name__)
-_grouped_prefill_seen = False
 
 
 class MoELayer(BaseOP):
@@ -427,110 +420,6 @@ class OffloadMoELayer(MoELayer):
         return self.quant_method.apply(
             hidden_states, topk_weights, topk_ids, view, layer=self, is_prefill=is_prefill
         )
-
-    def _gguf_grouped_supported(self, cache: OffloadMoeCache) -> bool:
-        # the grouped kernel's moe switch covers only some ggml types; a block
-        # size <= 0 (e.g. IQ2_XS/IQ4_NL) would crash in moe_align_block_size(
-        # topk_ids, 0, E), so those prefill on the moe_vec fallback instead
-        from freetoken.kernel.gguf import ggml_moe_get_block_size
-
-        return all(ggml_moe_get_block_size(t) > 0 for t in cache.gguf_types[self.layer_id])
-
-    def _gguf_grouped_prefill(
-        self,
-        cache: OffloadMoeCache,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        views: tuple[torch.Tensor, ...],
-    ) -> torch.Tensor:
-        """Grouped MMQ prefill for gguf banks: the moe_align trio + ggml_moe_a8 read
-        each expert's packed weights once per layer instead of once per (token,
-        expert) pair - that re-read is essentially the whole prefill MoE cost
-        (.tasks/mmq-prefill-kernel). Decode stays on moe_vec; only this is_prefill
-        path is new.
-
-        One moe_align trio is shared by all three projections: the kernel maps a
-        flat pair index to its token by dividing by the top_k it is called with,
-        so the gate/up calls (top_k) and the down call (top_k=1 over the M*top_k
-        interleaved rows) walk the SAME sorted buffer. Gate/up/down may be
-        different ggml types; the grouped m-tile is ONE global knob
-        (FREETOKEN_GGUF_MOE_MTILE, default 32) read PER CALL, so every served
-        type reports the same block size, one trio serves all three, and the
-        per-size cache below only re-aligns when sizes actually differ. Dense
-        projections have a separate m-tile knob (FREETOKEN_GGUF_DENSE_MTILE,
-        default 64, dense q8_0 only) on the same per-call contract; the two
-        knobs never affect each other's paths. Do not
-        flip the knob after boot: the trio block_size and the kernel tile are
-        read at different moments, so a mid-boot flip would pair a buffer built
-        with the old tile against kernels launched with the new one; boot-time
-        selection is the supported pattern. The epilogue and topk_weights
-        scatter/sum are identical to the moe_vec path.
-        """
-        global _grouped_prefill_seen
-        if not _grouped_prefill_seen:
-            _log.info("gguf moe grouped mmq prefill active")
-            _grouped_prefill_seen = True
-
-        from freetoken.kernel.gguf import ggml_moe_a8, ggml_moe_get_block_size
-        from freetoken.layers.activation import gated_act_and_mul
-        from freetoken.moe.fused import moe_align_block_size
-
-        tokens = hidden_states.shape[0]
-        top_k = topk_ids.shape[1]
-        gate_bank, up_bank, down_bank = views
-        gate_t, up_t, down_t = cache.gguf_types[self.layer_id]
-
-        # lesson 028f2d9: the ggml kernels assume row-major activations; split
-        # views (e.g. KDA projections) would otherwise be consumed as garbage
-        if not hidden_states.is_contiguous():
-            hidden_states = hidden_states.contiguous()
-
-        num_experts = gate_bank.shape[0]
-        trios: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-
-        def trio(block_size: int):
-            if block_size not in trios:
-                sorted_ids, expert_ids, num_post_pad = moe_align_block_size(topk_ids, block_size, num_experts)
-                # grouped grid y = sorted_ids.numel() / block_size must stay under
-                # 65535 (the grouped analog of the moe_vec issue #186 cap; 8128-
-                # token chunks sit far below it)
-                if sorted_ids.numel() // block_size > _MOE_VEC_MAX_GRID:
-                    raise ValueError(
-                        f"sorted_token_ids buffer {sorted_ids.numel()} / block_size "
-                        f"{block_size} exceeds the grouped MMQ grid limit {_MOE_VEC_MAX_GRID}"
-                    )
-                trios[block_size] = (sorted_ids, expert_ids, num_post_pad)
-            return trios[block_size]
-
-        gate_trio = trio(ggml_moe_get_block_size(gate_t))
-        up_trio = trio(ggml_moe_get_block_size(up_t))
-        gate = ggml_moe_a8(
-            hidden_states, gate_bank, *gate_trio, gate_t, gate_bank.shape[1], top_k, tokens
-        )
-        up = ggml_moe_a8(
-            hidden_states, up_bank, *up_trio, up_t, up_bank.shape[1], top_k, tokens
-        )
-        # gated epilogue over UNINTERLEAVED halves: cat before the and_mul (the
-        # kernel splits x[..., :d] / x[..., d:]); alpha/limit ride the layer config
-        inter = gated_act_and_mul(
-            self.activation,
-            torch.cat((gate, up), dim=-1),
-            torch.empty_like(gate),
-            alpha=self.alpha,
-            limit=self.limit if self.limit is not None else float("inf"),
-        )
-        if not inter.is_contiguous():
-            inter = inter.contiguous()
-        down_trio = trio(ggml_moe_get_block_size(down_t))
-        out = ggml_moe_a8(
-            inter, down_bank, *down_trio, down_t, down_bank.shape[1], 1, tokens * top_k
-        )
-        out = out.reshape(tokens, top_k, down_bank.shape[1]) * topk_weights.reshape(
-            tokens, top_k, 1
-        ).to(out.dtype)
-        return out.sum(dim=1)
-
 
 _MOE_VEC_MAX_GRID = 65535  # issue #186: the ggml moe_vec grid dimension is tokens*top_k
 

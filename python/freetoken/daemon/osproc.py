@@ -8,7 +8,6 @@ from __future__ import annotations
 import errno
 import os
 import signal
-import time
 from typing import Iterable
 
 _HAS_PROC = os.path.isdir("/proc")
@@ -192,7 +191,3 @@ def _argv_port(argv: list[str], default: int = 1919) -> int:
             if val.isdigit():
                 return int(val)
     return default
-
-
-def now_monotonic() -> float:
-    return time.monotonic()

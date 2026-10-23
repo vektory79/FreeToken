@@ -108,19 +108,7 @@ class Glm5NextKDA(BaseOP):
             fla = build_fla_metadata(batch, hidden_states.device)
             batch.fla_metadata = fla
 
-        # the FREETOKEN_GGUF_KDA_NSPLIT knob's only call site: on the gguf path
-        # this may launch the fused in_proj as two sub-N MMQ GEMMs (see
-        # freetoken.layers.gguf.kda_in_proj_forward)
-        try:
-            from freetoken.layers.gguf import kda_in_proj_forward
-        except ImportError:  # main's ggml re-platform removed the fused KDA in_proj
-            kda_in_proj_forward = None
-
-        proj = (
-            kda_in_proj_forward(self.in_proj, hidden_states)
-            if kda_in_proj_forward is not None
-            else self.in_proj.forward(hidden_states)
-        )
+        proj = self.in_proj.forward(hidden_states)
         conv_in, b, f_a, g_a = torch.split(
             proj, [self.conv_dim, h, d, d], dim=-1
         )

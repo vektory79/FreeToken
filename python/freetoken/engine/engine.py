@@ -1857,11 +1857,6 @@ def offload_expert_methods(config: EngineConfig) -> tuple:
     return shared_offload_method(model), (layer_methods if is_mixed(layer_methods) else None)
 
 
-def offload_expert_method(config: EngineConfig):
-    """The (most common) offload expert method of ``config``'s model; see ``offload_expert_methods``."""
-    return offload_expert_methods(config)[0]
-
-
 def _adjust_config(config: EngineConfig):
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)

@@ -14,7 +14,7 @@ import torch
 
 from freetoken.layers.quantization.ggml_types import is_quantized
 from freetoken.models.gguf.reader import GgufTensorInfo, gguf_tensor_index
-from freetoken.models.gguf.tensors import float_tensor, fused, matrix
+from freetoken.models.gguf.tensors import float_tensor, fused, matrix, untile
 
 from .config import parse_config
 
@@ -135,14 +135,6 @@ def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
 # Weights
 # ----------------------------------------------------------------------------------------------
 
-def _untile(t: torch.Tensor, num_k_heads: int, head_dim: int, dim: int = 0) -> torch.Tensor:
-    """Tiled value heads (k-head minor) back to grouped (k-head major) along ``dim``."""
-    n = t.shape[dim]
-    r = n // (num_k_heads * head_dim)
-    idx = torch.arange(n).view(r, num_k_heads, head_dim).transpose(0, 1).reshape(n)
-    return t.index_select(dim, idx)
-
-
 def iter_gguf_weights(
     model_path: str,
     device: torch.device,
@@ -179,20 +171,20 @@ def iter_gguf_weights(
             qkv, gate = t(f"{blk}.attn_qkv"), t(f"{blk}.attn_gate")
             qkv_rows = matrix(qkv)
             v_start = 2 * nk * dk
-            qkv_rows = torch.cat([qkv_rows[:v_start], _untile(qkv_rows[v_start:], nk, g.value_head_dim)])
-            z_rows = _untile(matrix(gate), nk, g.value_head_dim)
+            qkv_rows = torch.cat([qkv_rows[:v_start], untile(qkv_rows[v_start:], nk, g.value_head_dim)])
+            z_rows = untile(matrix(gate), nk, g.value_head_dim)
             beta_info, alpha_info = t(f"{blk}.ssm_beta"), t(f"{blk}.ssm_alpha")
-            beta, alpha = (_untile(matrix(i), nk, 1) for i in (beta_info, alpha_info))
+            beta, alpha = (untile(matrix(i), nk, 1) for i in (beta_info, alpha_info))
             if is_quantized(qkv.ggml_type) or is_quantized(gate.ggml_type):
                 yield from fused(f"{la}.in_proj_qkvz", [qkv, gate], [qkv_rows, z_rows], hidden)
                 yield from fused(f"{la}.in_proj_ba", [beta_info, alpha_info], [beta, alpha], hidden)
             else:
                 yield from fused(f"{la}.in_proj", [qkv, gate, beta_info, alpha_info], [qkv_rows, z_rows, beta, alpha], hidden)
             conv = float_tensor(t(f"{blk}.ssm_conv1d")).float()
-            conv = torch.cat([conv[:v_start], _untile(conv[v_start:], nk, g.value_head_dim)])
+            conv = torch.cat([conv[:v_start], untile(conv[v_start:], nk, g.value_head_dim)])
             yield f"{la}.conv1d.weight", conv.unsqueeze(1)
-            yield f"{la}.dt_bias", _untile(float_tensor(t(f"{blk}.ssm_dt.bias")).float(), nk, 1)
-            yield f"{la}.A_log", _untile(torch.log(-float_tensor(t(f"{blk}.ssm_a")).float()), nk, 1)
+            yield f"{la}.dt_bias", untile(float_tensor(t(f"{blk}.ssm_dt.bias")).float(), nk, 1)
+            yield f"{la}.A_log", untile(torch.log(-float_tensor(t(f"{blk}.ssm_a")).float()), nk, 1)
             yield f"{la}.norm.weight", float_tensor(t(f"{blk}.ssm_norm"))
             yield from fused(f"{la}.out_proj", [t(f"{blk}.ssm_out")], [matrix(t(f"{blk}.ssm_out"))], g.num_value_heads * g.value_head_dim)
         else:
