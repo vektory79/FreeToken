@@ -1,5 +1,12 @@
 # v3a implementation-surface map (research wave R2, 2026-09-18)
 
+> СТАРЕЕ (2026-10-23): описанная поверхность удалена - csrc gguf-стек
+> (moe.cuh / gguf_kernel.cu) снесён re-platformом (e5d3bd3),
+> `_gguf_grouped_supported` / `_gguf_grouped_prefill` не существуют,
+> tests/kernels/test_gguf_quant.py удалён волной починки round5;
+> env-ручки MOE_MTILE / DENSE_MTILE убраны (мёртвые). Статья сохранена как
+> исторический метод-референс кампании v3a, поверхностные якоря НЕАКТУАЛЬНЫ.
+
 READ-ONLY research. Line anchors verified by R2 against the v2 changeset
 (commit 7f8c570); re-verify before editing (they drift).
 

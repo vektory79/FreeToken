@@ -15,8 +15,8 @@ tags: [merge, round5, ggml, replatform, slot-pools, deferred-ports, nvfp4-kv, gl
 Веточные победы, сделанные на старом стеке, на новом НЕ работают. Рамка раунда -
 **minimal green merge**: merge-коммит делает зелёными только сборку и тесты на новых
 механиках main'а; всё глубокое отложено в порт-долг D1-D5; кейс ЗАВЕРШЁН 2026-10-21 -
-все пять портов закрыты (D4, D3, D2, D5 готовы, D1 закрыт NO-GO); открытый остаток -
-gguf->FTW boot (раздел «Открыто» ниже). Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
+все пять портов закрыты (D4, D3, D2, D5 готовы, D1 закрыт NO-GO); остаток
+gguf->FTW boot закрыт волной починки 2026-10-23 (раздел ниже). Эта статья - durable-карта того, ЧТО пере-реализовывать на новых механиках;
 процедурные уроки волны - в [merge-wave-procedure.md](merge-wave-procedure.md).
 
 ## Что поменял main (дельта upstream, влитая раундом 5)
@@ -89,18 +89,22 @@ _pack_kv). Уроки и эскалация -
 пережили re-platform в [models/gguf/config.py](../../python/freetoken/models/gguf/config.py).
 Исходный кейс и проверенные карты тензоров - [../cases/gguf-glm5next-vision/TASK.md](../cases/gguf-glm5next-vision/TASK.md).
 
-### Открыто: gguf->FTW boot residual (новый пункт порт-долга)
+### Закрыто: gguf->FTW boot residual - волна починки round5, коммит 48915b4
 
 Найдено волной D2 (2026-10-21), pre-existing - не специфика D2 и не D4-банки:
 ЛЮБОЙ сконвертированный gguf->FTW чекпойнт не бутится на новом стеке, включая
-text-only. checkpoint_quant_config ([models/register.py:458](../../python/freetoken/models/register.py))
-строит таблицу ggml-типов из gguf_tensor_index(hf_config.model_path) (строка 469),
+text-only. checkpoint_quant_config ([models/register.py](../../python/freetoken/models/register.py))
+строил таблицу ggml-типов из gguf_tensor_index(hf_config.model_path),
 но для FTW model_path = carrier source_metadata.gguf (metadata-only,
-tensor_count=0) -> пустая таблица -> KeyError "GGUF has no tensor 'token_embd'"
-(_part_types, [layers/quantization/configs/gguf.py:42](../../python/freetoken/layers/quantization/configs/gguf.py),
-вызов из scheme_for, строка 58). D4-boot-smoke не проявил: гнался только raw GGUF.
-Направление фикса: FTW-ветвящийся источник dense-типов (мета FTW-индекса) или
-docs-запрет gguf->FTW до фикса; reconversion не поможет. Фикс - отдельной задачей.
+tensor_count=0) -> пустая таблица -> KeyError "GGUF has no tensor 'token_embd'".
+D4-boot-smoke не проявил: гнался только raw GGUF.
+
+ЗАКРЫТО волной починки (fix(checkpoint) 48915b4): источник dense-типов ветвится
+по носителю - точные per-tensor типы из мета gguf_tensor_types (новые конверсии),
+легаси-носители через хук ftw_tensor_types (контракт конверсии + gguf_types
+тройки); добавлены qweight replay, row padding, gate/up fold и громкая ошибка
+re-convert вместо KeyError. HW-доказательство: до-реплатформенный 136g
+ftw-vision носитель бутится без реконверсии (/ready 87 с, chat 200).
 
 ### D3. Гибрид/offload на per-format слот-пулах - готово 2026-10-21, коммит 393b682
 

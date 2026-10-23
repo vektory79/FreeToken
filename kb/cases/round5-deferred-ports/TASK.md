@@ -426,12 +426,45 @@ kv_nvfp4/kv_quant зелёные и активные.
   удаление/надгробие; гигиена: pip gguf нужен активным тестам, но не
   объявлен в dev-группе pyproject; collection 2921/2935, errors=0.
 
-Остатки (вне D1-D5, каждый - отдельная задача/PR):
+Остатки (вне D1-D5) после волны починки 2026-10-23 (fix(checkpoint) 48915b4,
+fix(moe) 739336f, chore 039bbf9; kb - docs-коммит этой волны):
+
+ЗАКРЫТО волной починки:
+
+- gguf->FTW boot residual (OPEN residual ниже) - ЗАКРЫТ (48915b4): источник
+  dense-типов ветвится по носителю - точные per-tensor типы из мета
+  gguf_tensor_types (новые конверсии), легаси-носители через хук
+  ftw_tensor_types (контракт конверсии + gguf_types тройки); добавлены
+  qweight replay, row padding, gate/up fold и громкая ошибка re-convert
+  вместо KeyError. HW-доказательство: до-реплатформенный 136g ftw-vision
+  носитель бутится без реконверсии (/ready 87 с, chat 200);
+- g.2 ре-ленд test_cpu_moe_gguf_iq - ЗАКРЫТ (739336f): тесты ре-ленднуты на
+  живой third_party-деквант-референс (merged gate_up банки, per-layer
+  форматы) и гоняют восстановленный per-layer num_experts guard банка
+  (короткий банк на любом слое группы сигнатур - громкий fail при
+  конструировании, был тихий oob-read в C++ ядре);
+- чистка мёртвого кода по аудиту - ВЫПОЛНЕНА (039bbf9): 13 символов + кластер
+  benchmark (-575 строк), мёртвые env-ручки KDA_NSPLIT / MOE_MTILE /
+  DENSE_MTILE, always-dead layers/gguf import, байт-дубль _untile слит в
+  models/gguf/tensors.py, offload_expert_method удалён (0 вызывающих, тесты
+  патчили его вакуумно);
+- тест-гигиена по аудиту - ВЫПОЛНЕНА (739336f + 039bbf9): 8 разморозок, 2
+  теста partition-machinery удалены, 3 причины module-skip переписаны,
+  tests/kernels/test_gguf_quant удалён (25 мёртвых, 2 живых переехали);
+- pip gguf объявлен в dev-группе pyproject (039bbf9);
+- kb/methods/v3a-surface-map.md помечен устаревшим (описанная поверхность -
+  _gguf_grouped_*, tests/kernels/test_gguf_quant.py - удалена re-platformом
+  и волной починки).
+
+ОСТАЮТСЯ ОТКРЫТЫМИ:
 
 - fa / fi / trtllm nvfp4-KV: внешним kernel'ам нужна наша layout-схема
   (row fp32 + block e4m3-u8/16 + low-nibble first) - отдельные PR с тестом и A/B;
+- 11 до-существующих битых kb-ссылок (сек. 8) - первый docs-коммит.
+
+Исторический список до волны починки (каждый пункт - отдельная задача/PR):
+
 - g.2: ре-ленд test_cpu_moe_gguf_iq (сидит на удалённом models/gguf/dequant);
-- 11 до-существующих битых kb-ссылок (сек. 8) - первый docs-коммит;
 - чистка мёртвого кода по аудиту выше (кластеры символов - одна задача);
 - разморозка/удаление тестов по аудиту выше (одна задача: 9 разморозить,
   3 удалить, 3 причины module-skip переписать);
