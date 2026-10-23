@@ -1085,4 +1085,82 @@ def to_gguf(name: str, tensors: dict[str, int]) -> tuple[str, ...]:
     return tuple(f"{blk}.{s}" for s in mapped)
 
 
-__all__ = ["iter_gguf_weights", "parse_gguf_config", "to_gguf"]
+def ftw_tensor_types(model_path: str) -> dict[str, int]:
+    """The ggml-type table of an FTW converted by an older build, keyed bare.
+
+    Those indexes kept only the per-layer (gate, up, down) expert triples under
+    ``gguf_types``; the dense half needs no per-tensor record because the convert
+    contract pins it: iter_gguf_weights refuses any other type on the raw path,
+    so every convertible file - and therefore every FTW - packs token_embd as
+    Q8_0, output as Q6_K and every mapped linear as Q8_0. Bare keys work because
+    the scheme probe falls back from ``<tensor>.weight`` to ``<tensor>``."""
+    from freetoken.checkpoint.ftw import FTWReader
+    from freetoken.models.gguf.reader import gguf_config_source, load_gguf_metadata
+
+    reader = FTWReader(model_path)
+    try:
+        triples = reader.meta("gguf_types")
+    finally:
+        reader.close()
+    if (
+        not isinstance(triples, list)
+        or not triples
+        or not all(
+            isinstance(row, (list, tuple))
+            and len(row) == 3
+            and all(isinstance(t, int) and not isinstance(t, bool) for t in row)
+            for row in triples
+        )
+    ):
+        raise RuntimeError(
+            f"{model_path}: FTW converted from a GGUF by an older build records no usable "
+            "gguf_types expert triples; re-convert with ft checkpoint"
+        )
+    # the trunk geometry parse_gguf_config derives (block_count includes the NextN
+    # block); read straight from the carrier metadata - the full parse would pull
+    # guards (vocab consistency) this rebuild does not need
+    meta = load_gguf_metadata(gguf_config_source(model_path))
+    num_layers = int(meta["glm5next.block_count"]) - int(meta.get("glm5next.nextn_predict_layers", 0))
+    first_dense = int(meta["glm5next.leading_dense_block_count"])
+    if first_dense + len(triples) != num_layers:
+        raise RuntimeError(
+            f"{model_path}: {len(triples)} gguf_types expert triples for "
+            f"{num_layers - first_dense} MoE layers; the checkpoint does not match its config"
+        )
+    # the layer maps are the single source of the per-leaf storage type: "qw"
+    # rides the convert contract's Q8_0, "bf16"/"fp32" dequantize to float types
+    cast_types = {
+        "qw": _GGML_Q8_0,
+        "bf16": int(ggml.GGMLQuantizationType.BF16),
+        "fp32": int(ggml.GGMLQuantizationType.F32),
+    }
+    leaves: dict[str, int] = {}
+    for layer_map in (_COMMON_LAYER_MAP, _KDA_LAYER_MAP, _DSA_LAYER_MAP, _DENSE_FFN_MAP, _MOE_MAP):
+        for suffix, (_param, cast) in layer_map.items():
+            kind = cast_types[cast]
+            if leaves.setdefault(suffix, kind) != kind:
+                raise RuntimeError(f"glm5next convert contract: {suffix} maps to two ggml types")
+    # iter emits the KDA derived params (fp32) and the fused in_proj pieces (Q8_0)
+    # explicitly, outside the maps
+    leaves["ssm_a"] = cast_types["fp32"]
+    leaves["ssm_dt.bias"] = cast_types["fp32"]
+    # the pre-re-platform loader dequantized the indexer's wq_b (the map flipped
+    # it to "qw" only after the merge), so old carriers store bf16 rows; a float
+    # entry builds the module unquantized and matches the stored shape
+    leaves["indexer.attn_q_b.weight"] = cast_types["bf16"]
+    table = {"token_embd": _GGML_Q8_0, "output": _GGML_Q6_K, "output_norm": cast_types["bf16"]}
+    for layer in range(num_layers):
+        for suffix, kind in leaves.items():
+            table[f"blk.{layer}.{suffix}"] = kind
+        for suffix in ("attn_q", "attn_k", "attn_v", "ssm_beta", "ssm_f_a", "ssm_g_a"):
+            table[f"blk.{layer}.{suffix}"] = _GGML_Q8_0
+    # the triples are MoE-ordinal (load_ftw_banks keys them the same way)
+    for ordinal, (gate, _up, down) in enumerate(triples):
+        layer = first_dense + ordinal
+        table[f"blk.{layer}.ffn_gate_exps"] = int(gate)
+        table[f"blk.{layer}.ffn_up_exps"] = int(gate)
+        table[f"blk.{layer}.ffn_down_exps"] = int(down)
+    return table
+
+
+__all__ = ["ftw_tensor_types", "iter_gguf_weights", "parse_gguf_config", "to_gguf"]

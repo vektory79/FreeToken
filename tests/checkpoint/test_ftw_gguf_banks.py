@@ -7,11 +7,10 @@ The fixture mirrors the real GLM-5.3-Flash GGUF heterogeneity at toy geometry:
 (IQ3_XXS, IQ3_XXS, Q6_K) x2 over 8 MoE bank layers, with H=512 != I=256
 (non-square: gate/up pack 256 output rows of 512 input cols, down packs 512 rows
 of 256 - square fixtures mask real-geometry bugs, see the fixture-crafting notes).
-The conversion runs the real convert_checkpoint sink path; offload_expert_method
-is stubbed to the value the real gguf path always produces (None - gguf MoE
-layers carry no quant method), keeping the test off toy-dim meta-model builds.
-convert_checkpoint hard-inits a CUDA context, so the converted-fixture tests
-skip on CUDA-less hosts (pure-meta tests run anywhere).
+The conversion runs the real convert_checkpoint sink path on CPU (device="cpu")
+- no CUDA context needed for the toy geometry, so the converted-fixture tests
+run on CPU-only hosts too; the pin settle of load_ftw_banks is skipped there
+(the byte-level checks do not need it). Pure-meta tests run anywhere.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -224,20 +224,17 @@ def _write_ftw_source_gguf(path) -> str:
 
 @pytest.fixture(scope="module")
 def ftw_gguf_ckpt(tmp_path_factory):
-    if not torch.cuda.is_available():
-        pytest.skip("convert_checkpoint hard-inits a CUDA context")
-    import freetoken.engine.engine as engine_mod
     from freetoken.checkpoint.convert import convert_checkpoint
 
     src = _write_ftw_source_gguf(tmp_path_factory.mktemp("ftw-gguf-src") / "banks.gguf")
     out = tmp_path_factory.mktemp("ftw-gguf-out") / "ckpt"
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(engine_mod, "offload_expert_method", lambda config: None)
-        convert_checkpoint(src, str(out))
+    convert_checkpoint(src, str(out), device="cpu")
     return src, str(out)
 
 
-def test_ftw_gguf_roundtrip(ftw_gguf_ckpt):
+def test_ftw_gguf_roundtrip(ftw_gguf_ckpt, monkeypatch):
+    if not torch.cuda.is_available():
+        monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")  # CPU-only: no pin settle
     from freetoken.checkpoint.ftw import ALIGN, load_ftw_banks
     from freetoken.models.gguf.reader import gguf_tensor_index
     from freetoken.models.gguf.tensors import packed_rows
@@ -284,16 +281,12 @@ def test_ftw_gguf_roundtrip(ftw_gguf_ckpt):
     assert all(t["global_off"] % ALIGN == 0 for t in bank_entries)
 
 
-@pytest.mark.skip(
-    "pins moe.expert_banks.gguf_ftw_signature_groups, amputated by the ggml "
-    "re-platform; re-land with the expert-banks deferred port"
-)
-def test_ftw_without_gguf_meta_keeps_legacy_semantics(tmp_path):
+def test_ftw_without_gguf_meta_keeps_legacy_semantics(tmp_path, monkeypatch):
     # absent gguf_types meta -> None (nvfp4/bf16 checkpoints load exactly as before),
     # and the quant_format tag still resolves kind/kernel through LEGACY_FORMAT
+    monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")  # CPU-only: no pin settle
     from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
     from freetoken.layers.quantization import QuantKind
-    from freetoken.moe.expert_banks import gguf_ftw_signature_groups
 
     out = tmp_path / "ckpt"
     w = FTWWriter(str(out))
@@ -306,18 +299,16 @@ def test_ftw_without_gguf_meta_keeps_legacy_semantics(tmp_path):
     banks = load_ftw_banks(str(out), num_layers=2)
     assert banks.quant_format == "bf16"
     assert banks.kind is QuantKind.NONE and banks.kernel == "fused"
-    assert banks.gguf_types is None
+    # the gguf meta rides layer_tags now; a legacy bf16 dir carries none
+    assert banks.layer_tags is None
     assert sorted(banks.sources) == ["down", "gate_up"]
-    # and the FTW floor-gate scan stays silent for a non-gguf quant_format
-    assert gguf_ftw_signature_groups(str(out), SimpleNamespace(num_experts=4, num_moe_layers=2)) is None
 
 
 def test_ftw_scan_matches_loaded_bank_grouping(ftw_gguf_ckpt):
     # exactness bridge: the index-only scan's grouping and per-group slot widths
-    # equal what _group_bank_layers / expert_bytes_per_slot see on the loaded banks
-    # D3: pins gguf_ftw_signature_groups + Engine._group_bank_layers, both amputated
-    # by the ggml re-platform; re-lands with the D3 slot-pool deep adaptation
-    pytest.skip("D3: gguf_ftw_signature_groups / Engine._group_bank_layers re-land with the D3 deep adaptation")
+    # would equal the grouping the loaded banks see; the scan targets
+    # gguf_ftw_signature_groups + Engine._group_bank_layers, both still absent
+    pytest.skip("FTW-index signature scan not re-landed (feature request, outside D1-D5)")
     from freetoken.checkpoint.ftw import load_ftw_banks
     from freetoken.engine.cache_budget import expert_bytes_per_slot
     from freetoken.engine.engine import Engine
@@ -341,10 +332,9 @@ def test_ftw_scan_matches_loaded_bank_grouping(ftw_gguf_ckpt):
 def test_ftw_early_floor_gate_rejects_before_bank_load(ftw_gguf_ckpt, monkeypatch):
     # pins the FTW branch of the gate's position inside _init_offload_moe_cache:
     # an unfundable plan must raise off the index alone, before load_expert_banks
-    # D3: the gate's gguf_signature_groups answers only on a bare .gguf (an FTW dir
-    # keeps the documented degrade-not-raise path) until the FTW-index signature
-    # scan re-lands with the D3 deep adaptation
-    pytest.skip("D3: gguf_signature_groups FTW fallback re-lands with the D3 deep adaptation")
+    # the gate's gguf_signature_groups answers only on a bare .gguf (an FTW dir
+    # keeps the documented degrade-not-raise path); the FTW-index scan stays out
+    pytest.skip("FTW-index signature scan not re-landed (feature request, outside D1-D5)")
     import freetoken.engine.engine as engine_mod
 
     _, out = ftw_gguf_ckpt
@@ -466,12 +456,7 @@ def test_ftw_persisted_types_feed_capability_gates(ftw_gguf_ckpt):
 
 @pytest.fixture(scope="module")
 def ftw_gguf_vision_ckpt(tmp_path_factory):
-    pytest.skip(
-        "D2: convert_checkpoint lost the mmproj_path kwarg in the round-5 re-platform; "
-        "mmproj FTW packing re-lands with the vision deferred port"
-    )
     """A converted GGUF FTW built WITH --mmproj: tower tensors + merged metadata."""
-    import freetoken.engine.engine as engine_mod
     from freetoken.checkpoint.convert import convert_checkpoint
 
     src = _write_ftw_source_gguf(tmp_path_factory.mktemp("ftw-gguf-vision-src") / "banks.gguf")
@@ -481,11 +466,9 @@ def ftw_gguf_vision_ckpt(tmp_path_factory):
         tensors=_full_vision_fixture_data(),
     )
     out = tmp_path_factory.mktemp("ftw-gguf-vision-out") / "ckpt"
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(engine_mod, "offload_expert_method", lambda config: None)
-        # CPU conversion: the tower tensors stream through the same load_weight path
-        # as a GPU conversion; no CUDA context needed for the toy geometry
-        convert_checkpoint(src, str(out), device="cpu", mmproj_path=mmproj)
+    # CPU conversion: the tower tensors stream through the same load_weight path
+    # as a GPU conversion; no CUDA context needed for the toy geometry
+    convert_checkpoint(src, str(out), device="cpu", mmproj_path=mmproj)
     return mmproj, str(out)
 
 
@@ -569,18 +552,196 @@ def test_ftw_gguf_text_only_boot_unchanged(ftw_gguf_ckpt):
     assert ftw_lacks_vision(out) is True
 
 
-@pytest.mark.skip(
-    "D2: convert_checkpoint lost the mmproj_path kwarg in the round-5 re-platform; "
-    "mmproj FTW packing re-lands with the vision deferred port"
-)
+# ------------------------------------------------------------------------------
+# gguf->FTW boot: checkpoint_quant_config resolves schemes without the source's
+# tensor table (the metadata-only carrier lists zero tensors)
+# ------------------------------------------------------------------------------
+
+
+def _assert_ftw_schemes_resolve(out: str, *, legacy: bool) -> None:
+    from freetoken.layers.quantization.scheme import gguf_types as scheme_types
+    from freetoken.models.register import checkpoint_quant_config, get_model_spec
+    from freetoken.utils import cached_load_hf_config
+
+    hf = cached_load_hf_config(out)
+    quant = checkpoint_quant_config(out, hf, get_model_spec(hf.architectures[0]))
+    # dense half: the convert contract's pinned types (token_embd Q8_0, output
+    # Q6_K, every mapped linear Q8_0); float modules resolve scheme-less
+    assert scheme_types(quant.scheme_for("model.embed_tokens")) == (8,)
+    assert scheme_types(quant.scheme_for("lm_head")) == (14,)
+    assert scheme_types(quant.scheme_for("model.layers.0.self_attn.in_proj")) == (8,) * 6
+    assert scheme_types(quant.scheme_for("model.layers.3.self_attn.q_a_proj")) == (8,)
+    # the old carrier stores the indexer's wq_b dequantized (see ftw_tensor_types)
+    wq_b = quant.scheme_for("model.layers.3.self_attn.indexer.wq_b")
+    assert (scheme_types(wq_b) == (8,)) if not legacy else wq_b is None
+    assert scheme_types(quant.scheme_for("model.layers.0.mlp.shared_experts.gate_proj")) == (8,)
+    assert quant.scheme_for("model.layers.0.mlp.gate") is None  # bf16 router
+    # expert half: the persisted (gate, up, down) triples per MoE layer
+    assert scheme_types(quant.scheme_for("model.layers.0.mlp.experts")) == (18, 18, 23)
+    assert scheme_types(quant.scheme_for("model.layers.5.mlp.experts")) == (23, 23, 14)
+
+
+def test_ftw_quant_config_resolves_schemes(ftw_gguf_ckpt, monkeypatch):
+    # the gguf->FTW boot residual: the config stage must not open a tensor table
+    # the FTW does not have; new conversions record the source table in the index
+    def _no_index(*args, **kwargs):
+        raise AssertionError("gguf_tensor_index consulted on the FTW config path")
+
+    monkeypatch.setattr("freetoken.models.gguf.reader.gguf_tensor_index", _no_index)
+    _, out = ftw_gguf_ckpt
+    _assert_ftw_schemes_resolve(out, legacy=False)
+    # the conversion records the source's dense tensor table in the index
+    with open(os.path.join(out, "freetoken_weight.json"), encoding="utf-8") as f:
+        index = json.load(f)
+    assert index["gguf_tensor_types"]["token_embd.weight"] == 8
+    assert index["gguf_tensor_types"]["output.weight"] == 14
+    assert index["gguf_tensor_types"]["blk.0.ffn_gate_exps.weight"] == 18
+
+
+def test_ftw_quant_config_old_carrier_contract_rebuild(ftw_gguf_ckpt, tmp_path, monkeypatch):
+    # an old-converter index (no gguf_tensor_types meta - the shape of the on-disk
+    # 136G FTW-vision carrier) still resolves: dense from the family's convert
+    # contract, experts from the persisted gguf_types triples; no re-conversion
+    def _no_index(*args, **kwargs):
+        raise AssertionError("gguf_tensor_index consulted on the FTW config path")
+
+    monkeypatch.setattr("freetoken.models.gguf.reader.gguf_tensor_index", _no_index)
+    _, out = ftw_gguf_ckpt
+    old = tmp_path / "old-carrier"
+    old.mkdir()
+    with open(os.path.join(out, "freetoken_weight.json"), encoding="utf-8") as f:
+        index = json.load(f)
+    index.pop("gguf_tensor_types", None)
+    with open(old / "freetoken_weight.json", "w", encoding="utf-8") as f:
+        json.dump(index, f)
+    shutil.copy(os.path.join(out, "source_metadata.gguf"), old / "source_metadata.gguf")
+    _assert_ftw_schemes_resolve(str(old), legacy=True)
+
+
+def test_ftw_quant_config_no_contract_old_carrier_says_reconvert(ftw_gguf_ckpt, tmp_path, monkeypatch):
+    # an old-converter index for a family that pins no dense contract fails with
+    # the re-convert direction, not a KeyError out of an empty type table
+    import freetoken.models.register as register_mod
+    from freetoken.models.register import checkpoint_quant_config, get_model_spec
+    from freetoken.utils import cached_load_hf_config
+
+    _, out = ftw_gguf_ckpt
+    old = tmp_path / "old-no-hook"
+    old.mkdir()
+    with open(os.path.join(out, "freetoken_weight.json"), encoding="utf-8") as f:
+        index = json.load(f)
+    index.pop("gguf_tensor_types", None)
+    with open(old / "freetoken_weight.json", "w", encoding="utf-8") as f:
+        json.dump(index, f)
+    shutil.copy(os.path.join(out, "source_metadata.gguf"), old / "source_metadata.gguf")
+    real = register_mod._load_attr
+
+    def _no_hook(module, attr):
+        if attr == "ftw_tensor_types":
+            raise AttributeError(module)
+        return real(module, attr)
+
+    monkeypatch.setattr(register_mod, "_load_attr", _no_hook)
+    hf = cached_load_hf_config(str(old))
+    with pytest.raises(RuntimeError, match="re-convert"):
+        checkpoint_quant_config(str(old), hf, get_model_spec(hf.architectures[0]))
+
+
+def test_ftw_replay_renames_legacy_qweight_segments(tmp_path):
+    # the pre-re-platform carriers store packed ggml rows under the old "qweight"
+    # segment leaf (the on-disk 136G FTW-vision shape); the replay must yield the
+    # runtime's weight/weight_N vocabulary the GGUF methods create_weights build
+    from freetoken.checkpoint.ftw import FTWWriter, iter_ftw_weights
+
+    out = tmp_path / "legacy-names"
+    w = FTWWriter(str(out))
+    w.add_tensor("model.embed_tokens.qweight", torch.zeros((4, 8), dtype=torch.uint8))
+    w.add_tensor("model.norm.weight", torch.zeros(4, dtype=torch.bfloat16))
+    w.finalize({})
+    got = {name: tuple(t.shape) for name, t in iter_ftw_weights(str(out), workers=1)}
+    assert got == {"model.embed_tokens.weight": (4, 8), "model.norm.weight": (4,)}
+
+
+def test_ftw_legacy_gate_up_banks_merge_on_load(tmp_path, monkeypatch):
+    # pre-re-platform gguf carriers store three per-layer banks (gate/up/down);
+    # the loader must replay them as the merged gate_up the runtime schema reads
+    # (halves interleaved per expert), folding through per-layer scratch
+    monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")  # CPU-only: no pin settle
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+
+    out = tmp_path / "legacy-banks"
+    w = FTWWriter(str(out))
+    # bank entries are whole 4096-byte regions on real carriers (the writer's
+    # alignment invariant), so the slice reads stay O_DIRECT-legal; every byte
+    # position carries its own value (mod a prime) so a half-swap cannot pass
+    idx = torch.arange(4096, dtype=torch.long)
+    gate_t = (idx % 251).to(torch.uint8).view(2, 4, 512)
+    up_t = ((idx + 37) % 251).to(torch.uint8).view(2, 4, 512)
+    down_t = ((idx + 74) % 251).to(torch.uint8).view(2, 4, 512)
+    for layer in range(2):
+        w.add_tensor(f"gate#L{layer:05d}", gate_t.clone(), kind="experts_bank")
+        w.add_tensor(f"up#L{layer:05d}", up_t.clone(), kind="experts_bank")
+        w.add_tensor(f"down#L{layer:05d}", down_t.clone(), kind="experts_bank")
+    w.finalize({"quant_format": "gguf", "gguf_types": [[18, 18, 23], [18, 18, 23]]})
+    # the reader pulls through O_DIRECT, which bypasses the page cache the
+    # buffered writes above still sit in: sync or the reads race the writeback
+    os.sync()
+    banks = load_ftw_banks(str(out), num_layers=2)
+    assert sorted(banks.sources) == ["down", "gate_up"]
+    for layer in range(2):
+        gu = banks.sources["gate_up"][layer]
+        assert tuple(gu.shape) == (2, 8, 512)
+        assert torch.equal(gu[:, :4], gate_t)
+        assert torch.equal(gu[:, 4:], up_t)
+    # boot-time parity: the engine loads inside torch.inference_mode, so the merged
+    # banks must be normal tensors the reader threads can still fold into
+    with torch.inference_mode():
+        banks = load_ftw_banks(str(out), num_layers=2)
+    assert sorted(banks.sources) == ["down", "gate_up"]
+    for layer in range(2):
+        gu = banks.sources["gate_up"][layer]
+        assert torch.equal(gu[:, :4], gate_t)
+        assert torch.equal(gu[:, 4:], up_t)
+
+
 def test_convert_mmproj_non_clip_fails_fast(tmp_path):
-    import freetoken.engine.engine as engine_mod
     from test_glm5_next_gguf import _write_mmproj_gguf
     from freetoken.checkpoint.convert import convert_checkpoint
 
     src = _write_ftw_source_gguf(tmp_path / "banks.gguf")
     bad = _write_mmproj_gguf(tmp_path / "wrong.gguf", arch="glm5next")
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(engine_mod, "offload_expert_method", lambda config: None)
-        with pytest.raises(ValueError, match="!= 'clip'"):
-            convert_checkpoint(src, str(tmp_path / "ckpt"), device="cpu", mmproj_path=bad)
+    with pytest.raises(ValueError, match="!= 'clip'"):
+        convert_checkpoint(src, str(tmp_path / "ckpt"), device="cpu", mmproj_path=bad)
+
+
+def test_pad_legacy_rows_segment_leaf_index(monkeypatch):
+    # a legacy carrier's segment leaves are weight_N after the qweight replay;
+    # the pad path must read the run index from the tail of the leaf, not the
+    # separator, or int("_") raises on every multi-segment legacy tensor
+    import freetoken.layers.quantization.configs as configs_mod
+    import freetoken.layers.quantization.scheme as scheme_mod
+    from freetoken.checkpoint.ftw import _pad_legacy_rows
+    from freetoken.layers.quantization.ggml_types import pad_rows
+    from freetoken.layers.quantization.registry import QuantKind
+
+    class _Scheme:
+        kind = QuantKind.GGUF
+
+    class _Cfg:
+        def scheme_for(self, prefix):
+            return _Scheme()
+
+    monkeypatch.setattr(configs_mod, "get_quant_config", lambda: _Cfg())
+    monkeypatch.setattr(scheme_mod, "gguf_types", lambda scheme: (8, 8))  # two q8_0 segments
+    # one q8_0 block is 34 bytes per 32 values: 24 blocks -> k=768, 768 % 512 -> pad > 0
+    tensor = torch.zeros(4, 816, dtype=torch.uint8)
+    out = _pad_legacy_rows({"name": "blk.3.ffn_up.weight_1"}, tensor)
+    pad = pad_rows(8, (816 // 34) * 32)
+    assert pad > 0
+    assert out.shape == (4 + pad, 816)
+    assert torch.equal(out[:4], tensor)
+    assert (out[4:] == 0).all()
+
+    # the un-suffixed first segment keeps its index-0 path
+    out0 = _pad_legacy_rows({"name": "blk.3.ffn_up.weight"}, tensor)
+    assert out0.shape == (4 + pad, 816)

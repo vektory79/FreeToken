@@ -455,18 +455,56 @@ def _load_attr(module_path: str, attr_name: str) -> Any:
     return getattr(module, attr_name)
 
 
+def _gguf_tensor_types(model_path: str, hf_config: Any, spec: ModelSpec) -> dict[str, int]:
+    """The ggml-type table the GGUF dialect resolves schemes against, keyed like the source's tensor table.
+
+    A raw .gguf carries it in the tensor infos. An FTW converted from one strips
+    that table (the metadata-only carrier lists zero tensors), so the types come
+    from the index meta: the per-tensor table new conversions record, or - on
+    older conversions, which kept only the per-layer expert triples - the
+    family's own convert contract via its ``ftw_tensor_types`` hook."""
+    from freetoken.checkpoint.ftw import FTWReader, is_ftw_checkpoint
+
+    if not is_ftw_checkpoint(model_path):
+        from freetoken.models.gguf.reader import gguf_tensor_index
+
+        return {name: info.ggml_type for name, info in gguf_tensor_index(hf_config.model_path).items()}
+    reader = FTWReader(model_path)
+    try:
+        table = reader.meta("gguf_tensor_types")
+    finally:
+        reader.close()
+    if table is not None:
+        if (
+            not isinstance(table, dict)
+            or not table
+            or not all(isinstance(v, int) and not isinstance(v, bool) for v in table.values())
+        ):
+            raise RuntimeError(
+                f"{model_path}: malformed gguf_tensor_types index meta; the checkpoint "
+                "does not match its converter, re-convert with ft checkpoint"
+            )
+        return table
+    try:
+        rebuild = _load_attr(spec.module, "ftw_tensor_types")
+    except (AttributeError, KeyError, ValueError):
+        raise RuntimeError(
+            f"{model_path}: FTW converted from a GGUF by an older build records no ggml "
+            "tensor types and its family pins none by contract; re-convert with ft checkpoint"
+        ) from None
+    return rebuild(model_path)
+
+
 def checkpoint_quant_config(model_path: str, hf_config: Any, spec: ModelSpec):
     """The checkpoint's QuantConfig under the family's naming.
 
-    A GGUF family gets the GGUF dialect over the file's tensor table, named through the ``to_gguf`` its module exports."""
+    A GGUF family gets the GGUF dialect over the source's ggml-type table (the file's tensor table; an FTW's index meta / convert contract), named through the ``to_gguf`` its module exports."""
     from freetoken.layers.quantization import GGUFConfig, NameMap, QuantConfig
 
     name_map = NameMap(roots=spec.checkpoint_roots, segments=spec.checkpoint_segments, packed=spec.packed_modules_mapping)
     if spec.parse_config == "parse_gguf_config":
         to_gguf = _load_attr(spec.module, "to_gguf")
-        from freetoken.models.gguf.reader import gguf_tensor_index
-
-        types = {name: info.ggml_type for name, info in gguf_tensor_index(hf_config.model_path).items()}
+        types = _gguf_tensor_types(model_path, hf_config, spec)
         return GGUFConfig(types, to_gguf, name_map=name_map, unquantized=spec.unquantized_modules)
     return QuantConfig.from_hf(hf_config, name_map=name_map, unquantized=spec.unquantized_modules)
 

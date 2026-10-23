@@ -356,6 +356,15 @@ def convert_checkpoint(
     except Exception:
         fingerprint = None
 
+    # The dense half of the source's ggml-type table: the metadata-only carrier
+    # strips the tensor table, so FTW scheme resolution reads this meta instead
+    # (older conversions rebuild it from the family contract, see ftw_tensor_types).
+    from freetoken.models.gguf.reader import gguf_tensor_index, is_gguf_path
+
+    gguf_tensor_types = None
+    if is_gguf_path(model_path):
+        gguf_tensor_types = {name: int(info.ggml_type) for name, info in gguf_tensor_index(model_path).items()}
+
     index = writer.finalize({
         "source_model_path": os.path.abspath(model_path),
         "fingerprint": fingerprint,
@@ -372,6 +381,10 @@ def convert_checkpoint(
         # (the old-converter key/shape; load_ftw_banks hard-requires it on gguf
         # checkpoints and the capability gates read it back on FTW dirs)
         "gguf_types": gguf_types,
+        # the per-tensor dense half of the same table (GGUF sources only): the
+        # metadata-only carrier lists zero tensors, so the config stage reads
+        # these instead of gguf_tensor_index
+        "gguf_tensor_types": gguf_tensor_types,
         # The reader takes num_layers from the model config (copied into this
         # checkpoint); recording it here too gives load_ftw_banks a cross-check that
         # the banks match the config they ship with. None for non-offload checkpoints.

@@ -68,6 +68,54 @@ _IO_QD_ENV = "FREETOKEN_FTW_IO_QD"
 _IO_QD_DEFAULT = 32
 _IO_BACKENDS = ("io_uring", "auto", "direct")
 _ALPHA_NAMES = ("gate_up_alpha", "down_alpha")
+# Segment leaf the pre-re-platform converter gave packed ggml rows ("qweight",
+# the gemma4 Phase-4 native-quant naming); the runtime names GGUF segments
+# weight/weight_N (segment_param), so old carriers replay under the current
+# vocabulary. Only a quantized first segment ever carried that leaf and the
+# current name is never taken alongside it, so the rename is unconditional.
+_QWEIGHT_LEAF_RE = re.compile(r"^(?P<base>.+)\.qweight(?P<run>_\d+)?$")
+
+
+def _replay_entry(entry: dict) -> dict:
+    m = _QWEIGHT_LEAF_RE.match(entry["name"])
+    if m is None:
+        return entry
+    return {**entry, "name": f"{m.group('base')}.weight{m.group('run') or ''}"}
+
+
+def _pad_legacy_rows(entry: dict, tensor: torch.Tensor) -> torch.Tensor:
+    """Zero MMQ tail an old-converter carrier lacks on its packed ggml rows: the
+    runtime segments allocate ``pad_rows`` tail rows the old conversion never
+    wrote. The tail is sized from the quant config the boot resolved already;
+    new conversions pad at conversion (and carry gguf_tensor_types, the legacy
+    gate), so this never fires on them."""
+    if tensor.dtype is not torch.uint8 or tensor.dim() != 2:
+        return tensor
+    from freetoken.layers.quantization.configs import get_quant_config
+    from freetoken.layers.quantization.ggml_types import pad_rows
+    from freetoken.layers.quantization.registry import QuantKind
+    from freetoken.layers.quantization.scheme import gguf_types as scheme_types
+    from freetoken.third_party import gguf as ggml
+
+    try:
+        cfg = get_quant_config()
+    except RuntimeError:  # no config installed: only real boots pad
+        return tensor
+    prefix, _, leaf = entry["name"].rpartition(".")
+    scheme = cfg.scheme_for(prefix)
+    if scheme is None or scheme.kind is not QuantKind.GGUF:
+        return tensor
+    seg_types = scheme_types(scheme)
+    idx = 0 if leaf == "weight" else int(leaf.rpartition("_")[2])
+    if idx >= len(seg_types):
+        return tensor
+    ggml_type = int(seg_types[idx])
+    block, size = ggml.GGML_QUANT_SIZES[ggml.GGMLQuantizationType(ggml_type)]
+    k = (tensor.shape[1] // size) * block
+    pad = pad_rows(ggml_type, k)
+    if not pad:
+        return tensor
+    return torch.cat([tensor, torch.zeros(pad, tensor.shape[1], dtype=tensor.dtype)])
 # Per-layer expert-bank entry name (converter streaming path, see checkpoint/convert.py):
 # each layer of a bank is its own FTW tensor instead of one flat [num_layers*E, ...] region.
 _LAYER_ENTRY_RE = re.compile(r"^(?P<base>.+)#L(?P<layer>\d{5})$")
@@ -518,6 +566,13 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), keep: Callable[[str], bool
     entries = reader.entries(*kinds)
     if keep is not None:
         entries = [e for e in entries if keep(e["name"])]
+    entries = [_replay_entry(e) for e in entries]
+    legacy_gguf = "gguf_tensor_types" not in reader.index
+    if legacy_gguf:
+        logger.info(
+            f"{path!r}: legacy gguf carrier (no gguf_tensor_types); "
+            "qweight replay, row padding and gate/up fold are active"
+        )
     q: queue.Queue = queue.Queue(maxsize=max(1, prefetch))
     _DONE = object()
     err: list[BaseException] = []
@@ -544,7 +599,10 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), keep: Callable[[str], bool
                 dt = _dtype_of(e["dtype"])
                 t = torch.frombuffer(buf, dtype=dt, count=e["nbytes"] // _elsize(dt))
                 # a 0-d entry (a per-tensor scale) comes back 0-d, not [1]
-                if not _put((e["name"], t.view(*e["shape"]) if e["shape"] else t.view(()), buf, e["nbytes"])):
+                viewed = t.view(*e["shape"]) if e["shape"] else t.view(())
+                if legacy_gguf:
+                    viewed = _pad_legacy_rows(e, viewed)
+                if not _put((e["name"], viewed, buf, e["nbytes"])):
                     return
         except BaseException as ex:  # surface to consumer
             err.append(ex)
@@ -740,6 +798,48 @@ def load_ftw_banks(
             row_jobs.append((name, bank, win_off, win_end - win_off, layer_bytes, layer_id))
 
     num_experts = next((e["shape"][0] for by_layer in per_layer_groups.values() for e in by_layer.values()), None)
+
+    # Pre-re-platform gguf carriers pack gate/up as two separate banks; the runtime
+    # schema (and the ggml kernel) reads one merged gate_up bank whose halves
+    # interleave per expert. The reads therefore land in per-layer mmap scratch
+    # (no pin quota - the bytes move again) and a strided copy folds them into
+    # the merged bank, which settles once the fold is done.
+    merge_pairs = []  # (layer_id, merged HostBank, scratch gate/up HostBanks, entries)
+    if (
+        quant_format == "gguf"
+        and {"gate", "up"} <= per_layer_groups.keys()
+        and "gate_up" not in per_layer_groups
+    ):
+        gate_g, up_g = per_layer_groups.pop("gate"), per_layer_groups.pop("up")
+        row_hb["gate_up"] = []
+        row_view_args["gate_up"] = []
+        for layer_id in range(num_layers):
+            eg, eu = gate_g.get(layer_id), up_g.get(layer_id)
+            if eg is None or eu is None:
+                raise RuntimeError(
+                    f"{path!r} layer {layer_id}: legacy gate/up banks are incomplete"
+                )
+            gate_rows, up_rows = eg["shape"][1], eu["shape"][1]
+            if eg["shape"][2:] != eu["shape"][2:]:
+                raise RuntimeError(
+                    f"{path!r} layer {layer_id}: legacy gate/up row shapes differ: "
+                    f"{eg['shape']} vs {eu['shape']}"
+                )
+            # inference_mode(False): the fold below runs on bank-reader threads
+            # (outside the engine's _weight_load_context inference_mode), and an
+            # inplace update to an inference tensor there is a hard torch error
+            with torch.inference_mode(False):
+                merged = HostBank(
+                    (eg["shape"][0], gate_rows + up_rows, *eg["shape"][2:]),
+                    _dtype_of(eg["dtype"]),
+                    backing=_backing(layer_id),
+                )
+                scratch_g = HostBank(tuple(eg["shape"]), _dtype_of(eg["dtype"]), backing="mmap")
+                scratch_u = HostBank(tuple(eu["shape"]), _dtype_of(eu["dtype"]), backing="mmap")
+            row_hb["gate_up"].append(merged)
+            row_view_args["gate_up"].append(None)
+            merge_pairs.append((layer_id, merged, scratch_g, scratch_u, eg, eu))
+
     for base, by_layer in per_layer_groups.items():
         row_hb[base] = []
         row_view_args[base] = []
@@ -774,11 +874,42 @@ def load_ftw_banks(
                         pins.submit(bank, residency[layer_id])
                 return _finish
 
+            def _pair_on_done(bank, layer_id, state, lock, nbytes, fold):
+                def _finish():
+                    bar.update(nbytes)
+                    # the gate and up halves are two tasks on different pool
+                    # workers: decrement and zero-check must be atomic or an
+                    # interleaving skips the fold and the merged gate_up bank
+                    # stays unsown (same contract as _run_shared_reads' _after)
+                    with lock:
+                        state["left"] -= 1
+                        last = state["left"] == 0
+                    if last:
+                        fold()
+                return _finish
+
             tasks = []  # (layer_id, name, dest, entry, on_done)
             for e in alpha_entries:
                 bank = alpha_hb[e["name"]]
                 tasks.append((-1, e["name"], bank.memoryview(), e,
                               _on_done(bank, None, e["nbytes"])))
+            for layer_id, merged, scratch_g, scratch_u, eg, eu in merge_pairs:
+                state = {"left": 2}
+                lock = threading.Lock()
+                gate_rows = eg["shape"][1]
+
+                def _fold(scratch_g=scratch_g, scratch_u=scratch_u, merged=merged,
+                          layer_id=layer_id, gate_rows=gate_rows):
+                    merged.tensor[:, :gate_rows] = scratch_g.tensor
+                    merged.tensor[:, gate_rows:] = scratch_u.tensor
+                    scratch_g.release()
+                    scratch_u.release()
+                    pins.submit(merged, residency[layer_id])
+
+                tasks.append((layer_id, eg["name"], scratch_g.memoryview(), eg,
+                              _pair_on_done(merged, layer_id, state, lock, eg["nbytes"], _fold)))
+                tasks.append((layer_id, eu["name"], scratch_u.memoryview(), eu,
+                              _pair_on_done(merged, layer_id, state, lock, eu["nbytes"], _fold)))
             for name, bank, win_off, win_len, layer_bytes, layer_id in row_jobs:
                 entry = {"global_off": win_off, "nbytes": win_len}
                 tasks.append((layer_id, name, bank.memoryview(), entry,
