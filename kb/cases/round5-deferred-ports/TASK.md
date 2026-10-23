@@ -360,14 +360,17 @@ kv_nvfp4/kv_quant зелёные и активные.
 
 ## 8. Приложение: гигиена вне функциональности
 
-- 11 до-существующих битых markdown-ссылок в kb: часть указывает на файлы,
-  удалённые ре-платформой (в т.ч. из
+- 11 до-существующих битых markdown-ссылок в kb: ПОЧИНЕНО 2026-10-21 (docs-коммит).
+  Фактический линк-чек по kb/ нашёл 9 битых: 5 ссылок из
   [lever3-chain-anatomy](../decode-t2-host-delivery/lever3-chain-anatomy.md)
-  и [glm53flash-spec-decode/TASK.md](../glm53flash-spec-decode/TASK.md)),
-  плюс 2 псевдо-ссылки (kb/README.md и
-  [review-1.md](../skill-reviews/gguf-native-serving/review-1.md)).
-  Поправить при первом удобном docs-коммите; перед правкой прогнать
-  link-чек по kb/ и сверить список.
+  на исходники, удалённые ре-платформой f0eed55 (layers/gguf.py,
+  kernel/csrc/gguf/*) - заменены текстом с пометкой об удалении;
+  4 ссылки из [glm53flash-spec-decode/TASK.md](../glm53flash-spec-decode/TASK.md)
+  имели неверную глубину пути - перенацелены на существующие файлы.
+  Оставшиеся 2 из изначального списка (kb/README.md и
+  [review-1.md](../skill-reviews/gguf-native-serving/review-1.md))
+  уже резолвятся после коммита 618b81d (self-sufficiency sweep).
+  Линк-чек после: 0 битых из 1119 внутренних ссылок.
 - Upstream-латентный тест offload FakeGraph (raw_cuda_graph_exec,
   engine/graph.py) - кандидат на upstream issue (по правилам репо - сначала
   issue, обсуждение с мейнтейнерами).
@@ -459,8 +462,7 @@ fix(moe) 739336f, chore 039bbf9; kb - docs-коммит этой волны):
 ОСТАЮТСЯ ОТКРЫТЫМИ:
 
 - fa / fi / trtllm nvfp4-KV: внешним kernel'ам нужна наша layout-схема
-  (row fp32 + block e4m3-u8/16 + low-nibble first) - отдельные PR с тестом и A/B;
-- 11 до-существующих битых kb-ссылок (сек. 8) - первый docs-коммит.
+  (row fp32 + block e4m3-u8/16 + low-nibble first) - отдельные PR с тестом и A/B.
 
 Исторический список до волны починки (каждый пункт - отдельная задача/PR):
 

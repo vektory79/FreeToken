@@ -45,18 +45,18 @@ verify-каркас с n-gram-драфтером, затем MTP self-draft из
   0.82 --max-prefill-length 8191 --moe-cpu-threads 16`, tier 10/50.
 
 ### FreeToken сегодня (HEAD ce1ab86)
-- blk.45 ПРОПУСКАЕТСЯ целиком: [models/glm5_next/gguf.py](../../python/freetoken/models/glm5_next/gguf.py)
+- blk.45 ПРОПУСКАЕТСЯ целиком: [models/glm5_next/gguf.py](../../../python/freetoken/models/glm5_next/gguf.py)
   (~:863 skip + debug-лог, ~:1011 continue для MTP-банков, ~:462 комментарий
   "FreeToken has no MTP"); `num_layers = 45`. HF-путь игнорирует аналогично.
 - Draft/speculative-инфраструктуры НЕТ: ни draft-загрузчика, ни verify-цикла в
   scheduler, ни спекулятивного сэмплирования, ни метрик acceptance.
-- Заделы-рудименты: [kernel/fla/fused_sigmoid_gating_recurrent.py](../../python/freetoken/kernel/fla/fused_sigmoid_gating_recurrent.py)
+- Заделы-рудименты: [kernel/fla/fused_sigmoid_gating_recurrent.py](../../../python/freetoken/kernel/fla/fused_sigmoid_gating_recurrent.py)
   уже принимает `intermediate_states_buffer` (пошаговый чекпоинт рекуррентного
   состояния GDN) и `retrieve_parent_token` (`HAS_EAGLE_TREE_CUSTOM_ATTN_MASK`,
   EAGLE-маска дерева) - порт-источник (sglang/fla) поддерживал спекуляцию, примитивы
-  на месте; [kvcache/qsa_pool.py](../../python/freetoken/kvcache/qsa_pool.py)
+  на месте; [kvcache/qsa_pool.py](../../../python/freetoken/kvcache/qsa_pool.py)
   `ring_capacity_for(num_speculative_tokens=...)` (qwen4_exp, vLLM-сайзинг);
-  [scheduler/decode.py](../../python/freetoken/scheduler/decode.py) `DecodeManager`
+  [scheduler/decode.py](../../../python/freetoken/scheduler/decode.py) `DecodeManager`
   = continuous batching (running_reqs/inflight_tokens) - батч декода >1 существует.
 - Стоимость шага (числа с конфигом):
   [moe-hybrid-cost-model.md](../../topics/moe-hybrid-cost-model.md),

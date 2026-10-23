@@ -10,6 +10,10 @@ Status: RESEARCH 2026-09-27; код не менялся, коммитов нет
 (чтение GGUF-заголовка для форматов/форм). Начальная точка:
 [lever2-gap-anatomy.md](lever2-gap-anatomy.md).
 
+Примечание (2026-10-21): ссылки на исходники `layers/gguf.py` и
+`kernel/csrc/gguf/*` вели на файлы, удалённые ре-платформой ggml
+(merge f0eed55, коммит e5d3bd3); имена оставлены ниже как текст без ссылок.
+
 ## TL;DR (вердикт)
 
 - **dense_gemv (6.67 ms/шаг) - это ДВЕ разные вещи**: 6.32 ms - 316 пусков
@@ -38,11 +42,11 @@ Status: RESEARCH 2026-09-27; код не менялся, коммитов нет
 
 | класс | ms/шаг | главные ядра | пусков/шаг | источник |
 |---|---|---|---|---|
-| dense_gemv | 6.67 | `mul_mat_vec_q` 6.32 + `at::gemv` (bf16) 0.34 | 316 + 86 | [layers/gguf.py](../../../python/freetoken/layers/gguf.py) `fused_mul_mat_gguf` -> [mmvq.cuh](../../../python/freetoken/kernel/csrc/gguf/mmvq.cuh) |
+| dense_gemv | 6.67 | `mul_mat_vec_q` 6.32 + `at::gemv` (bf16) 0.34 | 316 + 86 | `layers/gguf.py` `fused_mul_mat_gguf` -> `mmvq.cuh` |
 | gdn/mhc | 1.91 | `_mhc_stage1` 1.20, `_mhc_stage2` 0.25, `_mhc_stage3` 0.07, fla `fused_recurrent_gated_delta_rule` 0.19, RMSNorm 0.14, `causal_conv1d_update` 0.085, layernorm 0.036 | 90+90+90+34+113+34+34 | [kernel/triton/mhc.py](../../../python/freetoken/kernel/triton/mhc.py), fla, flashinfer-norm |
 | add/copy | 1.27-1.36 | at:: `vectorized/unrolled/elementwise_kernel` 812+148+269, `scatter_gather` 53 | ~1280 | torch eager: mhc-стримы, резудуалы, add партиалов [moe.py:352](../../../python/freetoken/layers/moe.py) |
 | topk/router | 0.76 | `sbtopk::gatherTopK` 42x4.65us=0.195, `bitonicSortKVInPlace` 0.116, DSA-индексер (radix+mbtopk suite) ~0.38 | 42 + ~190 | router top-8 из 288 ([moe.py](../../../python/freetoken/layers/moe.py)), select в [dsa_indexer_kpool.py](../../../python/freetoken/attention/dsa_indexer_kpool.py) |
-| quant | 0.32 | `quantize_q8_1` 442x0.71us | 442 = 316 dense + 126 moe | вход C++-опа MMVQ/MoE ([gguf_kernel.cu](../../../python/freetoken/kernel/csrc/gguf)) |
+| quant | 0.32 | `quantize_q8_1` 442x0.71us | 442 = 316 dense + 126 moe | вход C++-опа MMVQ/MoE (`gguf_kernel.cu`) |
 | dsa | 0.30 (+0.33 bmm) | `_glm_dsa_splitk` 0.198, `_decode_logits` 0.054, `_merge` 0.044; отдельно cutlass bf16 `s161616gemm` 22x14.5us=0.33 (MLA-absorb bmm) | 11+11+11 (+22) | [dsa_indexer_kpool.py](../../../python/freetoken/attention/dsa_indexer_kpool.py), [attention.py](../../../python/freetoken/models/glm5_next/attention.py) |
 | ensure | 0.16 | `_ensure_experts_hybrid` 42x3.74us | 42 | роутинг-буккипинг MoE |
 
@@ -56,7 +60,7 @@ gate/up/down, z=top_k=8; формат экспертов - родные q3_K/q4_
 grid=(nrows,1,1), block=(32,1,1) - ОДИН варп на строку весов, grid.x = число
 выходных фичей. Это дало разложение по проекциям без инструментов: каждый сайт
 = своя nrows. Регистры 40, nvecs=1 (decode bs=1, порог MMVQ x<=6 в
-[layers/gguf.py](../../../python/freetoken/layers/gguf.py)). Активация x[4096]
+`layers/gguf.py`). Активация x[4096]
 квантуется в q8_1 перед каждым пуском (класс quant, 442/шаг по 0.71 us - чистый
 launch-флор). Вес/инстанс доминирует: активация 4.4 KB, выход 2-8 KB.
 
@@ -162,7 +166,7 @@ o_projs 1997 + shexp 1123 + lm_head 520 + dense-ffn 481 + q_b 294 + прочее
    ничьих/порядка выбора должна совпасть бит-в-бит (маршрутизация!).
 4. **C-L4: quantize_q8_1 внутрь MMVQ/MoE-ядра**. Что: считать y-квант на лету
    в ядре (x[4096] = 128 блоков - дешево в L1), убрав 442 отдельных пуска.
-   Файлы: [kernel/csrc/gguf](../../../python/freetoken/kernel/csrc/gguf)
+   Файлы: `kernel/csrc/gguf`
    (gguf_kernel.cu + mmvq.cuh). Потолок: **-0.20..-0.30 ms/шаг (+0.35-0.5%)**.
    Риск: низкий по числам (те же q8_1-значения -> бит-идентичный результат),
    средний по C++/CUDA работе.
