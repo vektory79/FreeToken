@@ -76,6 +76,10 @@ VRAM-heavy work (GPU tests, hardware A/B, `ft serve` runs):
 
 Comments explain a non-obvious "why", never restate the code. Write the code first, then add a comment only where a reader would otherwise be confused. Keep them to one or two lines. Configuration files get no comments. Use ASCII: `-` not em-dash, `->` not arrows.
 
+## Language
+
+Russian-language texts (kb articles, reports, chat replies) use normal Russian, or an established English term left as-is. No Russified calques: write "устойчивый", not "робастный".
+
 ## Commits
 
 [Conventional Commits](https://www.conventionalcommits.org/), one line, imperative, lowercase, no trailing period:
