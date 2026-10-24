@@ -745,3 +745,82 @@ def test_pad_legacy_rows_segment_leaf_index(monkeypatch):
     # the un-suffixed first segment keeps its index-0 path
     out0 = _pad_legacy_rows({"name": "blk.3.ffn_up.weight"}, tensor)
     assert out0.shape == (4 + pad, 816)
+
+
+def test_ftw_legacy_gate_up_zero_scratch_remap(tmp_path, monkeypatch):
+    # remap-safe shapes (ALIGN-aligned expert blocks, nbytes == E*cx): gate/up read
+    # jobs land directly in the merged bank via the affine remap (_merge_pair_jobs)
+    # - no scratch, no fold - and the result must be byte-identical to the old
+    # scratch+fold algorithm (gate -> [:, :g], up -> [:, g:]), with chunk both
+    # larger and smaller than the expert block
+    monkeypatch.setenv("FREETOKEN_SKIP_BANK_PIN", "1")  # CPU-only: no pin settle
+    import freetoken.checkpoint.ftw as ftw_mod
+    from freetoken.checkpoint.ftw import FTWWriter, load_ftw_banks
+
+    E, g_rows, u_rows, row_bytes = 3, 16, 8, 512
+    g_cx, u_cx = g_rows * row_bytes, u_rows * row_bytes  # 8192 / 4096, ALIGN-aligned
+    gate_t = (torch.arange(E * g_cx) % 251).to(torch.uint8).view(E, g_rows, row_bytes)
+    up_t = ((torch.arange(E * u_cx) + 61) % 251).to(torch.uint8).view(E, u_rows, row_bytes)
+    down_t = ((torch.arange(E * u_cx) + 122) % 251).to(torch.uint8).view(E, u_rows, row_bytes)
+
+    out = tmp_path / "legacy-zero-scratch"
+    w = FTWWriter(str(out))
+    for layer in range(2):
+        w.add_tensor(f"gate#L{layer:05d}", gate_t.clone(), kind="experts_bank")
+        w.add_tensor(f"up#L{layer:05d}", up_t.clone(), kind="experts_bank")
+        w.add_tensor(f"down#L{layer:05d}", down_t.clone(), kind="experts_bank")
+    w.finalize({"quant_format": "gguf", "gguf_types": [[18, 18, 23]] * 2})
+    # the reader pulls through O_DIRECT: sync or the reads race the writeback
+    os.sync()
+
+    calls = []
+    orig = ftw_mod._merge_pair_jobs
+
+    def _spy(reader, entry, cx, base, stride, chunk):
+        jobs = orig(reader, entry, cx, base, stride, chunk)
+        calls.append((entry["name"], cx, base, stride, jobs))
+        return jobs
+
+    monkeypatch.setattr(ftw_mod, "_merge_pair_jobs", _spy)
+
+    def _check(banks, tag):
+        assert sorted(banks.sources) == ["down", "gate_up"], tag
+        for layer in range(2):
+            gu = banks.sources["gate_up"][layer]
+            assert tuple(gu.shape) == (E, g_rows + u_rows, row_bytes), tag
+            # byte-identical to the old scratch+fold algorithm
+            assert torch.equal(gu[:, :g_rows], gate_t), tag
+            assert torch.equal(gu[:, g_rows:], up_t), tag
+
+    # chunk larger than the expert block: one job per expert
+    banks = load_ftw_banks(str(out), num_layers=2)
+    _check(banks, "chunk > cx")
+    assert [c[0] for c in calls] == ["gate#L00000", "up#L00000", "gate#L00001", "up#L00001"]
+    assert {c[1] for c in calls} == {g_cx, u_cx}
+    merged_bytes = E * (g_cx + u_cx)
+    for name, cx, base, _stride, jobs in calls:
+        assert len(jobs) == E  # one job per expert
+        assert sum(j[3] for j in jobs) == E * cx  # exact cover, no pad tail read
+        end = max(j[2] + j[3] for j in jobs)
+        assert end <= merged_bytes, (name, end)
+        if name.startswith("up"):
+            assert end == merged_bytes  # the up half ends exactly at the merged tail
+
+    # chunk smaller than the expert block: several jobs per expert, same bytes;
+    # boot-time parity: the engine loads inside inference_mode
+    calls.clear()
+    with torch.inference_mode():
+        banks = load_ftw_banks(str(out), num_layers=2, chunk=4096)
+    _check(banks, "chunk < cx")
+    assert len(calls) == 4
+    for name, cx, base, _stride, jobs in calls:
+        per_expert = 2 if name.startswith("gate") else 1  # 8192/4096 vs 4096/4096
+        assert len(jobs) == E * per_expert, (name, len(jobs))
+        assert sum(j[3] for j in jobs) == E * cx
+
+    # no job straddles an expert block: each job's dest run fits one block
+    for name, cx, base, _stride, jobs in calls:
+        for _f, _fo, do, ln in jobs:
+            off = do - base
+            blk = off // (g_cx + u_cx)
+            assert blk == (off + ln - 1) // (g_cx + u_cx), (name, do, ln)

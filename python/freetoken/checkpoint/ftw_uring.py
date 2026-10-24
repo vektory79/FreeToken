@@ -283,7 +283,7 @@ def _settle(on_dones, err: list) -> None:
 def run_ring_reads(reader, planned, tasks, *, workers: int, chunk: int, qd: int) -> None:
     """Execute every planned sub-read through one io_uring ring (P7 backend).
 
-    ``planned``/``tasks`` are the ``(dest, jobs)`` / ``(dest, entry, on_done)`` lists
+    ``planned``/``tasks`` are the ``(dest, jobs)`` / ``(dest, entry, on_done, jobs)`` lists
     from ``_run_shared_reads``. Raises :class:`IoUringUnavailable` only from ring setup;
     read errors are raised after the ring drains (the failed task skips its settle).
     Zero-job entries settle exactly like read ones: inline when no ring is needed at
@@ -294,7 +294,7 @@ def run_ring_reads(reader, planned, tasks, *, workers: int, chunk: int, qd: int)
         reader._fd(file)
     queue: deque = deque()
     empties = []  # zero-job on_dones: total stays read-only, settles never lost
-    for (dest, jobs), (_dest, _entry, on_done) in zip(planned, tasks):
+    for (dest, jobs), (_dest, _entry, on_done, _task_jobs) in zip(planned, tasks):
         if not jobs:
             empties.append(on_done)
             continue

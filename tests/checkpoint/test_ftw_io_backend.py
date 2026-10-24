@@ -431,8 +431,8 @@ def test_ring_settles_zero_job_task_alongside_reads(tmp_path):
             calls = []
             planned = [(mv, [(path.name, 0, 0, 4096)]), (mv, [])]
             tasks = [
-                (mv, {"global_off": 0, "nbytes": 4096}, lambda: calls.append("read")),
-                (mv, {"global_off": 0, "nbytes": 0}, lambda: calls.append("empty")),
+                (mv, {"global_off": 0, "nbytes": 4096}, lambda: calls.append("read"), None),
+                (mv, {"global_off": 0, "nbytes": 0}, lambda: calls.append("empty"), None),
             ]
             ftw_uring.run_ring_reads(_FakeReader(fd), planned, tasks,
                                      workers=1, chunk=4096, qd=4)
@@ -464,8 +464,8 @@ def test_ring_on_done_error_raises_after_drain(tmp_path):
 
             planned = [(mv, [(path.name, 0, 0, 4096)]), (mv, [])]
             tasks = [
-                (mv, {"global_off": 0, "nbytes": 4096}, bad_settle),
-                (mv, {"global_off": 0, "nbytes": 0}, lambda: calls.append("ok")),
+                (mv, {"global_off": 0, "nbytes": 4096}, bad_settle, None),
+                (mv, {"global_off": 0, "nbytes": 0}, lambda: calls.append("ok"), None),
             ]
             with pytest.raises(ValueError, match="settle boom"):
                 ftw_uring.run_ring_reads(_FakeReader(fd), planned, tasks,

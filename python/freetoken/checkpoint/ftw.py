@@ -478,11 +478,15 @@ def _run_shared_reads(reader: FTWReader, tasks, *, workers: int, chunk: int) -> 
     The queue holds all sub-read jobs at once (the deep queue), so the submitter always
     has the next read ready; jobs are pulled in submission order, which the caller submits
     layer-major, so the concurrent reads land on nearby FTW regions instead of fanning a
-    nested pool per task across every shard. ``on_done`` runs exactly once per task after
-    its last job completes (the pin step); a failed job skips it, and the first error is
-    re-raised after the queue drains."""
+    nested pool per task across every shard. Tasks are ``(dest, entry, on_done, jobs)``;
+    pre-planned ``jobs`` (the merge-pair remap) skip ``_plan_jobs``. ``on_done`` runs
+    exactly once per task after its last job completes (the pin step); a failed job skips
+    it, and the first error is re-raised after the queue drains."""
     reader._ensure_mode()
-    planned = [(dest, reader._plan_jobs(dest, entry, chunk)) for dest, entry, _ in tasks]
+    planned = [
+        (dest, jobs if jobs is not None else reader._plan_jobs(dest, entry, chunk))
+        for dest, entry, _, jobs in tasks
+    ]
     touch = reader._fd if reader._direct else reader._map
     for file in {j[0] for _, jobs in planned for j in jobs}:
         touch(file)
@@ -517,7 +521,7 @@ def _run_shared_reads(reader: FTWReader, tasks, *, workers: int, chunk: int) -> 
     err: list[BaseException] = []
     ex = ThreadPoolExecutor(workers, thread_name_prefix="ftw-bank-read")
     try:
-        for (dest, jobs), (_dest, _entry, on_done) in zip(planned, tasks):
+        for (dest, jobs), (_dest, _entry, on_done, _task_jobs) in zip(planned, tasks):
             if not jobs:  # a zero-byte entry: settle it exactly like a read one
                 on_done()
                 continue
@@ -550,6 +554,31 @@ def _transient_buffer(nbytes: int) -> mmap.mmap:
     return mmap.mmap(-1, _align_up(nbytes))
 
 
+def _merge_pair_jobs(reader: FTWReader, entry: dict, cx: int, base: int, stride: int,
+                     chunk: int) -> list[tuple]:
+    """Read jobs for one half of a legacy gate/up merge pair, pre-remapped into the
+    merged bank's coordinates.
+
+    Entry bytes are expert-major (``[E, rows, *rest]`` with ``cx`` bytes per expert
+    block); the merged bank interleaves the halves per expert, so within-block offset
+    ``off`` of expert ``e`` lands at ``e*stride + base + off`` (``base`` 0 for gate,
+    ``cx`` for up). Jobs are cut at expert-block boundaries AND ``chunk`` multiples,
+    so every job is one contiguous affine run; the caller checked ``cx % ALIGN == 0``
+    and ``nbytes == E*cx``, so the cuts (and the region end, which carries no ALIGN
+    pad) stay O_DIRECT-legal like ``_plan_jobs``' own cuts.
+    """
+    jobs = []
+    for file, file_off, dest_off, length in reader._pieces(entry["global_off"], entry["nbytes"]):
+        pos = 0
+        while pos < length:
+            do = dest_off + pos
+            e, off = divmod(do, cx)
+            take = min(chunk, cx - off, length - pos)
+            jobs.append((file, file_off + pos, e * stride + base + off, take))
+            pos += take
+    return jobs
+
+
 def iter_ftw_weights(path: str, *, kinds=("weight",), keep: Callable[[str], bool] | None = None,
                        workers: int = 8, chunk: int = _DEFAULT_CHUNK, prefetch: int = 2):
     """Yield ``(name, host_tensor)`` for the requested kinds, reading each tensor via
@@ -571,7 +600,7 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), keep: Callable[[str], bool
     if legacy_gguf:
         logger.info(
             f"{path!r}: legacy gguf carrier (no gguf_tensor_types); "
-            "qweight replay, row padding and gate/up fold are active"
+            "qweight replay, row padding and gate/up merge are active"
         )
     q: queue.Queue = queue.Queue(maxsize=max(1, prefetch))
     _DONE = object()
@@ -685,6 +714,8 @@ def load_ftw_banks(
     Reads go through ONE bounded shared pool (``workers`` threads, sub-reads capped at
     ``_BANK_SUB_CHUNK``, tasks submitted layer-major); ``FREETOKEN_BANK_POOL_WORKERS``
     overrides the pool size. The pin contract (exactly one settle per bank) is unchanged.
+    Legacy gate/up pairs read straight into the merged bank when their expert blocks
+    are ALIGN-aligned (zero scratch); otherwise they fold through mmap scratch.
 
     ``layer_residency`` (default: all pinned) settles each layer's banks per its ``HostResidency`` label as reads complete: PINNED -> cudaHostRegister, LOCKED -> mlock (CPU-executor resident, no pin quota spent).
     The applied labels are echoed back on ``ExpertBanks.layer_residency``.
@@ -801,10 +832,12 @@ def load_ftw_banks(
 
     # Pre-re-platform gguf carriers pack gate/up as two separate banks; the runtime
     # schema (and the ggml kernel) reads one merged gate_up bank whose halves
-    # interleave per expert. The reads therefore land in per-layer mmap scratch
-    # (no pin quota - the bytes move again) and a strided copy folds them into
-    # the merged bank, which settles once the fold is done.
-    merge_pairs = []  # (layer_id, merged HostBank, scratch gate/up HostBanks, entries)
+    # interleave per expert. When both halves' expert blocks are ALIGN-aligned
+    # (the writer's region invariant on real carriers) the reads land DIRECTLY in
+    # the merged bank via the affine per-job remap (_merge_pair_jobs) - no scratch,
+    # no fold. Exotic shapes that would break the block-aligned cuts or carry an
+    # ALIGN pad tail fall back to per-layer mmap scratch + a strided fold copy.
+    merge_pairs = []  # (layer_id, merged HostBank, scratch gate/up HostBanks or None, entries)
     if (
         quant_format == "gguf"
         and {"gate", "up"} <= per_layer_groups.keys()
@@ -825,17 +858,31 @@ def load_ftw_banks(
                     f"{path!r} layer {layer_id}: legacy gate/up row shapes differ: "
                     f"{eg['shape']} vs {eu['shape']}"
                 )
-            # inference_mode(False): the fold below runs on bank-reader threads
-            # (outside the engine's _weight_load_context inference_mode), and an
-            # inplace update to an inference tensor there is a hard torch error
+            dtype = _dtype_of(eg["dtype"])
+            row_bytes = (math.prod(eg["shape"][2:]) if eg["shape"][2:] else 1) * _elsize(dtype)
+            g_cx, u_cx = gate_rows * row_bytes, up_rows * row_bytes
+            # the direct remap cuts jobs at expert-block boundaries: the cuts (and
+            # the region end) must stay ALIGN-aligned or the O_DIRECT reads go illegal
+            zero_scratch = (
+                eg["shape"][0] == eu["shape"][0]
+                and g_cx % ALIGN == 0 and u_cx % ALIGN == 0
+                and eg["nbytes"] == eg["shape"][0] * g_cx
+                and eu["nbytes"] == eu["shape"][0] * u_cx
+            )
+            # inference_mode(False): the merged bank's tensor must not be born an
+            # inference tensor (the engine loads inside inference_mode; reader
+            # threads and later in-place consumers need a normal tensor)
             with torch.inference_mode(False):
                 merged = HostBank(
                     (eg["shape"][0], gate_rows + up_rows, *eg["shape"][2:]),
-                    _dtype_of(eg["dtype"]),
+                    dtype,
                     backing=_backing(layer_id),
                 )
-                scratch_g = HostBank(tuple(eg["shape"]), _dtype_of(eg["dtype"]), backing="mmap")
-                scratch_u = HostBank(tuple(eu["shape"]), _dtype_of(eu["dtype"]), backing="mmap")
+                if zero_scratch:
+                    scratch_g = scratch_u = None
+                else:
+                    scratch_g = HostBank(tuple(eg["shape"]), dtype, backing="mmap")
+                    scratch_u = HostBank(tuple(eu["shape"]), dtype, backing="mmap")
             row_hb["gate_up"].append(merged)
             row_view_args["gate_up"].append(None)
             merge_pairs.append((layer_id, merged, scratch_g, scratch_u, eg, eu))
@@ -874,29 +921,47 @@ def load_ftw_banks(
                         pins.submit(bank, residency[layer_id])
                 return _finish
 
-            def _pair_on_done(bank, layer_id, state, lock, nbytes, fold):
+            def _pair_on_done(bank, layer_id, state, lock, nbytes, fold=None):
                 def _finish():
                     bar.update(nbytes)
                     # the gate and up halves are two tasks on different pool
                     # workers: decrement and zero-check must be atomic or an
-                    # interleaving skips the fold and the merged gate_up bank
-                    # stays unsown (same contract as _run_shared_reads' _after)
+                    # interleaving settles the merged gate_up bank twice or
+                    # never (same contract as _run_shared_reads' _after)
                     with lock:
                         state["left"] -= 1
                         last = state["left"] == 0
                     if last:
-                        fold()
+                        if fold is None:  # zero-scratch: the bytes are already in place
+                            pins.submit(bank, residency[layer_id])
+                        else:  # legacy fallback: fold the scratch halves, then settle
+                            fold()
                 return _finish
 
-            tasks = []  # (layer_id, name, dest, entry, on_done)
+            tasks = []  # (layer_id, name, dest, entry, on_done, pre-planned jobs | None)
             for e in alpha_entries:
                 bank = alpha_hb[e["name"]]
                 tasks.append((-1, e["name"], bank.memoryview(), e,
-                              _on_done(bank, None, e["nbytes"])))
+                              _on_done(bank, None, e["nbytes"]), None))
             for layer_id, merged, scratch_g, scratch_u, eg, eu in merge_pairs:
                 state = {"left": 2}
                 lock = threading.Lock()
                 gate_rows = eg["shape"][1]
+                if scratch_g is None:
+                    # zero-scratch remap: every job is one contiguous affine run
+                    # inside one expert's merged block (see _merge_pair_jobs); the
+                    # pair settles once both halves are done
+                    up_rows = eu["shape"][1]
+                    row_bytes = (math.prod(eg["shape"][2:]) if eg["shape"][2:] else 1) * _elsize(_dtype_of(eg["dtype"]))
+                    stride = (gate_rows + up_rows) * row_bytes
+                    chunk_eff = min(chunk, _BANK_SUB_CHUNK)
+                    tasks.append((layer_id, eg["name"], merged.memoryview(), eg,
+                                  _pair_on_done(merged, layer_id, state, lock, eg["nbytes"]),
+                                  _merge_pair_jobs(reader, eg, gate_rows * row_bytes, 0, stride, chunk_eff)))
+                    tasks.append((layer_id, eu["name"], merged.memoryview(), eu,
+                                  _pair_on_done(merged, layer_id, state, lock, eu["nbytes"]),
+                                  _merge_pair_jobs(reader, eu, up_rows * row_bytes, gate_rows * row_bytes, stride, chunk_eff)))
+                    continue
 
                 def _fold(scratch_g=scratch_g, scratch_u=scratch_u, merged=merged,
                           layer_id=layer_id, gate_rows=gate_rows):
@@ -907,19 +972,19 @@ def load_ftw_banks(
                     pins.submit(merged, residency[layer_id])
 
                 tasks.append((layer_id, eg["name"], scratch_g.memoryview(), eg,
-                              _pair_on_done(merged, layer_id, state, lock, eg["nbytes"], _fold)))
+                              _pair_on_done(merged, layer_id, state, lock, eg["nbytes"], _fold), None))
                 tasks.append((layer_id, eu["name"], scratch_u.memoryview(), eu,
-                              _pair_on_done(merged, layer_id, state, lock, eu["nbytes"], _fold)))
+                              _pair_on_done(merged, layer_id, state, lock, eu["nbytes"], _fold), None))
             for name, bank, win_off, win_len, layer_bytes, layer_id in row_jobs:
                 entry = {"global_off": win_off, "nbytes": win_len}
                 tasks.append((layer_id, name, bank.memoryview(), entry,
-                              _on_done(bank, layer_id, layer_bytes)))
+                              _on_done(bank, layer_id, layer_bytes), None))
             for name, bank, entry, layer_id in layer_jobs:
                 tasks.append((layer_id, name, bank.memoryview(), entry,
-                              _on_done(bank, layer_id, entry["nbytes"])))
+                              _on_done(bank, layer_id, entry["nbytes"]), None))
             tasks.sort(key=lambda t: (t[0], t[1]))
             _run_shared_reads(
-                reader, [(dest, entry, on_done) for _, _, dest, entry, on_done in tasks],
+                reader, [(dest, entry, on_done, jobs) for _, _, dest, entry, on_done, jobs in tasks],
                 workers=_bank_pool_workers(workers), chunk=min(chunk, _BANK_SUB_CHUNK),
             )
     finally:
