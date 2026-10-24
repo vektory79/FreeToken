@@ -3,6 +3,7 @@ name: "plain-language-final-reports"
 description: "Final chat reports must be plain-language step-by-step; dense jargon stays in kb/memory, not user summaries"
 type: feedback
 lastUpdated: 2026-09-27T14:23
+lastRecall: 2026-10-24T20:34
 ---
 
 # Final reports to the USER must be plain human language

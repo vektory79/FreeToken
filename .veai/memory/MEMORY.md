@@ -27,7 +27,6 @@
 - [merge-wave-interrupted-provenance](merge-wave-interrupted-provenance-eea44dde4469.md) — Continue interrupted merge wave safely: git merge-tree bit-for-bit check + provenance rules + tee runner stdout
 - [ftw-index-scans-silent-none](ftw-index-scans-silent-none-98c041aefd3e.md) — GGUF/FTW signature scans degrade to None silently (expert_banks.py:285/:406/:517), not raw errors
 - [git-integration-preferences](git-integration-preferences-90e2d8dc168a.md) — Branch-integration prefs: PR merges stay merge commits; duplicate functionality -> main wins; merge over rebase
-- [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-82d7aac85712.md) — GGUF glm5next VRAM headroom: 0.80/400k winner needs >=29.28 GiB free at boot; flips with desktop VRAM swing; options
 - [fix3-hybrid-cache-loss-donation](fix3-hybrid-cache-loss-donation-09364e19044a.md) — Fix-3 campaign LANDED+VALIDATED: donation fixes user's periodic full loss (5/5 -> 0/5 misses, 4.3x turns 2-6); 5 commits
 - [kb-authoring-user-requirements](kb-authoring-user-requirements-d5e5128874ab.md) — User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity
 - [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md
@@ -53,7 +52,6 @@
 - [ft-lever2-gap-anatomy](ft-lever2-gap-anatomy-7d202d10c248.md) — Lever2 anatomy: fetch already overlapped 28.7 ms; gaps = chain kernels 11.5 ms; C1 doze-fix +1.6-1.8% only lever
 - [ft-session-cache-tiering-phase1](ft-session-cache-tiering-phase1-67e8a5a7a071.md) — Phase-1 tiering: SessionTierStore d77d15e/4b6aacb, L1 10 GiB cap; Qwen3.8 QSA hazard resolved by phase-2 codec
 - [ft-lever3-chain-cl1](ft-lever3-chain-cl1-575cdd6e73ae.md) — mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons distilled+committed 61397a2/d76c3ce/a8fb231
-- [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a5f991dc9f99.md) — Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit
 - [local-llm-vram-protocol](local-llm-vram-protocol-c8f46ab09a59.md) — Local LLM occupies rig VRAM: work serial/sync; for VRAM-heavy work ask user to switch to cloud model
 - [ft-decode-research-campaign](ft-decode-research-campaign-0fabb44fa748.md) — GGUF decode 5-arm A/B + additive step model + T1 block decomposition; harness .tasks/decode-research
 - [ft-decode-lever-research](ft-decode-lever-research-e9917fbc0e8e.md) — GGUF glm5next hybrid decode lever study: R1-R3 hypothesis closures, FA N/A for GDN+DSA arch, user-config gotcha
@@ -92,3 +90,6 @@
 - [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-e8f30d956dd0.md) — Spec-decode GLM-5.3-Flash case CLOSED NO-GO: W0 R4 3.76, W0.5 cW 0.50, W1 ngram acceptance=0 (stage0 method flaw)
 - [ftw-legacy-fold-ram-peak](ftw-legacy-fold-ram-peak-88e4077322c2.md) — FTW legacy fold 198 GiB OOM fixed: zero-scratch VERIFIED f12e554 (~143 GiB); old carrier delete + push = user decisions
 - [ftw-new-carrier-slowload](ftw-new-carrier-slowload-7f3dce4f4d49.md) — FTW new carrier 148s boot: NOT banks (25s, faster); tier compact on idle loop + bimodal warmup; fix = background compact
+- [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-fd804af7adee.md) — GGUF glm5next VRAM: post-round5 matrix in USED MiB (5 configs + ladders), 0.80 floor, kb report used-based
+- [ru-style-no-calques](ru-style-no-calques-6598bec9e18b.md) — User style rule: no Russified calques like робастный in Russian texts; codified in AGENTS.md ## Language (e596bba)
+- [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-77e5b594b1d8.md) — Git index keeps stale staged versions from parallel sessions; re-stage explicit paths before every commit

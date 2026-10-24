@@ -1,9 +1,9 @@
 ---
 name: "git-stale-index-parallel-sessions"
-description: "Git index holds stale staged versions; parallel sessions commit .veai/memory between waves; re-stage before commit"
+description: "Git index keeps stale staged versions from parallel sessions; re-stage explicit paths before every commit"
 type: project
-lastUpdated: 2026-09-27T22:09
-lastRecall: 2026-10-24T14:40
+lastUpdated: 2026-10-24T20:40
+lastRecall: 2026-10-24T20:39
 ---
 
 # Stale git index + параллельные пользовательские коммиты
@@ -15,3 +15,5 @@ lastRecall: 2026-10-24T14:40
 **How to apply:** в коммит-волне: preflight git status; staging только явными путями; после add - убедиться, что staged = актуальная версия файла, а не ранняя; не удивляться чужим .veai/memory-коммитам в истории - принимать как есть, не откатывать; ожидаемые счётчики файлов сверять с фактом до коммита.
 
 **(3)-(4) 2026-09-28, два случая в decode-кампаниях:** в индексе снова лежали чужие staged-записи от параллельных сессий - в первый раз два kb-файла из другого коммит-вейва, во второй - файлы (lever3-microfix-ab.md, decode-chain-microfusion.md), которые вообще ещё нигде не были закоммичены (staged кем-то параллельно). Протокол сработал в обоих случаях: git reset -> явный add путями -> сверка `git diff --cached --stat` с ожидаемым набором -> коммит.
+
+(5) 2026-10-24, vram-headroom kb wave: pre-commit status again showed stale staged entries from the parallel kb-distill session (`A  kb/methods/vram-peak-measurement.md`, `AM kb/topics/*.md`) mixed with .veai/memory churn; explicit-path re-add per logical commit (kb/ -> AGENTS.md -> .veai/) + fresh status check landed all three commits cleanly. .tasks/ is gitignored (line 230) - wave probe artifacts intentionally stay uncommitted.
