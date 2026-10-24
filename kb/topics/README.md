@@ -24,6 +24,7 @@
 | [round5-d2-mmproj-vision-port.md](round5-d2-mmproj-vision-port.md) | Как порт D2 (коммит 7bc68b0) вернул mmproj-зрение: ампутация ре-платформы точечная (3 стыка), collision-гвардия _pack_kv, verify 347/347; эскалация - gguf->FTW carrier не несёт тензоры (register.py:469) |
 | [round5-d5-nvfp4-kv-generic.md](round5-d5-nvfp4-kv-generic.md) | Как порт D5 (коммит 660c814) вернул nvfp4/fp8-KV read-путь generic-triton: store/read-асимметрия ре-платформы, E2M1-parity A/B против dequant-референса (Qwen3.8, 3.46x без деградации), dtype-гейт валидатора формата |
 | [decode-chain-microfusion.md](decode-chain-microfusion.md) | Почему сокращение пусков ядер не равно ускорению; четыре микрофьюжн-кандидата декода отклонены на железе 2026-09-28; дискриминатор - CTAs/SM, а не счётчик пусков |
+| [ftw-legacy-fold-zero-scratch.md](ftw-legacy-fold-zero-scratch.md) | Почему легаси FTW-носитель ловил пик 198 GiB (fold double-buffer против read-пула) и как zero-scratch affine remap (f12e554) опустил пик до пола рецепта 142.5 GiB; фьюз по сумме группы процессов |
 
 Правила статей: YAML-шапка (title/date/hardware/branch-commits/status/tags),
 <=~250 строк, все перекрёстные ссылки — markdown-ссылки на существующие
