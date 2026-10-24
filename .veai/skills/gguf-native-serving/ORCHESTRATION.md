@@ -252,6 +252,10 @@ concurrent microbenches both leaked and invalidated their own numbers).
   (e.g. fresh==0 at the seam) is verified on live hardware with a cheap
   instrumented probe run (D11) BEFORE the lever is written; unit shapes
   construct unreachable premises.
+- GPU-only code branches are invisible to CPU-hidden batteries: a run under
+  CUDA_VISIBLE_DEVICES="" executes the numpy/CPU leg by construction (T83) -
+  accept GPU features by boot-smoke or targeted CUDA tests, never by the CPU
+  battery alone.
 - Log-timestamp durations (intervals between lines) are LEADS for
   attribution, not facts; verify before using them in a verdict.
 
@@ -316,7 +320,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T80 + recipes D01-D11; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T91 + recipes D01-D11; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),

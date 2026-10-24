@@ -1,4 +1,4 @@
-# TRAPS.md - 80 ловушек для native GGUF serving (T01-T80, рецепты D01-D11)
+# TRAPS.md - 91 ловушка для native GGUF serving (T01-T91, рецепты D01-D11)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -556,6 +556,88 @@ kb/topics/decode-chain-microfusion.md; все четыре env-ручки вал
   откатан до бита), kb/cases/tier-staging-admission-trigger/TASK.md
   (закрыт NO-GO, docs 5623625),
   .tasks/tier-staging-admission-trigger/REPORT-w3dbg-seam.md.
+
+## ggml re-platform кампания 2026-10-17..23 (round5 deferred ports + волна починки) T81-T91
+
+- **T81** (moe, schemas) Дублирующийся ключ dict-константы ЗАТИРАЕТ схему молча:
+  второе вхождение "gguf": ("gate", "up", "down") в _BANK_SCHEMAS
+  (moe/offload_cache.py:40) перезаписало merged-схему ("gate_up", "down"), на
+  которой сидят лоадер + ядро + executor -> AssertionError в set_bank_sources
+  ТОЛЬКО на живом буте; CPU-батарея не могла поймать (импорт-время консистентно).
+  Рецепт: Counter-проба дублей ключей в dict-константах схем при любом переносе
+  загрузчика; ловушка найдена бутом, не тестами. Эвиденс: 9314c9b (fix B1;
+  до фикса дубль жил на offload_cache.py:50/:84).
+- **T82** (quant, padding) Резерв 1 строки для нативного MMQ-хвоста недостаточен:
+  хвост = row_bytes(type, K-rem) (Q8_0, K-rem=128 -> 408 B = 3 строки); формула
+  pad_rows = ceil(tail/row) (layers/quantization/ggml_types.py:46). Симптом:
+  "ggml type 8 K=128 needs 408 bytes of zero padding". Эвиденс: 9314c9b (fix B4).
+- **T83** (loader, devices) GPU-ветка плотных кастов из GGUF-mmap: CPU-mmap
+  тензор нельзя отдать в ggml-op (op_dequantize требует kDLCUDA) - сначала
+  .to(CUDA) УПАКОВАННЫХ строк, потом kernel.ggml.dequantize (_cast,
+  glm5_next/gguf.py:734); ветку выбирать по ЗАПРАШИВАЕМОМУ device
+  (_cuda_target), не по torch.cuda.is_available(). CPU-батарея под
+  CUDA_VISIBLE_DEVICES="" эту ветку не исполняет - приёмка только boot-ом /
+  целевыми CUDA-тестами. Эвиденс: 9314c9b (Review-B major, fix волна 7).
+- **T84** (porting, portability) Ре-платформа: СТАРЫЕ проценты И
+  геометрии-победители не переносятся - mhc SPLIT=64 (старый +3.4% при 8 CTA) на
+  новом стеке проигрывает SPLIT=128 на prefill (T=512: -29%, T=8128: -40%) и в
+  шуме на decode; dense N-split +2.61% -> split хуже целого на -1.8..-16.5%
+  (ядро уже ~73% int8-пика). Замер на новом стеке обязателен ДО порта;
+  эффективный GB/s ниже DRAM-крыши - не провал, если ядро в ALU/тензорной крыше
+  (ggml probe: 210-305 TF/s int8-экв. по всем 4 форматам). Эвиденс: 5921ffc +
+  415b84e (D1: все 4 ядра NO-GO, дефолты не тронуты), logs/d1-stage*.log.
+- **T85** (tests, env) Пип-gguf в venv нужен только тест-фикстурам (hand-rolled
+  GGUFWriter); рантайм - вендорный third_party.gguf. Без него CUDA-фикстуры
+  скипаются МОЛЧА ("No module named gguf") - аудит importorskip-ов обязателен
+  при приёмке GPU-волн. Эвиденс: round5 GPU-окно (wave 14).
+- **T86** (porting, inventory) Store/read асимметрия при ре-платформе:
+  store-стек пережил merge byte-identical, read-путь удалён (-521/-106 строк) -
+  при инвентаризации потерь проверять ОБЕ половины, инвентарь по store-символам
+  даёт ложное "пережило всё". Ре-ленд read-ядер - на ТЕКУЩУЮ структуру
+  (sinks/sliding-window/split-caps), не копипасту из backup; None-шкалы =
+  byte-identical контракт. Эвиденс: 660c814 (D5: -p no:skipping 8 failed -> 36
+  passed; test_kv_nvfp4 81 passed GPU).
+- **T87** (kv, quality) Квант-KV quality A/B: E2M1 даёт parity против
+  dequant-референса, НЕ bf16-эквивалентность - критерий "без деградации" (greedy
+  11/12 byte-identical + needle), задокументированный argmax-flip = PASS, а не
+  баг. Модель для A/B triton+FULL: dense Qwen3.8-27B-NVFP4-FTW; dsa-модели не
+  годятся. Эвиденс: 660c814 + kb eeceaf1 (A/B RadixArk/Qwen3.8: 11/12
+  byte-identical, 1 открытая перефраза, needle найден).
+- **T88** (git, two-phase diff) Расщепление переплетённого двухфазного диффа:
+  stash фазовых файлов -> бисект-срез зелёный (trio + smoke) -> коммит фазы 1 ->
+  stash pop -> коммит фазы 2; смешанный файл (expert_banks.py) едет библиотечным
+  кодом в первый коммит, wiring - во второй. Эвиденс: STOP GATE round5
+  (393b682, 660c814).
+
+- **T89** (api, indexing) rpartition возвращает [prefix, sep, tail]: индекс [1]
+  даёт САМ разделитель ("_"), не tail - на пад-пути легаси-носителей leaf
+  "weight_3" распарсился бы в "_", int() упал бы на первом же квантованном
+  сегменте. Брать [2] (фикс checkpoint/ftw.py:111, _pad_legacy_rows). Общее
+  правило: тестируй парсинг leaf-суффиксов на реальных именах, не на "weight".
+- **T90** (concurrency, fold) Парный on_done без Lock: gate/up половины легаси-
+  fold - два таска на разных воркерах пула; декремент счётчика и zero-check
+  ДОЛЖНЫ быть атомарны, иначе интерливинг пропускает fold и merged gate_up
+  банк остаётся несшитым ТИХО (тот же контракт _after у _run_shared_reads).
+  Фикс: state + threading.Lock вокруг декремента (_pair_on_done,
+  checkpoint/ftw.py). Симптом был бы только на живом буте, не в юнитах.
+- **T91** (methodology, decode) Замеры декода сравнивают ТОЛЬКО внутри одной
+  формы зонда: 8-токенный нестримовый зонд и 256-стрим дают разные
+  "базлайны" на ОДНОМ коде (10.8-11.4 против 9.6-9.9 tok/s) - форма зонда
+  меняет планирование/буферизацию, а не движок. chat-gate - это QA, не
+  бенчмарк. Эвиденс: logs/bisect-probe8-methodology*.log (round5, волна
+  бисекта 2026-10-23).
+
+Порт-долг раунда 5 (ЗАКРЫТ волной починки 2026-10-23, без T-номера):
+- gguf->FTW чекпойнт не бутится: checkpoint_quant_config (models/register.py:458)
+  строит таблицу ggml-типов из gguf_tensor_index(hf_config.model_path); для FTW
+  carrier model_path = source_metadata.gguf (metadata-only, tensor_count=0) ->
+  пустая таблица -> KeyError "no tensor token_embd". ЗАКРЫТ 48915b4:
+  FTW-ветвящийся источник dense-типов (мета gguf_tensor_types / хук
+  ftw_tensor_types для легаси), HW-доказательство - бут старого 136g
+  ftw-vision носителя без реконверсии (см. T89/T90 - хвосты фикса).
+- tests/moe/test_cpu_moe_gguf_iq.py сидит на удалённом models/gguf/dequant:
+  module-skip переживает сколько угодно волн и маскирует дыру. ЗАКРЫТ 739336f
+  (ре-ленд на third_party-референс + num_experts гард, round5 g.2).
 
 ## Debugging
 

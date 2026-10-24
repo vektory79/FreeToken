@@ -62,6 +62,10 @@ run the quality battery, and deliver the honest verdict.
   (GLM-5.3-Flash hybrid, mr=1, 0.82/400k): turn-2 divergence-hit key
   #cached-token 48704, re-prefill 60184 -> 11480, full misses 2/12 -> 1/12,
   FIFO evictions stalest-validated-first.
+- Round-5 re-platform NO-GO class (2026-10-21): old kernel wins do NOT transfer
+  to the new stack - mhc SPLIT=64 lost to SPLIT=128 (prefill -29..-40%), dense
+  N-split lost to whole (-1.8..-16.5%, kernel already ~73% int8 peak); re-measure
+  on the CURRENT stack before porting any geometry or percent (T84).
 
 ## Debugging an IMA or OOM
 
