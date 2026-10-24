@@ -738,3 +738,5 @@ mr 0.85, tier 10 GiB RAM / 100 GiB SSD; якорь 23.81 GiB воспроизв�
   (P3/P4), crc версионируется, появились tombstones (P13), чтение рестора
   стало per-extent. Полный reconciliation-трейс - в L2-DESIGN.md рядом с
   артефактами волны (вне git); ключевые отклонения дистиллированы выше.
+
+Семантика L2-капа при переполнении (LRU-вытеснение первое, отказ — крайний случай; наблюдение 49.94/50 GiB) — в [gguf-vram-headroom-post-round5.md](gguf-vram-headroom-post-round5.md).

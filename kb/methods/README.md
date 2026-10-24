@@ -19,6 +19,7 @@
 | [v3a-surface-map.md](v3a-surface-map.md) | Карта поверхности реализации v3: кто x, кто y в moe.cuh, ловушки m-tile | Перед правками ядра MoE |
 | [arbitration-battery.md](arbitration-battery.md) | Арбитражная батарея: бут-недетерминизм против эффекта конфигурации | Когда A/B «мигает» между boot'ами |
 | [vram-headroom.md](vram-headroom.md) | Матрица memory-ratio / kv-reserve / max-prefill: сколько FREE VRAM покупает каждый knob и какой ценой | При OOM/падениях префилла и выборе конфига serving |
+| [vram-peak-measurement.md](vram-peak-measurement.md) | Честный замер VRAM-пика ft serve: 2 с сэмплер, unique-nonce промпты против фальшивых cache-хитов, лестница глубины через radix, stdin-curl, kill по /proc/PID/exe | Перед любым VRAM-замером и при «пик не воспроизводится» |
 | [wave1-notes.md](wave1-notes.md) | Волна 1: N-split kda_in_proj, все изменения анкоммитнуты до валидации | Как организовать волну без коммитов |
 | [wave2-candidate-a.md](wave2-candidate-a.md) | Волна 2: Candidate A, компилят-тайм варианты тайла + knob | Как подготовить вариант к измерению |
 | [test-fails-before.md](test-fails-before.md) | Fails-before эмпирически: stash+md5, single-revert probe, точечный реверт правки при далеко ушедшем HEAD, ловушка caplog | Перед любым багфиксом и новыми тестами волны |

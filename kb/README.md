@@ -26,7 +26,8 @@ serving на RTX 5090): методики измерений, переиспол�
 - [methods/](methods/README.md) — как измерять: A/B-протоколы, step-0 профилирование,
   батареи качества, метод VRAM-headroom, протокол оркестрации волн. **Читать
   первым:** перед любой новой A/B-волной — [orchestration-notes.md](methods/orchestration-notes.md);
-  «почему падает префилл / OOM» — [vram-headroom.md](methods/vram-headroom.md);
+  «почему падает префилл / OOM» — [vram-headroom.md](methods/vram-headroom.md) и
+  [vram-peak-measurement.md](methods/vram-peak-measurement.md);
   «как поставить A/B» — [ab-mtile.md](methods/ab-mtile.md) и [ab-nsplit.md](methods/ab-nsplit.md)
   как шаблоны.
 - [harness/](harness/README.md) — готовые скрипты, которых нет больше нигде:
@@ -53,7 +54,8 @@ serving на RTX 5090): методики измерений, переиспол�
   [failfast-report.md](incidents/nvfp4-1m-capacity/failfast-report.md) (CLOSED).
 - [topics/](topics/README.md) — атомарные статьи по темам (вердикт -> механизм ->
   числа -> как измерить): префилл ([prefill-throughput.md](topics/prefill-throughput.md)),
-  VRAM-бюджет ([vram-budget.md](topics/vram-budget.md)), переиспользование
+  VRAM-бюджет ([vram-budget.md](topics/vram-budget.md)) и post-round5 VRAM-headroom ([gguf-vram-headroom-post-round5.md](topics/gguf-vram-headroom-post-round5.md)), сводная матрица
+  производительности ([gguf-serving-perf-matrix.md](topics/gguf-serving-perf-matrix.md)), переиспользование
   radix-кэша ([radix-cache-reuse.md](topics/radix-cache-reuse.md)), стоимость
   гибридного MoE ([moe-hybrid-cost-model.md](topics/moe-hybrid-cost-model.md)),
   graceful-остановка ft serve ([ft-serve-shutdown-signals.md](topics/ft-serve-shutdown-signals.md)),

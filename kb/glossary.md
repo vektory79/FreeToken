@@ -135,6 +135,11 @@
 - **RestoreTicket** — асинхронный тикет предвыборки сегмента из стора; cap
   _MAX_RESTORE_TICKETS=2, 0 отключает механизм —
   [session-cache-tiering.md](topics/session-cache-tiering.md).
+- **slot floor** — минимальный фонд слотов MoE по сигнатурным группам слоёв:
+  план кэша обязан его финансировать, иначе бут падает fail-fast ("budget
+  cannot fund the per-signature slot floors") до загрузки весов; поджимает
+  пол `--memory-ratio` (0.80 при reserve 400k на GLM-5.3-Flash) —
+  [gguf-vram-headroom-post-round5.md](topics/gguf-vram-headroom-post-round5.md).
 - **резерв офсетов** — предварительное резервирование span офсетов блоба L2
   (`_blob_eof` + padded-размер, `_reserve_blob_span`) под параллельные pwrite
   группы сегментов; cap-чек учитывает pending-байты группы -

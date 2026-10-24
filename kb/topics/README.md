@@ -25,6 +25,8 @@
 | [round5-d5-nvfp4-kv-generic.md](round5-d5-nvfp4-kv-generic.md) | Как порт D5 (коммит 660c814) вернул nvfp4/fp8-KV read-путь generic-triton: store/read-асимметрия ре-платформы, E2M1-parity A/B против dequant-референса (Qwen3.8, 3.46x без деградации), dtype-гейт валидатора формата |
 | [decode-chain-microfusion.md](decode-chain-microfusion.md) | Почему сокращение пусков ядер не равно ускорению; четыре микрофьюжн-кандидата декода отклонены на железе 2026-09-28; дискриминатор - CTAs/SM, а не счётчик пусков |
 | [ftw-legacy-fold-zero-scratch.md](ftw-legacy-fold-zero-scratch.md) | Почему легаси FTW-носитель ловил пик 198 GiB (fold double-buffer против read-пула) и как zero-scratch affine remap (f12e554) опустил пик до пола рецепта 142.5 GiB; фьюз по сумме группы процессов |
+| [gguf-vram-headroom-post-round5.md](gguf-vram-headroom-post-round5.md) | Почему рецепт сентября (0.82/400k/8191) перестал держать пик VRAM после re-platform раунда 5; новые внеплановые потребители; матрица 0.80-0.82 x чанк, лестница глубины, семантика L2-капа session tier |
+| [gguf-serving-perf-matrix.md](gguf-serving-perf-matrix.md) | Сводная матрица производительности текущего стека: префилл/декод/VRAM по memory-ratio x чанк (5 конфигов), лестницы глубины до 378k, slot-floor границы, рецепты выбора конфига |
 
 Правила статей: YAML-шапка (title/date/hardware/branch-commits/status/tags),
 <=~250 строк, все перекрёстные ссылки — markdown-ссылки на существующие

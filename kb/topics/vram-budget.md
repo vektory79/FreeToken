@@ -92,3 +92,5 @@ radix-хиты не деградируют вплоть до 351k-токеных
   slot-floor против desktop-налога и его роль в radix-переиспользовании —
   [radix-cache-reuse.md](radix-cache-reuse.md); термины —
   [glossary.md](../glossary.md).
+
+Пост-round5-стек (HEAD ddefb5e): та же формула бюджета, но новые внеплановые потребители съели headroom сентябрьского рецепта — [gguf-vram-headroom-post-round5.md](gguf-vram-headroom-post-round5.md).

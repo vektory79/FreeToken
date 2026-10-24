@@ -162,3 +162,5 @@ layout-схема). Уроки -
 test-results) остались в git-ignored рабочей папке волны
 (.tasks/merge-main-round5-work/adaptation-log.md) и переживут клон только в виде
 этой статьи: она несёт durable-копию порт-долга, kb самодостаточен.
+
+Цена re-platform по VRAM: новые внеплановые потребители (split-KV triton scratch, MMQ-скретч, baseline-библиотеки) съели headroom сентябрьского рецепта — [gguf-vram-headroom-post-round5.md](gguf-vram-headroom-post-round5.md).

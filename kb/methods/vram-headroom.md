@@ -109,3 +109,5 @@ bimodal boot-mode nondeterminism (T54), config-independent as expected.
 - run transcript: not mirrored (distilled away)
 - harness: [vram_headroom_run.py](../harness/ab-runner/vram_headroom_run.py)
 - census: [census.log](../baselines/dense-q80-gemm/vram-headroom/census.log)
+
+Пост-round5-матрица 2026-10-24: [../topics/gguf-vram-headroom-post-round5.md](../topics/gguf-vram-headroom-post-round5.md); готчи честного замера пика: [vram-peak-measurement.md](vram-peak-measurement.md).
