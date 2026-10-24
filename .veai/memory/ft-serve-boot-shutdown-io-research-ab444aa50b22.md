@@ -3,7 +3,7 @@ name: "ft-serve-boot-shutdown-io-research"
 description: "HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore"
 type: project
 lastUpdated: 2026-10-04T20:57
-lastRecall: 2026-10-04T22:52
+lastRecall: 2026-10-24T14:47
 ---
 
 # ft serve boot/shutdown I/O research (2026-09-26, research-only, NO fixes implemented)

@@ -3,7 +3,7 @@ name: "ft-merge-round4-closed"
 description: "Round 4 aa0e71c fully CLOSED: boot-smoke PASS, GPU 103/0, F1 fixed by 9ac8830 (guard in load_ftw_banks_to_device)"
 type: project
 lastUpdated: 2026-10-05T21:54
-lastRecall: 2026-10-05T22:08
+lastRecall: 2026-10-23T23:17
 ---
 
 # Round 4 merge aa0e71c - отложенное cloud-LLM окно (актуально до исполнения)

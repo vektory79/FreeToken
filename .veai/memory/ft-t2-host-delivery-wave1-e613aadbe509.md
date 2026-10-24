@@ -3,7 +3,7 @@ name: "ft-t2-host-delivery-wave1"
 description: "T2 wave-1 + default flip 17.36 tok/s; FREETOKEN_T2_POOL_THREADS knob; adjacent-SMT trap; commits 227e7a3..d751511"
 type: project
 lastUpdated: 2026-09-27T15:47
-lastRecall: 2026-09-27T17:48
+lastRecall: 2026-10-18T00:12
 ---
 
 # T2 host-delivery wave 1: minor-pool starvation CONFIRMED, t2d adopted-pending-commit (2026-09-26 night)

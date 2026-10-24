@@ -2,7 +2,7 @@
 name: "gguf-hybrid-reacceptance-final"
 description: "GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff"
 type: project
-lastUpdated: 2026-09-16T20:16
+lastUpdated: 2026-10-17T18:07
 lastRecall: 2026-10-11T20:19
 ---
 
@@ -25,3 +25,5 @@ Full chain (11 hybrid commits + 1635ecd, incl. 11f1a80 ggml AVX2 W4A8-K tier and
 ## Optional leftovers (not blocking)
 - Vendored kernel/csrc/gguf/*.cuh lack MIT attribution headers (gap noted by the kernel study).
 - benchbw profile has no kernel-tier fingerprint (pre-port profile silently consumed; doc note only) - expanded in benchbw-profile-clobber-trap.
+
+**Round 5 (2026-10-17) инвалидировал применимость:** merge f0eed55 пере-платформил GGUF, glm5next GGUF loader в main отсутствует (порт D4) - hybrid на glm5next GGUF НЕ БУТИТСЯ на слитом дереве до лендинга D4. Вердикт выше исторический (домерджные измерения). Карта портов: memory ft-merge-round5-deferred-ports, kb/topics/round5-ggml-replatform-deferred-ports.md.

@@ -6,11 +6,9 @@
 - [ft-offload-banks-pinned-host](ft-offload-banks-pinned-host-90784dc7d0a9.md) — OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware
 - [pr408-kv-nvfp4-1m-port](pr408-kv-nvfp4-1m-port-029031181f9f.md) — PR #408 nvfp4 KV port on RTX 5090: 1M reserve+fill measured, quality A/B; 09-14 1M break was transient
 - [vektory79-main-rewrite-gotcha](vektory79-main-rewrite-gotcha-44d497ec530c.md) — vektory79: main was rewritten (merge 3e5bbdd parent af71ba4 orphaned); rebase --rebase-merges replays stale commits
-- [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-d3d741508847.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-serve-prefill-overlap-512k-infeasible](ft-serve-prefill-overlap-512k-infeasible-78dd276b7ddd.md) — prefill overlap 2E floor: infeasible at KV=524288 (assert/OOM); also bites gguf per-signature cache partitions
 - [ft-gguf-nvfp4-1m-capacity-frozen-shim](ft-gguf-nvfp4-1m-capacity-frozen-shim-08c4102d02ca.md) — GGUF glm5next: 1M nvfp4 infeasible on 32GB (786432 verified, fill ceiling ~678k); frozen-shim crash; slot-floor gate
 - [veai-skill-overwrite-trap](veai-skill-overwrite-trap-81e0a101f2f2.md) — Orchestrator write_file creates .veai/skills SKILL.md but cannot overwrite; delegate edits to call_code_agent
-- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-3ab3f82469b1.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
 - [ft-last-chunk-throughput-artifact](ft-last-chunk-throughput-artifact-34fa3b5e915c.md) — Final full prefill chunk's input-throughput line is bogus (~1552-1602 tok/s); use median of full chunks minus last
 - [ft-bare-logger-liveness-trap](ft-bare-logger-liveness-trap-6399769cb81b.md) — Bare stdlib getLogger modules are boot-log-invisible; sitecustomize PYTHONPATH probe for liveness (layers/moe.py case)
 - [ft-gguf-v2-grouped-mmq-measured](ft-gguf-v2-grouped-mmq-measured-540a37c5ed9f.md) — v2 grouped MMQ: battery PASS, +16.4% @8128; kill switch removed; committed 7f8c570; v3 hypothesis now verified
@@ -74,7 +72,6 @@
 - [ft-p13-tombstone-wave](ft-p13-tombstone-wave-1de30f6941d6.md) — P13 tombstone COMMITTED (12623ff code + 91e53ff kb); KeyError accepted; sub-floor gate refined; case P1-P13 all closed
 - [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-4af8a5b1be10.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
 - [ft-merge-round4-closed](ft-merge-round4-closed-acbf7277ce25.md) — Round 4 aa0e71c fully CLOSED: boot-smoke PASS, GPU 103/0, F1 fixed by 9ac8830 (guard in load_ftw_banks_to_device)
-- [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-13c8c4a0d708.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-ec9bd17c625b.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [cuda-debug-tool-strategy](cuda-debug-tool-strategy-9f1351479310.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; kineto aborts ft serve scheduler
 - [ft-p12-read-tempo-brief](ft-p12-read-tempo-brief-11eefbaf5632.md) — P12 read-tempo CLOSED NO-GO: zero-fill 8.6% @ pool=8 < 10% gate; case P1-P13 closed 2026-10-05
@@ -85,7 +82,13 @@
 - [ft-tier-restore-followups](ft-tier-restore-followups-c41b934cdd4d.md) — Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625
 - [call-agent-payload-truncation](call-agent-payload-truncation-7b696292cbe0.md) — Oversized call_code_agent payload fails 'Field task required'; write spec to .tasks file, delegate compact call
 - [hybrid-moe-pair-split-mechanics](hybrid-moe-pair-split-mechanics-82a7ba957be8.md) — Hybrid MoE split per (layer,expert) pair via -1 marker not per layer; LRU pool ~3 steps; CPU GEMV reads RAM weights
-- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-16648fd8b72a.md) — Spec-decode GLM-5.3-Flash case CLOSED NO-GO (W0 R4 3.76; W0.5 cW 0.50); stage0 ngram p 0.95 -> W1-narrow justified
 - [ft-l2-extent-dedup](ft-l2-extent-dedup-7f8282705f11.md) — L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79
 - [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-75d61a728aa1.md) — mmproj GGUF vision case CLOSED phases 1-5 (e35577d..f67449b), 347/347 tensors exact, HW PASS, TRAPS T68-T75
 - [ft-w1narrow-ngram-wave](ft-w1narrow-ngram-wave-60722281b1c8.md) — W1-narrow CLOSED: A/B NO-GO on target profile (ngram acceptance 0); stage0 method flaw; scaffold uncommitted
+- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-fbb3d9b43663.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
+- [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-9a35bd8777d3.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
+- [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-ea3cd19f711b.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
+- [ft-merge-round5-deferred-ports](ft-merge-round5-deferred-ports-94670d11c055.md) — Merge round5 f0eed55: D1-D5 DONE; residuals fixed; kb links repaired (8bba8e5); only fa/fi/trtllm open
+- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-e8f30d956dd0.md) — Spec-decode GLM-5.3-Flash case CLOSED NO-GO: W0 R4 3.76, W0.5 cW 0.50, W1 ngram acceptance=0 (stage0 method flaw)
+- [ftw-legacy-fold-ram-peak](ftw-legacy-fold-ram-peak-88e4077322c2.md) — FTW legacy fold 198 GiB OOM fixed: zero-scratch VERIFIED f12e554 (~143 GiB); old carrier delete + push = user decisions
+- [ftw-new-carrier-slowload](ftw-new-carrier-slowload-7f3dce4f4d49.md) — FTW new carrier 148s boot: NOT banks (25s, faster); tier compact on idle loop + bimodal warmup; fix = background compact

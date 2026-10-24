@@ -3,7 +3,7 @@ name: "ft-offload-banks-pinned-host"
 description: "OffloadMoeCache gather needs pinned host banks; tracker note-count trap; IMA resolved on hardware"
 type: project
 lastUpdated: 2026-09-15T20:06
-lastRecall: 2026-10-11T18:17
+lastRecall: 2026-10-23T23:12
 ---
 
 # OffloadMoECache gather requires pinned host banks; raw mmap VAs are illegal

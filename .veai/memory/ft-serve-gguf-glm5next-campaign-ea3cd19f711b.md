@@ -2,7 +2,7 @@
 name: "ft-serve-gguf-glm5next-campaign"
 description: "GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)"
 type: project
-lastUpdated: 2026-09-16T15:11
+lastUpdated: 2026-10-17T18:07
 lastRecall: 2026-10-11T20:19
 ---
 
@@ -37,3 +37,5 @@ Chain: 4162f7c (config shim + registry + AOT claim) -> 4443d7e (iter_gguf_weight
 Commits: 5a04423 (CPU GEMV iq3_xxs/iq4_xs/q6_k, per-projection tables) -> bd02232 (fix wave) -> 427a431 (negative tests) -> 2169baa (benchbw CPU leg) -> aad5d3a (per-cache executors, disjoint pools, capability-gated multi-partition) -> f6b94ad + ef83ee8 (engine gate via header-scan capability check) -> eb7de4c (hardening) -> 11f1a80 (verbatim ggml AVX2 W4A8-K tier in select_ggufdot_i8; TIER env override) + 979e3fc (weighted pool split [15,1,1] @16T) -> 63b9bff (cap-down + wrap guard + profile restore) -> 1635ecd (CC/CXX JIT leak fix, kernel/gguf.py).
 - Stages: initial hybrid decode 2.99 tok/s vs 14.25 offload (per-layer "handshake floor" 1.9-3 ms x 42 layers - later MIS-ATTRIBUTED, see gguf-hybrid-decode-handshake-floor); NVFP4 A/B reversed the Task 06 NO-GO (hybrid 1.39-1.43x over offload even with the slow scalar leg); Task 06 re-profile baked f=78% -> 29.5%, CPU leg 11.65 -> 65.6 GB/s.
 - FINAL (see gguf-hybrid-reacceptance-final): re-acceptance PASSED, hybrid 16.67 tok/s @64k vs offload 12.97 = 1.28x, 1.43 ms/layer all-in, battery 24/24. Plan artifacts: .tasks/gguf-glm5next-hybrid/.
+
+**Round 5 (2026-10-17):** merge f0eed55 пере-платформил GGUF; glm5next GGUF loader отсутствует в main (порт D4) - кампании/рецепты этой памяти невоспроизводимы на слитом дереве до D4. Исторические измерения остаются валидными. Карта: ft-merge-round5-deferred-ports, kb round5-ggml-replatform-deferred-ports.

@@ -3,6 +3,7 @@ name: "hybrid-moe-pair-split-mechanics"
 description: "Hybrid MoE split per (layer,expert) pair via -1 marker not per layer; LRU pool ~3 steps; CPU GEMV reads RAM weights"
 type: project
 lastUpdated: 2026-10-11T18:56
+lastRecall: 2026-10-23T23:12
 ---
 
 # Hybrid MoE: сплит CPU/GPU по парам (слой,эксперт), не по слоям (код-верификация 2026-10-10)
@@ -43,4 +44,3 @@ Why: это определяет цену verify любого M-позицион
 
 How to apply: вопросы "какой слой где считается" для гибрида решаются парами, а не
 слоями; цену draft/verify оценивать от уникальных пар с капом f, не от слоёв.
-

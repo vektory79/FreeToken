@@ -3,7 +3,7 @@ name: "ft-lever3-chain-cl1"
 description: "mhc NS=64 db0f6b3 +3.4% paired; micro-fix bundle failed+reverted; lessons distilled+committed 61397a2/d76c3ce/a8fb231"
 type: project
 lastUpdated: 2026-09-27T22:09
-lastRecall: 2026-09-27T22:09
+lastRecall: 2026-10-18T15:52
 ---
 
 # Lever 3 / C-L1: mhc stage1 NS-split ACCEPTED on hardware (2026-09-27) - uncommitted
