@@ -95,7 +95,7 @@ def expert_bank_row_bytes(fmt: str, hidden_size: int, moe_intermediate_size: int
             "down_scale": (H // B) * fp8_block_scale_pad(H // B, I // B) * 2,
         }
     if fmt in ("nvfp4", "nvfp4_marlin", "nvfp4_b12x"):
-        # models/nvfp4_banks.py: packed e2m1 pairs + per-16 fp8-e4m3 scales + fp16
+        # models/nvfp4_banks.py: packed e2m1 pairs + per-16 fp8-e4m3 scales + fp32
         # per-row globals; marlin/b12x repacks are byte-identical with the globals
         # folded into GPU-resident alphas (layers/quantization/moe/nvfp4.py), so no global banks.
         banks = {
@@ -105,8 +105,8 @@ def expert_bank_row_bytes(fmt: str, hidden_size: int, moe_intermediate_size: int
             "down_scale": H * (I // 16),
         }
         if fmt == "nvfp4":
-            banks["gate_up_global"] = 2 * I * 2
-            banks["down_global"] = H * 2
+            banks["gate_up_global"] = 2 * I * 4
+            banks["down_global"] = H * 4
         return banks
     if fmt == "mxfp4_triton":
         # gpt-oss mxfp4 expert banks: transposed split-K blocks/scales + bf16 bias
@@ -145,7 +145,8 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         moe_intermediate_size=768,
         expert_formats=("bf16",),
         aliases=("Qwen/Qwen3-30B-A3B-Thinking-2507",),
-        arch_aliases=("Qwen3VLMoeForConditionalGeneration", "Qwen3MoeGGUFForCausalLM"),  # Qwen3-VL-30B-A3B: same text tower
+        # Qwen3-VL-30B-A3B: same text tower
+        arch_aliases=("Qwen3VLMoeForConditionalGeneration", "Qwen3MoeGGUFForCausalLM", "Qwen3VLMoeGGUFForCausalLM"),
     ),
     AotModel(
         name="Qwen/Qwen3.5-35B-A3B",
@@ -256,6 +257,7 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         top_k=8,
         moe_intermediate_size=1536,
         expert_formats=("bf16",),
+        arch_aliases=("Glm4MoeGGUFForCausalLM",),
     ),
     AotModel(
         name="nvidia/GLM-4.7-NVFP4",
@@ -283,13 +285,8 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         # KDA conv/recurrent state lives in the LinearStatePool, not paged KV.
         name="RedHatAI/GLM-5.3-Flash-NVFP4",
         architecture="Glm5NextForCausalLM",
-        # the native-GGUF release shares the expert-bank geometry (hidden 4096, top 8, inter 2048);
-        # the --mmproj spec serves the same tower, only the boot path differs
-        arch_aliases=(
-            "Glm5NextForConditionalGeneration",
-            "Glm5NextGGUFForCausalLM",
-            "Glm5NextGGUFForConditionalGeneration",
-        ),
+        # GGUF expert rows differ per layer and reach the fused copy as runtime sizes
+        arch_aliases=("Glm5NextForConditionalGeneration", "Glm5NextGGUFForCausalLM"),
         hidden_size=4096,
         kv_groups=(),
         top_k=8,
@@ -333,6 +330,8 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
     AotModel(
         name="deepseek-ai/DeepSeek-V4-Flash",
         architecture="DeepseekV4ForCausalLM",
+        # llama.cpp deepseek4 GGUF (unsloth 0731 GGUF; text only)
+        arch_aliases=("DeepseekV4GGUFForCausalLM",),
         hidden_size=4096,
         kv_groups=(),  # MLA latent pool writes via torch scatter, not store_cache
         top_k=6,
@@ -365,7 +364,7 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         architecture="Gemma4UnifiedForConditionalGeneration",
         hidden_size=3840,
         kv_groups=((1, 512), (8, 256)),
-        arch_aliases=("Gemma4UnifiedForCausalLM",),
+        arch_aliases=("Gemma4UnifiedForCausalLM", "Gemma4UnifiedGGUFForCausalLM"),
     ),
     AotModel(
         name="nvidia/Gemma-4-31B-IT-NVFP4",
@@ -400,7 +399,8 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         architecture="Qwen3ForCausalLM",
         hidden_size=4096,
         kv_groups=((8, 128),),
-        arch_aliases=("Qwen3VLForConditionalGeneration", "Qwen3GGUFForCausalLM"),  # Qwen3-VL-8B: same text tower
+        # Qwen3-VL: same text tower
+        arch_aliases=("Qwen3VLForConditionalGeneration", "Qwen3GGUFForCausalLM", "Qwen3VLGGUFForCausalLM"),
     ),
     AotModel(
         name="mistralai/Mistral-7B-Instruct-v0.3",

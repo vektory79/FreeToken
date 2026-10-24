@@ -9,17 +9,22 @@ the raw GGUF metadata dict, and a few derived facts that need the tensor table
 
 from __future__ import annotations
 
+import functools
 import importlib
-import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from .reader import _reader, gguf_architecture, load_gguf_metadata, gguf_tensor_names
+from .mmproj import Mmproj, find_mmproj, warn_inline_vision
+from .reader import gguf_architecture, load_gguf_metadata, gguf_tensor_names
 
 # GGUF ``general.architecture`` -> FreeToken registry key (a GGUF-specific spec that
 # reuses the model classes but a GGUF parse_config / iter_weights).
 GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
+    "deepseek4": "DeepseekV4GGUFForCausalLM",
     "gemma4": "Gemma4GGUFForCausalLM",
+    "glm4moe": "Glm4MoeGGUFForCausalLM",
+    # glm5-next: the llama.cpp spelling; glm5next: unsloth's first release
+    "glm5-next": "Glm5NextGGUFForCausalLM",
     "glm5next": "Glm5NextGGUFForCausalLM",
     "llama": "LlamaGGUFForCausalLM",
     "minimax-m2": "MiniMaxM2GGUFForCausalLM",
@@ -30,37 +35,17 @@ GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "qwen3moe": "Qwen3MoeGGUFForCausalLM",
     "qwen35": "Qwen3_5GGUFForCausalLM",
     "qwen35moe": "Qwen3_5MoeGGUFForCausalLM",
+    "qwen3vl": "Qwen3VLGGUFForCausalLM",
+    "qwen3vlmoe": "Qwen3VLMoeGGUFForCausalLM",
     "qwen4exp": "Qwen4ExpGGUFForCausalLM",
 }
-
-# Registry key when an mmproj file is supplied (--mmproj): a key here opts the arch
-# into raw-gguf vision boots. Text-only dispatch stays GGUF_ARCH_TO_REGISTRY, so a
-# boot without the flag resolves the exact same spec it always did.
-GGUF_ARCH_TO_REGISTRY_VISION: dict[str, str] = {
-    "glm5next": "Glm5NextGGUFForConditionalGeneration",
-}
-
-# arch -> "module:attr" building the tower config from the mmproj metadata. Called
-# lazily: the model modules import this one, so a top-level import would cycle.
-_GGUF_VISION_CONFIG_HOOK: dict[str, str] = {
-    "glm5next": "freetoken.models.glm5_next.gguf:vision_config_from_tower_metadata",
-}
-
-# arch -> "module:attr" building the image-processor kwargs from the same tower
-# metadata (phase-3 fallback processor)
-_GGUF_VISION_PROCESSOR_HOOK: dict[str, str] = {
-    "glm5next": "freetoken.models.glm5_next.gguf:image_processor_config_from_tower_metadata",
-}
-
-# arch -> "module:attr" resolving the image placeholder token id from the main
-# GGUF's tokenizer metadata. Fails fast on a missing chat template / vocab entry:
-# image prompts would otherwise silently lose the image.
-_GGUF_VISION_SERVING_HOOK: dict[str, str] = {
-    "glm5next": "freetoken.models.glm5_next.gguf:resolve_gguf_image_serving",
+# (GGUF architecture, mmproj projector) -> registry key, for text GGUFs whose release is told apart only by its mmproj
+GGUF_MMPROJ_TO_REGISTRY: dict[tuple[str, str], str] = {
+    ("gemma4", "gemma4uv"): "Gemma4UnifiedGGUFForCausalLM",
 }
 
 
-@dataclass(frozen=True)
+@dataclass
 class GgufConfigShim:
     architectures: list[str]
     model_path: str
@@ -68,15 +53,16 @@ class GgufConfigShim:
     metadata: dict[str, Any]
     vocab_size: int
     tie_word_embeddings: bool
-    # raw-gguf vision boot facts: the tower file path (raw .gguf + --mmproj) or the
-    # tower metadata embedded in this file's KV section (a converted FTW's merged
-    # source_metadata.gguf); both absent serves the checkpoint text-only
-    mmproj_path: str | None = None
-    vision_config: Any = None
-    image_token_id: int | None = None
-    # image-processor fallback kwargs when the tower rides in the metadata (FTW boot:
-    # no mmproj file exists to parse); None on the raw-gguf path, which parses lazily
-    image_processor_kwargs: dict | None = None
+    # HF config.json keys the family derives for its encoders (vision_config, image_token_id, ...), read as attributes like a HF config
+    hf_fields: dict[str, Any] = field(default_factory=dict)
+    # the encoder's preprocessor_config.json; None without an encoder
+    preprocessor_config: dict[str, Any] | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        from freetoken.utils.hf import RawConfigShim
+
+        # __dict__ lookup: copy.copy probes attributes before the fields exist
+        return getattr(RawConfigShim(self.__dict__.get("hf_fields") or {}), name)
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal HF-config-like dict for trunk code that introspects the config
@@ -88,6 +74,7 @@ class GgufConfigShim:
             "torch_dtype": "bfloat16",
             "vocab_size": self.vocab_size,
             "tie_word_embeddings": self.tie_word_embeddings,
+            **self.hf_fields,
         }
 
 
@@ -106,79 +93,30 @@ def _vocab_size(model_path: str) -> int:
     raise ValueError(f"GGUF {model_path}: no token_embd.weight to size the vocab")
 
 
+@functools.cache
+def _mm_fields(module: str, model_path: str, mmproj: Mmproj, vocab_size: int) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    return importlib.import_module(module).gguf_mm_config(load_gguf_metadata(model_path), mmproj, vocab_size)
+
+
+def mm_fields(model_path: str, mmproj: Mmproj) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """The HF config keys and the preprocessor config that the family of the text GGUF ``model_path`` derives from ``mmproj``."""
+    from freetoken.models.register import get_model_spec
+
+    spec = get_model_spec(GGUF_ARCH_TO_REGISTRY[gguf_architecture(model_path)])
+    return _mm_fields(spec.module, model_path, mmproj, _vocab_size(model_path))
+
+
 def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConfigShim:
     arch = gguf_architecture(model_path)
-    metadata = load_gguf_metadata(model_path)
+    registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
+    if registry_key is None:
+        raise ValueError(
+            f"GGUF architecture {arch!r} is not supported "
+            f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)})"
+        )
     names = gguf_tensor_names(model_path)
-    vision_config = None
-    image_token_id = None
-    image_processor_kwargs = None
-    tower_meta = None
-    tower_shapes: dict[str, tuple] = {}
-    if mmproj_path is not None:
-        # fail fast before anything else reads the flag: a missing or non-clip file is
-        # an operator error, and the error must name the file
-        if not os.path.isfile(mmproj_path):
-            raise ValueError(f"--mmproj file not found: {mmproj_path}")
-        mmproj_arch = gguf_architecture(mmproj_path)
-        if mmproj_arch != "clip":
-            raise ValueError(
-                f"--mmproj {mmproj_path}: architecture {mmproj_arch!r} != 'clip'; "
-                "an mmproj file carries the vision tower"
-            )
-        registry_key = GGUF_ARCH_TO_REGISTRY_VISION.get(arch)
-        if registry_key is None:
-            raise ValueError(
-                f"--mmproj is only supported for {sorted(GGUF_ARCH_TO_REGISTRY_VISION)} "
-                f"GGUF checkpoints, not {arch!r}"
-            )
-        tower_meta = load_gguf_metadata(mmproj_path)
-        tower_shapes = {
-            t.name: tuple(reversed([int(d) for d in t.shape])) for t in _reader(mmproj_path).tensors
-        }
-    elif metadata.get("clip.has_vision_encoder"):
-        # tower metadata rides INSIDE this file's KV section: a converted FTW's
-        # source_metadata.gguf carries the mmproj clip.* keys merged at convert time,
-        # so a GGUF-FTW boot needs no --mmproj and never opens the source .gguf. A
-        # raw checkpoint GGUF must not reach here with vision keys - its tensor table
-        # is the LLM, not a tower, so serving would silently lack the visual weights.
-        registry_key = GGUF_ARCH_TO_REGISTRY_VISION.get(arch)
-        if registry_key is None:
-            raise ValueError(
-                f"this GGUF carries clip.* tower metadata, but {arch!r} has no vision "
-                f"registry entry (known: {sorted(GGUF_ARCH_TO_REGISTRY_VISION)})"
-            )
-        if names:
-            raise ValueError(
-                f"GGUF {model_path}: carries clip.* tower metadata but is not a "
-                "metadata-only FTW carrier; pass --mmproj with the tower file"
-            )
-        tower_meta = metadata
-    else:
-        registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
-        if registry_key is None:
-            raise ValueError(
-                f"GGUF architecture {arch!r} is not supported "
-                f"(known: {sorted(GGUF_ARCH_TO_REGISTRY)}); if this checkpoint exists "
-                "only as GGUF, convert it once with `ft checkpoint --model <gguf> "
-                "--out <ftw_dir>` and serve the resulting FTW dir; docs: docs/cli.md (checkpoint)"
-            )
-    if tower_meta is not None:
-        module_name, _, attr = _GGUF_VISION_CONFIG_HOOK[arch].partition(":")
-        vision_config = getattr(importlib.import_module(module_name), attr)(
-            tower_meta, tower_shapes, source=str(model_path)
-        )
-        module_name, _, attr = _GGUF_VISION_SERVING_HOOK[arch].partition(":")
-        image_token_id = getattr(importlib.import_module(module_name), attr)(
-            model_path, metadata
-        )
-        if mmproj_path is None:
-            # FTW carrier: bake the processor kwargs now (the tower file they would
-            # be parsed from does not exist); the raw-gguf path parses lazily
-            module_name, _, attr = _GGUF_VISION_PROCESSOR_HOOK[arch].partition(":")
-            image_processor_kwargs = getattr(importlib.import_module(module_name), attr)(
-                tower_meta, tower_shapes, source=str(model_path)
-            )
+    warn_inline_vision(model_path, names)
+    metadata = load_gguf_metadata(model_path)
     if names:
         # No separate output projection -> embeddings are tied.
         tie_word_embeddings = "output.weight" not in names
@@ -194,23 +132,24 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
                 "reconvert the checkpoint with the current freetoken.checkpoint.convert"
             )
         tie_word_embeddings = not present
+    from freetoken.models.register import get_model_spec
+
+    vocab_size = _vocab_size(model_path)
+    spec = get_model_spec(registry_key)
+    mmproj = find_mmproj(model_path, mmproj_path) if spec.encoders else None
+    if mmproj is not None:
+        registry_key = GGUF_MMPROJ_TO_REGISTRY.get((arch, mmproj.projector), registry_key)
+    hf_fields, preprocessor_config = ({}, None) if mmproj is None else mm_fields(model_path, mmproj)
     return GgufConfigShim(
         architectures=[registry_key],
         model_path=model_path,
         model_type=arch,
         metadata=metadata,
-        vocab_size=_vocab_size(model_path),
+        vocab_size=vocab_size,
         tie_word_embeddings=tie_word_embeddings,
-        mmproj_path=mmproj_path,
-        vision_config=vision_config,
-        image_token_id=image_token_id,
-        image_processor_kwargs=image_processor_kwargs,
+        hf_fields=hf_fields,
+        preprocessor_config=preprocessor_config,
     )
 
 
-__all__ = [
-    "GgufConfigShim",
-    "GGUF_ARCH_TO_REGISTRY",
-    "GGUF_ARCH_TO_REGISTRY_VISION",
-    "build_gguf_shim",
-]
+__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "GGUF_MMPROJ_TO_REGISTRY", "build_gguf_shim"]

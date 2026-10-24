@@ -37,6 +37,11 @@ These families accept image input by default; pass `--text-model-only` to skip t
 | MiniMax-M3 (`minimax_m3`: CLIP-style ViT tower, streamed under `--mm-encoder-weights host`) | one token per 28x28 pixels of the resized image, dynamic resolution | pixel areas in `size.shortest_edge` / `longest_edge`; checkpoint defaults 4 to 576 tokens | `{"size": {"longest_edge": 1048576}}` |
 | DeepSeek-V4-Flash-Vision (`deepseek_v4`: native-resolution ViT tower, streamed under `--mm-encoder-weights host`) | one token per 3x3 grid of 14x14 patches, against a per-image cap; the block carries sentinel tokens and lead pads that align it to a 4-token compression stride, so its length depends on where it lands in the prompt | the maximum is a cap on the block (`vision_max_n_token`, checkpoint default 384) and lowers it, the minimum is read as the checkpoint's upscale floor and has no effect | not read |
 
+A GGUF model takes image input from a separate llama.cpp mmproj file, found in the model file's own folder or passed with `--mmproj` (see the
+[CLI reference](cli.md#image-input)). A GGUF file that carries the vision tensors itself (the Ollama layout) serves text only. The tower runs in bf16
+whatever the mmproj stores; a quantized mmproj is dequantized at load and keeps its quantization error. Image tokens and budgets are those of the
+family's row above.
+
 ## MoE strategies
 
 `ft serve --moe-strategy {auto,fused,offload,cpu,hybrid}` (`--moe-backend` is the deprecated old spelling):
@@ -47,15 +52,10 @@ These families accept image input by default; pass `--text-model-only` to skip t
   misses stream over PCIe.
 - **cpu** — misses are computed on the CPU instead of fetched.
 - **hybrid** — per step, fetches some misses over PCIe and computes the rest on
-  CPU, overlapped. Run `ft bench bw` once per machine to calibrate the split.
-  On a bare `.gguf`, an explicit `hybrid` pick needs the file header to prove
-  every expert bank type servable; an FTW dir cannot prove this yet, so `hybrid`
-  stays rejected there and `offload` keeps working.
+  CPU, overlapped. Run `ft bench bw --model <checkpoint>` once per machine and
+  model to calibrate the split.
 - **auto** — dense models always resolve to `fused`; MoE models resolve to
-  `offload`, upgraded to `hybrid` when a cached `ft bench bw` profile
-  recommends it. With `--moe-cache-auto`, a multi-signature `.gguf` whose budget
-  cannot fund every signature's expert floor fails before the expert banks load.
-  Unified-memory GPUs differ, see below.
+  `offload`. Unified-memory GPUs differ, see below.
 
 ### Unified-memory GPUs (GB10 / DGX Spark)
 
@@ -66,6 +66,28 @@ have no resident path and stay on `offload`. Offload-only flags
 (`--moe-cpu-layers`, `--moe-cache-size` / `-rate` / `-auto`,
 `--moe-prefill-hit-d2d`, `--disable-moe-prefill-overlap`) are ignored with a
 warning; pass `--moe-strategy offload` to use them.
+
+### Hosts that cap pinned memory (WSL)
+
+WSL caps CUDA pinned memory near half of RAM, so the expert banks of a large
+model may not all pin. With `--moe-cpu-layers auto`, FreeToken loads the banks
+first, then pins them layer by layer from the middle out until CUDA refuses one;
+the remaining head and tail layers are OS-locked instead (resident, but with no
+device address). After a refusal under WDDM (WSL and native Windows) it
+unpins about 3 GiB more (`FREETOKEN_PIN_PROBE_MARGIN_GB`).
+The probe runs only where pinning is known to be capped (WDDM, or
+`FREETOKEN_SIMULATE_PIN_CAP_GB` for testing). FTW checkpoints, dummy weights
+and models the CPU executor cannot serve take the size estimate instead, as
+does `FREETOKEN_PIN_BUDGET_GB`, which fixes the budget: the locked layers are
+then picked from a size estimate before the load, and a refused pin stops the
+boot.
+
+Under `hybrid`, a locked layer keeps GPU slots of its own pools. Each decode
+step it fetches a share of its misses (`--moe-locked-fetch`, by default from the `ft bench bw` profile): CPU threads
+copy the experts into a small pinned staging buffer
+(`--moe-locked-max-fetch` rows per bank) and the GPU copies them into the
+slots. The CPU computes the remaining misses, as on any hybrid layer. Under
+`offload`, locked layers decode on the CPU.
 
 ### NVLink-C2C hosts (GH200 / GB200)
 
@@ -83,12 +105,20 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
 
 ## Notes
 
+- A checkpoint that fails to load: from a source checkout, run `PYTHONPATH=python python scripts/checkpoint_diagnose/diagnose.py <checkpoint dir or HF repo id>`. It reads the headers, not the weights, says whether FreeToken or the checkpoint is at fault, and for a local checkpoint gives the commands that fix a non-standard one; see [its README](../scripts/checkpoint_diagnose/README.md). GGUF files are checked with [scripts/gguf_check](../scripts/gguf_check/README.md).
 - `ft checkpoint` conversion is optional — it pre-converts a checkpoint into
   FreeToken's fast-load format, and `ft serve --model` auto-detects the result.
 - An FTW converted by an older build with `--moe-backend fused` or `triton` keeps
   its experts as dense weights and no longer loads; reconvert it with `ft checkpoint`.
 - FTW files converted by builds before the quantization refactor may fail to load;
   see [ftw-hotfix.md](ftw-hotfix.md) for the affected checkpoints and the repair tool.
+- Muse-Glimmer keeps the attention gate as its own linear next to `qkv_proj`; an FTW converted
+  when the gate was fused into `qkvg_proj` no longer loads, reconvert it with `ft checkpoint`.
+- NVFP4 global scales are kept in fp32. An NVFP4 FTW that stores them as fp16 (converted by an
+  older build) is refused at load; reconvert it with `ft checkpoint`.
+- Qwen3.5 / Qwen3.6 / Qwen3.8-27B load their zero-centred norm weights as stored and add the 1 in
+  fp32 at runtime. An FTW of these models converted by an older build stores the norms with the 1
+  already added: it loads without an error but gives wrong output; reconvert it with `ft checkpoint`.
 - An FTW converted before its family served images holds no vision encoder: `ft serve`
   refuses it unless started with `--text-model-only` (or `--mm-disable vision`); reconvert it
   with `ft checkpoint`, or add the encoder in place with [scripts/ftw_hotfix.py](ftw-hotfix.md).
@@ -112,7 +142,7 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
   Bounded output differs from exact by construction and does not depend on the prefill chunk size.
   Under expert offload the prefill time is bounded by streaming each layer's experts, so decoder
   replay saves decoder-layer compute, not prefill time.
-  Run `ft bench bw --model dsv4.1-flash` to measure local PCIe and CPU bandwidth before
+  Run `ft bench bw --model <checkpoint>` to measure local PCIe and CPU bandwidth before
   choosing a MoE strategy; `--moe-strategy hybrid` splits expert misses using those
   measurements. With `--moe-cache-auto`, `--kv-reserve-tokens` sets the token capacity reserved
   before the expert cache is allocated, subject to the attention pool's structural minimum; size it

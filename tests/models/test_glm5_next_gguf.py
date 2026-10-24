@@ -295,6 +295,7 @@ def _parse(path) -> object:
     return parse_gguf_config(build_gguf_shim(path))
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_parse_gguf_config_maps_metadata_to_glm5_args(glm5next_gguf):
     cfg = _parse(glm5next_gguf)
     args = cfg.glm5_args
@@ -397,6 +398,7 @@ def test_build_gguf_shim_accepts_glm5next_and_rejects_unknown_arch(glm5next_gguf
         build_gguf_shim(str(other))
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_registry_resolves_the_glm5next_gguf_spec():
     from freetoken.models.glm5_next import iter_gguf_weights, parse_gguf_config
     from freetoken.models.glm5_next import gguf as gguf_module
@@ -459,6 +461,7 @@ def _expected_module_names(cfg) -> list:
     return names
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_to_gguf_round_trip_covers_every_tensor(glm5next_iter_gguf):
     # the bidirectional shield against silent corruption: every module the family
     # reads maps into tensors the file actually carries, and every tensor the file
@@ -487,6 +490,7 @@ def test_to_gguf_round_trip_covers_every_tensor(glm5next_iter_gguf):
     )
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_engine_model_config_resolves_over_the_frozen_shim(glm5next_gguf):
     # model_config clears the unbuilt encoder sections on a copy of hf_config; for
     # GGUF that copy is the frozen GgufConfigShim, whose generated __setattr__
@@ -508,6 +512,7 @@ def test_engine_model_config_resolves_over_the_frozen_shim(glm5next_gguf):
     assert shim.metadata["glm5next.block_count"] == 46
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_rejects_expert_inclusion():
     # routed experts only serve from the offload cache (same contract as the HF reader);
     # the iterator is a generator, so the guard fires on first next() like weight.py's
@@ -530,6 +535,7 @@ def test_missing_required_metadata_key_fails_loudly(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_per_layer_varying_scalar_rejected(tmp_path):
     # llama accepts per-layer arrays for key_or_arr scalars; FreeToken carries one
     # value, so a non-uniform array must be refused, not folded.
@@ -539,6 +545,7 @@ def test_per_layer_varying_scalar_rejected(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_uniform_per_layer_array_folds_to_scalar(tmp_path):
     meta = {**_GLM5NEXT_METADATA, "glm5next.attention.head_count": [64] * 46}
     path = _write_gguf(tmp_path / "uniform.gguf", metadata=meta)
@@ -547,6 +554,7 @@ def test_uniform_per_layer_array_folds_to_scalar(tmp_path):
     assert args.linear_num_heads == 64
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_per_layer_array_must_span_block_count(tmp_path):
     meta = {**_GLM5NEXT_METADATA, "glm5next.block_count": 45}
     path = _write_gguf(tmp_path / "short-array.gguf", metadata=meta)
@@ -554,6 +562,7 @@ def test_per_layer_array_must_span_block_count(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_all_kda_trunk_rejected(tmp_path):
     # llama.cpp requires 0 < n_recr < n_layer; an all-KDA trunk has no DSA layer.
     meta = {**_GLM5NEXT_METADATA, "glm5next.attention.head_count_kv": [0] * 46}
@@ -562,6 +571,7 @@ def test_all_kda_trunk_rejected(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_indexer_topk_must_be_kpool_divisible(tmp_path):
     meta = {**_GLM5NEXT_METADATA, "glm5next.attention.indexer.top_k": 2047}
     path = _write_gguf(tmp_path / "topk.gguf", metadata=meta)
@@ -569,6 +579,7 @@ def test_indexer_topk_must_be_kpool_divisible(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_nextn_layer_count_must_leave_a_trunk(tmp_path):
     meta = {
         **_GLM5NEXT_METADATA,
@@ -589,6 +600,7 @@ def test_untied_file_marks_tie_word_embeddings_false(tmp_path):
     assert _parse(path).tie_word_embeddings is False
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_scalar_head_count_kv_broadcasts_over_layers(tmp_path):
     # key_or_arr: a scalar applies to every layer (llama-model.cpp); the resulting
     # uniform split trips the strict-minority check instead of a TypeError.
@@ -599,6 +611,7 @@ def test_scalar_head_count_kv_broadcasts_over_layers(tmp_path):
     assert "scalar head_count_kv applies to every layer" in str(excinfo.value)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_scalar_helper_rejects_empty_and_varying_arrays():
     # An empty per-layer array never survives a gguf-py round-trip (dropped at
     # write), so the guard is exercised directly on the folding helper.
@@ -613,6 +626,7 @@ def test_scalar_helper_rejects_empty_and_varying_arrays():
 
 
 @pytest.mark.parametrize("kpool", [0, -4])
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_indexer_kpool_must_be_positive(tmp_path, kpool):
     # A negative kpool would pass the modulo check and silently disable compression.
     meta = {**_GLM5NEXT_METADATA, "glm5next.attention.indexer.kpool": kpool}
@@ -622,6 +636,7 @@ def test_indexer_kpool_must_be_positive(tmp_path, kpool):
 
 
 @pytest.mark.parametrize("dense", [46, -1])
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_leading_dense_block_count_must_be_in_range(tmp_path, dense):
     meta = {**_GLM5NEXT_METADATA, "glm5next.leading_dense_block_count": dense}
     path = _write_gguf(tmp_path / f"dense-{dense}.gguf", metadata=meta)
@@ -629,6 +644,7 @@ def test_leading_dense_block_count_must_be_in_range(tmp_path, dense):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_expert_gating_func_must_be_sigmoid(tmp_path):
     # 1 == llama.cpp SOFTMAX; FreeToken only implements the sigmoid/noaux_tc router.
     meta = {**_GLM5NEXT_METADATA, "glm5next.expert_gating_func": 1}
@@ -637,6 +653,7 @@ def test_expert_gating_func_must_be_sigmoid(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_roped_variant_rejected(tmp_path):
     # glm5next.cpp asserts n_rot() == 0 ("nope-only"); a nonzero rope dim must not
     # silently serve the NoPE model.
@@ -646,6 +663,7 @@ def test_roped_variant_rejected(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_metadata_vocab_mismatch_rejected(tmp_path):
     meta = {**_GLM5NEXT_METADATA, "glm5next.vocab_size": 154881}
     path = _write_gguf(tmp_path / "vocab.gguf", metadata=meta)
@@ -653,6 +671,7 @@ def test_metadata_vocab_mismatch_rejected(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_shared_expert_ffn_mismatch_rejected(tmp_path):
     # FreeToken derives the shared-expert width like llama (n_ff_exp * n_shared).
     meta = {**_GLM5NEXT_METADATA, "glm5next.expert_shared_feed_forward_length": 4096}
@@ -661,6 +680,7 @@ def test_shared_expert_ffn_mismatch_rejected(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_indexer_norm_epsilon_mismatch_rejected(tmp_path):
     # FreeToken hardcodes the indexer k-norm eps to 1e-6 (attention.py).
     meta = {**_GLM5NEXT_METADATA, "glm5next.attention.layer_norm_epsilon": 2e-6}
@@ -669,6 +689,7 @@ def test_indexer_norm_epsilon_mismatch_rejected(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_shexp_clamp_mismatch_rejected(tmp_path):
     # FreeToken carries one clamp for routed and shared experts.
     meta = {**_GLM5NEXT_METADATA, "glm5next.swiglu_clamp_shexp": [20.0] * 46}
@@ -688,6 +709,7 @@ def test_two_nextn_layers_shrink_the_trunk(tmp_path):
     assert args.mlp_layer_types == ("dense",) * 3 + ("sparse",) * 41
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_negative_nextn_predict_layers_rejected(tmp_path):
     # A negative nextn would inflate num_layers past block_count and silently turn
     # the draft block into a trunk layer.
@@ -697,6 +719,7 @@ def test_negative_nextn_predict_layers_rejected(tmp_path):
         _parse(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_indexer_topk_must_be_positive(tmp_path):
     meta = {**_GLM5NEXT_METADATA, "glm5next.attention.indexer.top_k": -8}
     path = _write_gguf(tmp_path / "topk-neg.gguf", metadata=meta)
@@ -1132,6 +1155,7 @@ def test_iter_gguf_weights_a_log_dt_bias_and_underscore_params(glm5next_iter_ggu
         ("mystery.weight", r"unmapped glm5next GGUF tensor: mystery\.weight"),
     ],
 )
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_unknown_tensor_names_the_tensor(tmp_path, bogus, match):
     ts = _iter_tensor_set()
     ts[bogus] = (np.full(_H, 0.25, np.float32), None)
@@ -1140,6 +1164,7 @@ def test_iter_gguf_weights_unknown_tensor_names_the_tensor(tmp_path, bogus, matc
         _iter_params(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_a_log_guard_rejects_nonnegative_ssm_a(tmp_path):
     # ssm_a holds -exp(A_log) per head; a >= 0 entry cannot yield a real A_log.
     ts = _iter_tensor_set()
@@ -1157,6 +1182,7 @@ def test_iter_gguf_weights_a_log_guard_rejects_nonnegative_ssm_a(tmp_path):
         ("blk.2.attn_v_b.weight", r"layer 2 kv_b is missing tensor blk\.2\.attn_v_b\.weight"),
     ],
 )
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_incomplete_fusion_group_fails_at_end_of_stream(tmp_path, drop, match):
     # The loader looks every piece up by name, so a dropped piece of a fusion group
     # fails at its layer with a ValueError naming the tensor (a bare assert would
@@ -1168,6 +1194,7 @@ def test_iter_gguf_weights_incomplete_fusion_group_fails_at_end_of_stream(tmp_pa
         _iter_params(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_kda_piece_on_a_dsa_layer_fails_as_unmapped(tmp_path):
     # a KDA-only suffix on a DSA layer is consumed by nobody: the end-of-stream
     # coverage check names it instead of silently dropping the tensor.
@@ -1178,6 +1205,7 @@ def test_iter_gguf_weights_kda_piece_on_a_dsa_layer_fails_as_unmapped(tmp_path):
         _iter_params(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_mixed_row_bytes_in_proj_rejected(tmp_path):
     # the per-piece convert contract fires first: an F16 ssm_beta among Q8_0 pieces
     # must fail loudly naming the tensor, not inside torch.cat with a tensor-less
@@ -1210,6 +1238,7 @@ def test_gguf_expert_banks_load_verbatim(glm5next_iter_gguf):
         assert torch.equal(down[layer], torch.from_numpy(_DOWN_BANK_BYTES)), layer
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_gguf_expert_banks_missing_bank_fails_loud(tmp_path):
     # the bank loader reads by name: a missing bank is a loud ValueError naming the
     # tensor + the file + the re-convert hint, never a silently short cache
@@ -1236,6 +1265,7 @@ def test_gguf_expert_banks_reject_bank_on_dense_layer(tmp_path):
 
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_rejects_tp_gt_1(glm5next_iter_gguf, monkeypatch):
     # the loader emits full fused tensors; TP sharding is not implemented, same
     # status as the HF reader (weight.py raises the same NotImplementedError).
@@ -1314,6 +1344,7 @@ def test_model_build_resolves_gguf_quant_schemes(tmp_path):
     assert sd["model.layers.1.mlp.e_score_correction_bias"].dtype == torch.float32
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_rejects_tied_gguf(tmp_path):
     # a tied variant (no output.weight) would die late on the lm_head lookup --
     # the untied-head convert contract refuses it up front instead.
@@ -1349,6 +1380,7 @@ def test_iter_rejects_tied_gguf(tmp_path):
     ),
     ],
 )
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_iter_gguf_weights_rejects_wrong_dense_type(
     tmp_path, tensor_name, payload, raw_dtype, match
 ):
@@ -1363,6 +1395,7 @@ def test_iter_gguf_weights_rejects_wrong_dense_type(
         _iter_params(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_dequant_q8_0_reference_matches_handcrafted_blocks(tmp_path):
     # the CPU decode path (vendored gguf-py numpy quants) against handcrafted blocks:
     # fp16 scale + int8 quants -> w = d * q; the bf16 cast rounds the fp32 reference once
@@ -1397,6 +1430,7 @@ def test_dequant_q8_0_reference_matches_handcrafted_blocks(tmp_path):
     )
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_cast_gpu_branch_moves_packed_rows_to_kernel(tmp_path, monkeypatch):
     # review-B TP: the GPU branch must hand the kernel CUDA-packed rows, not the CPU
     # mmap bytes (op_dequantize takes kDLCUDA tensors); the branch is picked by the
@@ -1531,6 +1565,7 @@ def test_load_tokenizer_from_gguf_metadata(tmp_path):
     assert load_eos_token_ids(path, tok) == {eos_id}
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_glm5next_gguf_tokenizer_digit_split_and_gemma4_gate(tmp_path):
     """No-reference pin: glm5next gets the glm4 pre-tokenizer, gemma4 does not.
 
@@ -1813,6 +1848,7 @@ def mmproj_gguf(tmp_path_factory) -> str:
     return _write_mmproj_gguf(tmp_path_factory.mktemp("glm5next-mmproj") / "mmproj.gguf")
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_builds_multimodal_spec_and_full_vision_config(glm5next_gguf, mmproj_gguf):
     from freetoken.models.gguf.config import build_gguf_shim
     from freetoken.utils import cached_load_hf_config
@@ -1846,6 +1882,7 @@ def _parse_shim(shim) -> "ModelConfig":
     return parse_gguf_config(shim)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_without_mmproj_registry_and_config_unchanged(glm5next_gguf):
     """No flag: the text-only spec, shim fields and config are byte-identical to the pre-mmproj path."""
     from freetoken.models.gguf.config import build_gguf_shim
@@ -1881,6 +1918,7 @@ def test_mmproj_pinned_reference_mismatch_fails_fast(glm5next_gguf, tmp_path, fi
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_missing_file_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1888,6 +1926,7 @@ def test_mmproj_missing_file_fails_fast(glm5next_gguf, tmp_path):
         build_gguf_shim(glm5next_gguf, mmproj_path=str(tmp_path / "absent.gguf"))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_non_clip_arch_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1896,6 +1935,7 @@ def test_mmproj_non_clip_arch_fails_fast(glm5next_gguf, tmp_path):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_missing_clip_key_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1905,6 +1945,7 @@ def test_mmproj_missing_clip_key_fails_fast(glm5next_gguf, tmp_path):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_derived_field_gate_shape_mismatch_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1917,6 +1958,7 @@ def test_mmproj_derived_field_gate_shape_mismatch_fails_fast(glm5next_gguf, tmp_
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_temporal_slice_count_mismatch_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1930,6 +1972,7 @@ def test_mmproj_temporal_slice_count_mismatch_fails_fast(glm5next_gguf, tmp_path
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_missing_qkv_bias_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1948,6 +1991,7 @@ def test_mmproj_missing_qkv_bias_fails_fast(glm5next_gguf, tmp_path):
         ("clip.projector_type", "glm4v", "projector_type"),
     ],
 )
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_tower_facts_mismatch_fails_fast(glm5next_gguf, tmp_path, field, value, match):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1958,6 +2002,7 @@ def test_mmproj_tower_facts_mismatch_fails_fast(glm5next_gguf, tmp_path, field, 
 
 
 @pytest.mark.parametrize("field", ["clip.has_vision_encoder", "clip.projector_type"])
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_missing_tower_fact_fails_fast(glm5next_gguf, tmp_path, field):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1967,6 +2012,7 @@ def test_mmproj_missing_tower_fact_fails_fast(glm5next_gguf, tmp_path, field):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_patch_slices_without_base_tensor_fails_fast(glm5next_gguf, tmp_path):
     """Slices .N present but the base v.patch_embd.weight absent: a named error, not a KeyError."""
     from freetoken.models.gguf.config import build_gguf_shim
@@ -1980,6 +2026,7 @@ def test_mmproj_patch_slices_without_base_tensor_fails_fast(glm5next_gguf, tmp_p
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_engine_config_mmproj_spec_resolves_and_config_builds(glm5next_gguf, mmproj_gguf):
     """Phase 2 lifted the boot gate: the mmproj boot resolves the vision spec and the
     config path builds the multimodal ModelConfig (the tower itself streams from the
@@ -2001,6 +2048,7 @@ def test_engine_config_mmproj_spec_resolves_and_config_builds(glm5next_gguf, mmp
     assert cfg.model_config.vision_config is not None
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_engine_config_threads_mmproj_into_hf_config(glm5next_gguf, mmproj_gguf):
     from freetoken.distributed import DistributedInfo
     from freetoken.engine.config import EngineConfig
@@ -2016,6 +2064,7 @@ def test_engine_config_threads_mmproj_into_hf_config(glm5next_gguf, mmproj_gguf)
     assert get_model_spec("Glm5NextGGUFForConditionalGeneration").encoders
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_engine_config_disabled_vision_drops_mmproj_section(glm5next_gguf, mmproj_gguf):
     """--mm-disable vision on an mmproj boot: the frozen shim's vision_config section is
     dropped (dataclasses.replace), so the config serves text-only."""
@@ -2034,6 +2083,7 @@ def test_engine_config_disabled_vision_drops_mmproj_section(glm5next_gguf, mmpro
     assert cfg.model_config.vision_config is None
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_iter_gguf_weights_include_vision_contract(glm5next_iter_gguf, mmproj_gguf, monkeypatch):
     """load_weight passes include_vision once spec.encoders is non-empty (weight.py);
     the reader must accept it, and include_vision=False must never open the mmproj."""
@@ -2071,6 +2121,7 @@ def test_iter_gguf_weights_include_vision_contract(glm5next_iter_gguf, mmproj_gg
     assert mmproj_gguf not in opened  # the mmproj file was never even mmap'd
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_iter_vision_weights_gguf_branch_reads_mmproj(glm5next_gguf, vision_mmproj_gguf):
     """Phase 2: the dispatcher routes a GGUF checkpoint with an mmproj file to the
     GGUF vision reader (the phase-1 NotImplementedError stub is gone)."""
@@ -2260,6 +2311,7 @@ def _vision_params(mmproj) -> dict:
     return dict(iter_gguf_vision_weights(mmproj))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_full_name_map(vision_mmproj_gguf):
     from freetoken.models.glm5_next.gguf import _VISION_BLOCK_MAP
 
@@ -2283,6 +2335,7 @@ def test_gguf_vision_reader_full_name_map(vision_mmproj_gguf):
     assert all(t.dtype == torch.bfloat16 for t in out.values())
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_axis_orders_and_temporal_stack(vision_mmproj_gguf):
     out = _vision_params(vision_mmproj_gguf)
     # every linear lands (out, in) with the three width signatures distinguishable
@@ -2303,6 +2356,7 @@ def test_gguf_vision_reader_axis_orders_and_temporal_stack(vision_mmproj_gguf):
     assert out["visual.post_layernorm.weight"].shape == (_VH,)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_qkv_row_order(vision_mmproj_gguf):
     """llama.cpp stores attn_qkv with q|k|v on the output axis; the reader must not
     transpose: vision.py unbinds (S, 3, H*D) over dim 1 == row-major q|k|v."""
@@ -2313,6 +2367,7 @@ def test_gguf_vision_reader_qkv_row_order(vision_mmproj_gguf):
     assert (b[:_VH] == 10.0).all() and (b[_VH : 2 * _VH] == 20.0).all() and (b[2 * _VH :] == 30.0).all()
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_casts_follow_the_reference(vision_mmproj_gguf):
     """BF16 weights keep their bf16 bits; F32 norms/biases cast to bf16 exactly like
     the reference _iter_vision (which casts every visual.* tensor to bf16)."""
@@ -2325,6 +2380,7 @@ def test_gguf_vision_reader_casts_follow_the_reference(vision_mmproj_gguf):
     assert out["visual.blocks.0.norm1.weight"].dtype == torch.bfloat16
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_rejects_unknown_tensor(tmp_path):
     tensors = dict(_vision_fixture_data())
     tensors["v.blk.0.weird.weight"] = (np.ones(4, dtype=np.float32), False)
@@ -2333,6 +2389,7 @@ def test_gguf_vision_reader_rejects_unknown_tensor(tmp_path):
         _vision_params(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_requires_every_block(tmp_path):
     meta = dict(_CLIP_METADATA, **{"clip.vision.block_count": 2})
     p = _write_vision_mmproj(tmp_path / "gap.gguf", metadata=meta)
@@ -2340,6 +2397,7 @@ def test_gguf_vision_reader_requires_every_block(tmp_path):
         _vision_params(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_requires_complete_patch_slices(tmp_path):
     tensors = {
         name: spec
@@ -2352,6 +2410,7 @@ def test_gguf_vision_reader_requires_complete_patch_slices(tmp_path):
         _vision_params(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_rejects_duplicate_patch_slice_index(tmp_path):
     """The base tensor and an explicit .0 slice both claim temporal frame 0: a
     duplicate must fail fast instead of silently picking one for the stack."""
@@ -2362,6 +2421,7 @@ def test_gguf_vision_reader_rejects_duplicate_patch_slice_index(tmp_path):
         _vision_params(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_rejects_block_beyond_depth(tmp_path):
     meta = dict(_CLIP_METADATA, **{"clip.vision.block_count": 1})
     tensors = dict(_vision_fixture_data())
@@ -2371,6 +2431,7 @@ def test_gguf_vision_reader_rejects_block_beyond_depth(tmp_path):
         _vision_params(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_rejects_non_clip_arch(tmp_path):
     from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
 
@@ -2379,6 +2440,7 @@ def test_gguf_vision_reader_rejects_non_clip_arch(tmp_path):
         list(iter_gguf_vision_weights(p))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_iter_gguf_weights_streams_vision_after_trunk(glm5next_iter_gguf, vision_mmproj_gguf):
     from freetoken.models.glm5_next import iter_gguf_weights
 
@@ -2398,6 +2460,7 @@ def test_iter_gguf_weights_streams_vision_after_trunk(glm5next_iter_gguf, vision
     assert names[-1] == "visual.patch_embed.proj.weight"
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_iter_gguf_weights_include_vision_requires_mmproj(glm5next_iter_gguf):
     from freetoken.models.glm5_next import iter_gguf_weights
 
@@ -2409,6 +2472,7 @@ def test_iter_gguf_weights_include_vision_requires_mmproj(glm5next_iter_gguf):
         )
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_load_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_vision_mmproj_gguf):
     """Boot wiring: load_weight resolves the spec WITH the mmproj fact, so the vision
     spec is selected and the tower tensors stream from the mmproj file. Needs the
@@ -2429,6 +2493,7 @@ def test_load_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_
     assert "visual.patch_embed.proj.weight" in out
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_load_vision_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_vision_mmproj_gguf, monkeypatch):
     """Encoder-only path (scripts/ftw_hotfix.py read_tower): load_vision_weight must
     forward mmproj_path to the family reader, so the GGUF branch reaches
@@ -2459,6 +2524,7 @@ def test_load_vision_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf
 # ------------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_image_processor_config_full_map(mmproj_gguf):
     from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
 
@@ -2472,6 +2538,7 @@ def test_mmproj_image_processor_config_full_map(mmproj_gguf):
     assert kw["image_std"] == pytest.approx([0.26862955, 0.26130259, 0.27577710], abs=1e-6)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_image_processor_config_missing_key_fails_fast(tmp_path):
     from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
 
@@ -2481,6 +2548,7 @@ def test_mmproj_image_processor_config_missing_key_fails_fast(tmp_path):
         parse_mmproj_image_processor_config(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_image_processor_config_bad_geometry_fails_fast(tmp_path):
     from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
 
@@ -2490,6 +2558,7 @@ def test_mmproj_image_processor_config_bad_geometry_fails_fast(tmp_path):
         parse_mmproj_image_processor_config(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_image_serving_resolves_pinned_token(glm5next_gguf):
     from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
     from freetoken.models.gguf.reader import load_gguf_metadata
@@ -2516,6 +2585,7 @@ def _write_metadata_only_gguf(path, metadata) -> str:
     return str(path)
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_image_serving_missing_template_fails_fast(tmp_path):
     from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
 
@@ -2526,6 +2596,7 @@ def test_gguf_image_serving_missing_template_fails_fast(tmp_path):
         resolve_gguf_image_serving(p, load_gguf_metadata(p))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_image_serving_template_without_placeholder_fails_fast(tmp_path):
     from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
     from freetoken.models.gguf.reader import load_gguf_metadata
@@ -2540,6 +2611,7 @@ def test_gguf_image_serving_template_without_placeholder_fails_fast(tmp_path):
         resolve_gguf_image_serving(p, load_gguf_metadata(p))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_image_serving_vocab_without_token_fails_fast(tmp_path):
     from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
     from freetoken.models.gguf.reader import load_gguf_metadata
@@ -2554,6 +2626,7 @@ def test_gguf_image_serving_vocab_without_token_fails_fast(tmp_path):
         resolve_gguf_image_serving(p, load_gguf_metadata(p))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_image_serving_wrong_token_id_fails_fast(tmp_path):
     from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
     from freetoken.models.gguf.reader import load_gguf_metadata
@@ -2570,6 +2643,7 @@ def test_gguf_image_serving_wrong_token_id_fails_fast(tmp_path):
         resolve_gguf_image_serving(p, load_gguf_metadata(p))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_boot_carries_image_token_and_processor_path(glm5next_gguf, mmproj_gguf):
     from freetoken.models.gguf.config import build_gguf_shim
     from freetoken.models.glm5_next.gguf import parse_gguf_config
@@ -2588,6 +2662,7 @@ def test_get_mm_processor_text_only_gguf_is_none(glm5next_gguf):
     assert get_mm_processor(glm5next_gguf) is None
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_get_mm_processor_reraises_operator_errors(glm5next_gguf, tmp_path):
     """The blanket except that turns foreign configs into None must not swallow the
     explicit --mmproj operator errors: a bad flag is a boot stop, not a silent
@@ -2601,6 +2676,7 @@ def test_get_mm_processor_reraises_operator_errors(glm5next_gguf, tmp_path):
         get_mm_processor(glm5next_gguf, mmproj_path=str(tmp_path / "absent.gguf"))
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mm_processor_fallback_builds_image_processor_from_mmproj(glm5next_gguf, mmproj_gguf):
     from freetoken.mm.processor import get_mm_processor
 
@@ -2643,6 +2719,7 @@ def test_mm_processor_preprocessor_config_file_takes_precedence(tmp_path):
     assert proc._image_processor().min_image_tokens == 123
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mm_processor_mmproj_boot_wraps_image_into_mm_item(glm5next_gguf, mmproj_gguf):
     """Full CPU pass over the fallback: metadata-built image processor, MMItem wire
     format and the placeholder expansion the chat template slots into."""
@@ -2695,6 +2772,7 @@ def test_metadata_gguf_extra_kv_roundtrip(glm5next_gguf, tmp_path):
     assert list(m["ft.t.ints"]) == [2, 3]
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_ftw_carrier_boots_vision_without_mmproj(glm5next_gguf, mmproj_gguf, tmp_path):
     """A carrier with the mmproj clip.* KVs merged resolves the multimodal spec, the
     vision config, the pinned image token and the baked processor kwargs - the same
@@ -2745,6 +2823,7 @@ def test_pack_kv_rejects_bad_arrays(tmp_path):
         _pack_kv("ft.dict", {"a": 1})
 
 
+@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_ftw_carrier_partial_vision_metadata_fails_fast(glm5next_gguf, mmproj_gguf, tmp_path):
     """A hand-trimmed carrier (tower flag present, fields missing) fails fast instead
     of silently building a half-configured tower."""
@@ -2758,6 +2837,7 @@ def test_ftw_carrier_partial_vision_metadata_fails_fast(glm5next_gguf, mmproj_gg
         cached_load_hf_config(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_raw_gguf_with_tower_metadata_fails_fast(glm5next_gguf, tmp_path):
     """clip.* KVs on a checkpoint GGUF whose tensor table is the LLM (not a metadata
     carrier) mean the tower file is missing: demand --mmproj, never serve silently."""
@@ -2769,6 +2849,7 @@ def test_raw_gguf_with_tower_metadata_fails_fast(glm5next_gguf, tmp_path):
         cached_load_hf_config(p)
 
 
+@pytest.mark.skip(reason="D-PORT-D4: branch glm5next GGUF loader/convert contract withdrawn in round-6 merge (main-wins #721/#810); restore with the D4 port")
 def test_ftw_text_only_carrier_unchanged(glm5next_gguf, tmp_path):
     """No clip.* KVs in the carrier: the pre-phase-4 text-only boot path, byte for
     byte (old FTWs converted before this campaign must not change shape)."""

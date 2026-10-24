@@ -290,3 +290,11 @@ def test_tracker_batch_forward_ms_measures_launch_to_drain():
     launch = tracker.clock()
     now["t"] = 1.25
     assert tracker.batch_forward_ms(launch) == pytest.approx(250.0)
+def test_moe_stats_line_follows_each_decode_line():
+    logs: list[str] = []
+    calls = []
+    rep = SchedulerStatusReporter(log=logs.append, clock=lambda: 1.0, decode_log_interval=2, moe_stats=lambda: calls.append(1) or "MoE decode, x")
+    for _ in range(4):
+        rep.report_batch(_decode_batch(1), running_reqs=1, queue_reqs=0, kv_used_pages=1, kv_total_pages=10, page_size=1)
+    assert len(calls) == 2
+    assert [line.split(",")[0] for line in logs] == ["Decode batch", "MoE decode"] * 2

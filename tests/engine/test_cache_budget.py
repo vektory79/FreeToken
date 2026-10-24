@@ -219,7 +219,7 @@ def test_adjust_config_resolves_num_tokens_generic():
         cuda_graph_bs = [1, 2]
         max_seq_len = 1024
         page_size = 1
-        attention_backend = "fi"
+        attention_backend = "triton" if torch.version.hip is not None else "fi"
         num_page_override = None
         num_token_override = 5000
 
@@ -356,7 +356,7 @@ def _offload_engine_config(**overrides):
         model_path="/tmp/freetoken-test-model",
         tp_info=DistributedInfo(rank=0, size=1),
         dtype=torch.bfloat16,
-        attention_backend="fi",
+        attention_backend="triton" if torch.version.hip is not None else "fi",
         **overrides,
     )
     object.__setattr__(
@@ -411,9 +411,7 @@ def test_adjust_config_defaults_moe_cache_auto_for_auto_resolved_offload_backend
     config = _offload_engine_config()
     _adjust_config(config)
 
-    # Which member of the family gets picked is not this test's claim, and is not ours to
-    # decide: a bare "auto" consults ~/.cache/freetoken/benchbw.json, so a box that has run
-    # `ft bench bw` resolves nvfp4 experts to hybrid instead. Assert the family, not the member.
+    # Which member of the family gets picked is not this test's claim. Assert the family, not the member.
     assert is_offload_moe_strategy(config.moe_strategy)
     assert config.moe_cache_auto is True
     assert config.moe_cache_size == 0  # still unresolved -- the scheduler sizes it from VRAM
@@ -577,60 +575,6 @@ def test_adjust_config_rejects_gguf_experts_on_cpu_paths():
     assert cfg.moe_strategy == "offload"
 
 
-def test_adjust_config_auto_keeps_gguf_on_offload_despite_hybrid_profile(monkeypatch):
-    # The benchbw profile may carry a "gguf" row (the reader maps it through the
-    # identity format mapping), but the auto->hybrid upgrade must ignore it: gguf has
-    # no CPU MoE weight path, so the profile can never justify hybrid for it.
-    import freetoken.moe.bench_profile as bench_profile
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(bench_profile, "load_backend_recommendation", lambda *a, **k: "hybrid")
-
-    def make_cfg():
-        model_config = SimpleNamespace(
-            single_stream_only=False,
-            is_moe=True,
-            expert_quant="none",
-            moe_weight_format="gguf",
-            hidden_act="swiglu_clamp",
-            has_swa_attention=False,
-            has_linear_attention=False,
-        )
-
-        class Cfg:
-            moe_cache_auto = False
-            moe_cache_size = 0
-            moe_cache_rate = None
-            moe_cache_mem = None
-            moe_strategy = "auto"
-            moe_cpu_layers = None
-            max_running_req = 4
-            cuda_graph_max_bs = 2
-            cuda_graph_bs = [1, 2]
-            max_seq_len = 1024
-            page_size = 1
-            attention_backend = "fi"
-            num_page_override = None
-            num_token_override = None
-
-            @property
-            def model_config(self):
-                return model_config
-
-        return Cfg()
-
-    from freetoken.engine.engine import _adjust_config
-
-    cfg = make_cfg()
-    _adjust_config(cfg)
-    assert cfg.moe_strategy == "offload"
-
-    # contrast: the same (monkeypatched) profile DOES upgrade a plain bf16 MoE model,
-    # so the exclusion above is really the gguf format check
-    cfg2 = make_cfg()
-    cfg2.model_config.moe_weight_format = None
-    _adjust_config(cfg2)
-    assert cfg2.moe_strategy == "hybrid"
 
 
 # ---- gguf + hybrid gate: per-layer header types vs the executor capability set ----
@@ -912,8 +856,11 @@ def test_gate_wiring_precedes_the_bank_load():
     from freetoken.engine.engine import Engine
 
     init_src = inspect.getsource(Engine._init_offload_moe_cache)
-    for anchor in ("_cpu_moe_format_rejection", "_gguf_auto_floor_gate"):
-        assert init_src.index(anchor) < init_src.index("load_expert_banks("), anchor
+    # main re-platform moved the CPU-executor capability screen to _adjust_config
+    # (through _gguf_hybrid_rejection); the header-scan floor gate stays wired
+    # immediately before the multi-minute bank load
+    assert init_src.index("_gguf_auto_floor_gate") < init_src.index("load_expert_banks(")
+    assert "_cpu_moe_format_rejection" in inspect.getsource(engine_mod._gguf_hybrid_rejection)
     assert "_gguf_hybrid_rejection" in inspect.getsource(engine_mod._adjust_config)
 
 

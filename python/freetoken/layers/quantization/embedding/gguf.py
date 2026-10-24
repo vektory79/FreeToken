@@ -18,7 +18,10 @@ class GgmlEmbeddingKernel(EmbeddingKernel):
     name = "ggml"
 
     def unusable_reason(self, cfg: EmbeddingConfig) -> str | None:
-        return "GGUF tables are not sharded over TP" if cfg.tp_size > 1 else None
+        if cfg.tp_size > 1:
+            return "GGUF tables are not sharded over TP"
+        # llama.cpp reads no token_embd scale and refuses a tied NVFP4 head that has one
+        return "GGUF tables with a weight scale are not supported" if cfg.scheme.weight.scale is not None else None
 
     def embed(self, layer: Any, ids: torch.Tensor) -> torch.Tensor:
         from freetoken.kernel import ggml

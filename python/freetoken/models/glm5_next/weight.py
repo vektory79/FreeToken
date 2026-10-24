@@ -260,12 +260,13 @@ def iter_vision_weights(
                 f"{model_path}: a GGUF checkpoint carries no vision tensors; the tower "
                 "reads from the --mmproj file"
             )
-        from .gguf import iter_gguf_vision_weights
-
-        # yield from, not return: this function is a generator (the HF branch below
-        # yields), so a plain return would end the stream with zero tensors
-        yield from iter_gguf_vision_weights(mmproj_path, device)
-        return
+        # D-PORT-D2: the branch read the tower from the --mmproj gguf
+        # (iter_gguf_vision_weights); withdrawn with the main-wins #803/#810
+        # mmproj flow, restore together with that port
+        raise RuntimeError(
+            f"{model_path}: gguf vision serving is not wired in this build "
+            "(deferred with the D2 mmproj port)"
+        )
     folder = download_hf_weight(model_path)
     with open(os.path.join(folder, "model.safetensors.index.json")) as f:
         weight_map = json.load(f)["weight_map"]

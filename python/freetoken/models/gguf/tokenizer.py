@@ -47,8 +47,16 @@ _BOS_PRE = frozenset((
     "llama3", "llama-v3", "llama-bpe", "falcon3", "falcon-h1", "pixtral", "midm-2.0", "lfm2", "jina-v5-nano", "tekken", "chameleon",
 ))
 
-# Llama 3 pre-tokenizers, whose HF tokenizer and llama.cpp take a word that is one vocabulary token as is instead of merging it
-_IGNORE_MERGES_PRE = frozenset(("llama3", "llama-v3", "llama-bpe"))
+# Llama 3 and GLM pre-tokenizers, whose HF tokenizer and llama.cpp take a word that is one vocabulary token as is instead of merging it
+_IGNORE_MERGES_PRE = frozenset(("llama3", "llama-v3", "llama-bpe", "glm4", "glm5"))
+
+# DeepSeek-V4's pre-tokenizer (llama.cpp spells it "joyai-llm"; transformers maps no split
+# for it): the three splits of the model's own tokenizer.json, in order
+_JOYAI_LLM_SPLITS = (
+    r"\p{N}{1,3}",
+    "[一-龥぀-ゟ゠-ヿ]+",
+    r'''[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+''',
+)
 
 
 def _add_bos(meta: dict) -> bool:
@@ -105,7 +113,31 @@ def load_gguf_tokenizer(model_path: str):
     fast, _ = convert_gguf_tokenizer(arch, tok_dict)
     meta = load_gguf_metadata(model_path)
     fast = _fix_added_tokens(fast, meta)
-    if meta.get("tokenizer.ggml.model") == "gpt2" and meta.get("tokenizer.ggml.pre") in _IGNORE_MERGES_PRE:
+    pre = meta.get("tokenizer.ggml.pre") if meta.get("tokenizer.ggml.model") == "gpt2" else None
+    if pre in ("glm4", "glm5"):
+        # llama.cpp spells the same GLM pre-tokenizer "glm4" and "glm5" (llama-vocab.cpp maps both
+        # to CHATGLM4 with ignore_merges); transformers maps no split for either
+        from tokenizers import Regex, pre_tokenizers
+        from transformers.integrations.gguf.gguf_tokenizer_mapping import GGUF_PRE_TOKENIZER_SPLITS
+
+        fast.pre_tokenizer = pre_tokenizers.Sequence([
+            pre_tokenizers.Split(Regex(GGUF_PRE_TOKENIZER_SPLITS["llama3"]), behavior="isolated"),
+            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+        ])
+    elif pre in ("qwen2", "qwen35"):
+        # every Qwen release's tokenizer.json applies NFC (Unicode Normalization Form C) before the
+        # byte-level BPE, but a GGUF carries no normalizer; without it decomposed text differs
+        from tokenizers import normalizers
+
+        fast.normalizer = normalizers.NFC()
+    elif pre == "joyai-llm":
+        from tokenizers import Regex, pre_tokenizers
+
+        fast.pre_tokenizer = pre_tokenizers.Sequence(
+            [pre_tokenizers.Split(Regex(r), behavior="isolated") for r in _JOYAI_LLM_SPLITS]
+            + [pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)]
+        )
+    if pre in _IGNORE_MERGES_PRE:
         fast.model.ignore_merges = True
     # glm5next only: the converter's GPT-2 regex glues the space onto digit runs
     # ("Ġ100"); swap in the reference glm4 scheme so numerals survive encoding.

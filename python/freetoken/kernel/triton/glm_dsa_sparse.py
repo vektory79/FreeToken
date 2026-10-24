@@ -408,7 +408,7 @@ def _split_count(b: int, m: int, h: int, topk: int, device) -> int:
 
 
 def glm_dsa_sparse_attn(
-    q: torch.Tensor,          # [b, m, h, d_v + d_r]  (ckv-absorbed | rope)
+    q: torch.Tensor,          # [b, m, h, d_v + d_r]  (ckv-absorbed | rope), any strides
     pool: torch.Tensor,       # [rows, d_v + d_r]     GLOBAL latent pool slab (this layer)
     topk_idxs: torch.Tensor,  # [b, m|1, topk] int32 global rows, -1 masked
     softmax_scale: float,
@@ -418,6 +418,7 @@ def glm_dsa_sparse_attn(
     force_splits: int | None = None,     # tests only: 0 = single-program, N = split-k N
     kv_quant: str | None = None,
     pool_block_scale: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,     # [b, m, h, d_v] to write into, any strides
 ) -> torch.Tensor:
     """Sparse MLA attention over gathered latent rows; returns ``[b, m, h, d_v]``.
 
@@ -428,6 +429,10 @@ def glm_dsa_sparse_attn(
 
     NVFP4 restores tiles to Q's compute dtype before the dot products, with FP32
     accumulators. FP32 dot operands exceed consumer GPU shared memory at width 576.
+
+    ``q`` and ``out`` are consumed with their given strides (a transposed bmm output
+    works without a contiguous copy); ``out`` lets a preallocated workspace receive
+    the result instead of a fresh allocation.
     """
     b, m, h, d = q.shape
     d_r = d - d_v
@@ -462,13 +467,20 @@ def glm_dsa_sparse_attn(
     assert pool.device == q.device
     if has_fp8 or has_nvfp4:
         assert pool_scale.device == pool.device
-    q = q.contiguous()
     pool_2d = pool.reshape(-1, stored_dim)
     assert pool_2d.stride(-1) == 1
     idx = topk_idxs.contiguous().to(torch.int32)
     broadcast_m = idx.shape[1] == 1 and m > 1
     assert broadcast_m or idx.shape[1] == m, (idx.shape, m)
-    o = q.new_empty(b, m, h, d_v)
+    if out is None:
+        o = q.new_empty(b, m, h, d_v)
+    else:
+        o = out
+        assert o.shape == (b, m, h, d_v), (o.shape, (b, m, h, d_v))
+        assert o.dtype == q.dtype and o.device == q.device, (o.dtype, o.device, q.dtype, q.device)
+    # The kernels address q and o with int32 offsets.
+    reach = max(sum((n - 1) * st for n, st in zip(t.shape, t.stride())) for t in (q, o))
+    assert reach < 2**31, f"q/o span {reach} elements, past int32 addressing; lower --max-prefill-length"
 
     has_counts = counts is not None
     if has_counts:

@@ -1,6 +1,6 @@
 """Qwen3.5 / 3.6 / 3.8 dense and MoE from a llama.cpp ``qwen35`` / ``qwen35moe`` GGUF: config from the GGUF metadata, tensor names, and the converter's transforms undone.
 
-The llama.cpp converter (conversion/qwen.py) stores ``A_log`` as ``-exp(A_log)``, the squeezed conv kernels, and the GDN value heads in tiled order (k-head minor). Its zero-centred norms are stored as ``w + 1``, which is what this family loads. Row reorders are undone on the packed bytes; ``ssm_out`` keeps its tiled columns and the GDN layer permutes its input instead.
+The llama.cpp converter (conversion/qwen.py) stores ``A_log`` as ``-exp(A_log)``, the squeezed conv kernels, and the GDN value heads in tiled order (k-head minor). Its zero-centred norms are stored as ``w + 1``; the loader subtracts the 1 in fp32 and the norms add it back in fp32 at runtime. Row reorders are undone on the packed bytes; ``ssm_out`` keeps its tiled columns and the GDN layer permutes its input instead.
 """
 
 from __future__ import annotations
@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING, Iterator
 import torch
 
 from freetoken.layers.quantization.ggml_types import is_quantized
+from freetoken.models.gguf.mmproj import find_mmproj, log_mmproj
 from freetoken.models.gguf.reader import GgufTensorInfo, gguf_tensor_index
-from freetoken.models.gguf.tensors import float_tensor, fused, matrix, untile
+from freetoken.models.gguf.tensors import check_scales, float_tensor, fused, matrix, untile
+from freetoken.models.qwen3_vl.gguf import gguf_mm_config, iter_mmproj_weights
 
 from .config import parse_config
 
@@ -67,9 +69,7 @@ def to_gguf(name: str, tensors: dict[str, int]) -> tuple[str, ...]:
 def _check_supported(shim: GgufConfigShim) -> None:
     if any(k.startswith("prism.hadamard.") for k in shim.metadata):
         raise NotImplementedError(f"{shim.model_path}: Hadamard-rotated (prism) GGUF weights are not supported")
-    scaled = sorted(n for n in gguf_tensor_index(shim.model_path) if n.endswith((".scale", ".input_scale")))
-    if scaled:
-        raise NotImplementedError(f"{shim.model_path}: GGUF tensors with per-tensor scales are not supported (e.g. {scaled[0]})")
+    check_scales(shim.model_path)
 
 
 def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
@@ -125,7 +125,8 @@ def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
         text_config=text,
         model_type="qwen3_5_moe" if moe else "qwen3_5",
         architectures=list(shim.architectures),
-        vision_config=None,
+        vision_config=getattr(shim, "vision_config", None),
+        image_token_id=getattr(shim, "image_token_id", None),
     )
     config = parse_config(hf_like)
     return replace(config, expert_quant="gguf") if moe else config
@@ -149,6 +150,8 @@ def iter_gguf_weights(
     from freetoken.utils import cached_load_hf_config
 
     config = parse_gguf_config(cached_load_hf_config(model_path))
+    vision = include_vision and config.is_multimodal
+    log_mmproj(model_path, vision)
     index = gguf_tensor_index(model_path)
     g = config.linear_attention_group()
     hidden = config.hidden_size
@@ -156,15 +159,18 @@ def iter_gguf_weights(
     def t(name: str) -> GgufTensorInfo:
         return index[name if name in index else f"{name}.weight"]
 
+    def norm(name: str) -> torch.Tensor:
+        return float_tensor(t(name)).float() - 1.0
+
     yield from fused("model.embed_tokens", [t("token_embd")], [matrix(t("token_embd"))], hidden)
     if not config.tie_word_embeddings:
         yield from fused("lm_head", [t("output")], [matrix(t("output"))], hidden)
-    yield "model.norm.weight", float_tensor(t("output_norm"))
+    yield "model.norm.weight", norm("output_norm")
 
     for layer in range(config.num_layers):
         blk, pre = f"blk.{layer}", f"model.layers.{layer}"
-        yield f"{pre}.input_layernorm.weight", float_tensor(t(f"{blk}.attn_norm"))
-        yield f"{pre}.post_attention_layernorm.weight", float_tensor(t(f"{blk}.post_attention_norm"))
+        yield f"{pre}.input_layernorm.weight", norm(f"{blk}.attn_norm")
+        yield f"{pre}.post_attention_layernorm.weight", norm(f"{blk}.post_attention_norm")
         if config.is_linear_layer(layer):
             la = f"{pre}.linear_attn"
             nk, dk = g.num_key_heads, g.key_head_dim
@@ -193,8 +199,8 @@ def iter_gguf_weights(
             yield from fused(f"{sa}.qkv_proj", parts, [matrix(p) for p in parts], hidden)
             out = t(f"{blk}.attn_output")
             yield from fused(f"{sa}.o_proj", [out], [matrix(out)], int(out.ne[0]))
-            yield f"{sa}.q_norm.weight", float_tensor(t(f"{blk}.attn_q_norm"))
-            yield f"{sa}.k_norm.weight", float_tensor(t(f"{blk}.attn_k_norm"))
+            yield f"{sa}.q_norm.weight", norm(f"{blk}.attn_q_norm")
+            yield f"{sa}.k_norm.weight", norm(f"{blk}.attn_k_norm")
 
         mlp = f"{pre}.mlp"
         if config.moe_enabled:
@@ -208,5 +214,8 @@ def iter_gguf_weights(
             yield from fused(f"{mlp}.gate_up_proj", [fg, fu], [matrix(fg), matrix(fu)], hidden)
             yield from fused(f"{mlp}.down_proj", [fd], [matrix(fd)], config.intermediate_size)
 
+    if vision:
+        yield from iter_mmproj_weights(find_mmproj(model_path))
 
-__all__ = ["iter_gguf_weights", "parse_gguf_config", "to_gguf"]
+
+__all__ = ["gguf_mm_config", "iter_gguf_weights", "parse_gguf_config", "to_gguf"]

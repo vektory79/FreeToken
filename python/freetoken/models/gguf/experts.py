@@ -1,7 +1,8 @@
 """Routed-expert banks straight from a GGUF's ``blk.N.ffn_{gate,up,down}_exps`` tensors, in their packed ggml rows: pinned host banks for the offload cache, or device banks for resident experts.
 
 Each layer keeps its own ggml types, so each layer gets its own bank shapes: ``gate_up`` [E, 2I, row_bytes] (expert e's gate rows, then its up rows) and ``down`` [E, H, row_bytes]; float experts keep their dtype ([E, 2I, H] and [E, H, I]).
-A GGUF that stores ``ffn_gate_up_exps`` (gemma4) already holds the gate_up rows in that order."""
+A GGUF that stores ``ffn_gate_up_exps`` (gemma4) already holds the gate_up rows in that order.
+When NVFP4 experts carry per-expert ``.scale`` tensors, every layer also gets ``global`` [E, 4] fp32: the (gate, up, down, 1) weight_scale_2, 1 where a tensor has none."""
 
 from __future__ import annotations
 
@@ -11,10 +12,11 @@ import os
 import torch
 
 from freetoken.layers.quantization import QuantKind
-from freetoken.layers.quantization.ggml_types import float_dtype, mmq_tail_bytes, pad_rows, type_name
+from freetoken.layers.quantization.ggml_types import float_dtype, has_expert_scales, mmq_tail_bytes, pad_rows, type_name
 from freetoken.utils import init_logger
 
 from .reader import GgufTensorInfo, gguf_tensor_index
+from .tensors import weight_scale
 
 logger = init_logger(__name__)
 
@@ -38,25 +40,26 @@ def _drop_page_cache(info: GgufTensorInfo) -> None:
         pass
 
 
-def _device_bank(shape: tuple[int, ...], k: int, ggml_type: int, device: torch.device) -> torch.Tensor:
-    """An [E, rows, row] device bank; zero padding follows the last row when ggml's MMQ tiles read past it."""
+def _device_bank(shape: tuple[int, ...], ggml_type: int, k: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    """An [E, rows, row] device bank; a zero row follows the last one when ggml's MMQ tiles read past it."""
     experts, rows, row = shape
-    dtype = float_dtype(ggml_type)
-    flat = torch.zeros(experts * rows + pad_rows(ggml_type, k), row, dtype=dtype if dtype is not None else torch.uint8, device=device)
+    flat = torch.empty(experts * rows + pad_rows(ggml_type, k), row, dtype=dtype, device=device)
+    flat[experts * rows :].zero_()
     return flat[: experts * rows].view(shape)
 
 
-def _require_bank(index: dict[str, GgufTensorInfo], name: str, model_path: str) -> GgufTensorInfo:
-    # a bare KeyError names the tensor only; the file path + the re-convert hint
-    # make a truncated / foreign-converter GGUF diagnosable from the log alone
-    info = index.get(name)
-    if info is None:
-        raise ValueError(
-            f"GGUF {model_path}: expert bank {name} is missing; the file is truncated "
-            "or its converter does not pack expert banks - check the file's integrity "
-            "or re-convert with `ft checkpoint --model <gguf> --out <ftw_dir>`"
-        )
-    return info
+def _expert_scales(gate_up: list[GgufTensorInfo], down: GgufTensorInfo, experts: int) -> torch.Tensor:
+    """[E, 4] fp32 (gate, up, down, 1) weight_scale_2 of one layer's experts."""
+    gate, up = gate_up if len(gate_up) == 2 else (gate_up[0], gate_up[0])
+    out = torch.ones(experts, 4, dtype=torch.float32)
+    for col, info in enumerate((gate, up, down)):
+        s = weight_scale(info)
+        if s is None:
+            continue
+        if s.numel() != experts:
+            raise NotImplementedError(f"{info.name}: {s.numel()} scales for {experts} experts")
+        out[:, col] = s
+    return out
 
 
 def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int = 0, dummy: bool = False, device: torch.device | None = None, layer_sink=None):
@@ -83,37 +86,47 @@ def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int
                         f"glm5next GGUF: routed-expert bank {name} on dense layer "
                         f"{layer} (< first_layer {first_layer})"
                     )
-    sources: dict[str, list[torch.Tensor]] = {"gate_up": [], "down": []}
-    tails: dict[str, list[int]] = {"gate_up": [], "down": []}
+    scaled = has_expert_scales({name: info.ggml_type for name, info in index.items()})
+    roles = ("gate_up", "down", "global") if scaled else ("gate_up", "down")
+    sources: dict[str, list[torch.Tensor]] = {role: [] for role in roles}
+    tails: dict[str, list[int]] = {role: [] for role in roles}
     tags = []
     total = 0
     with PinPipeline() if device is None else contextlib.nullcontext() as pins:
         for layer in range(num_layers):
             blk = f"blk.{first_layer + layer}"
-            down = _require_bank(index, f"{blk}.ffn_down_exps.weight", model_path)
+            down = index[f"{blk}.ffn_down_exps.weight"]
             if f"{blk}.ffn_gate_up_exps.weight" in index:
                 gate = index[f"{blk}.ffn_gate_up_exps.weight"]
                 parts = [gate]
             else:
-                gate = _require_bank(index, f"{blk}.ffn_gate_exps.weight", model_path)
-                up = _require_bank(index, f"{blk}.ffn_up_exps.weight", model_path)
+                gate, up = index[f"{blk}.ffn_gate_exps.weight"], index[f"{blk}.ffn_up_exps.weight"]
                 if gate.ggml_type != up.ggml_type:
                     raise NotImplementedError(f"{blk}: gate and up experts have different ggml types")
                 parts = [gate, up]
             tags.append(("ggml", type_name(gate.ggml_type), type_name(down.ggml_type)))
             tails["gate_up"].append(mmq_tail_bytes(gate.ggml_type, gate.ne[0]))
             tails["down"].append(mmq_tail_bytes(down.ggml_type, down.ne[0]))
+            if scaled:
+                tails["global"].append(0)
             rows = [_expert_rows(info) for info in parts]
             d = _expert_rows(down)
             gate_up_shape = (rows[0].shape[0], sum(r.shape[1] for r in rows), rows[0].shape[2])
+            experts = rows[0].shape[0]
             if device is None:
                 host = {"gate_up": HostBank(gate_up_shape, rows[0].dtype), "down": HostBank(tuple(d.shape), d.dtype)}
+                if scaled:
+                    host["global"] = HostBank((experts, 4), torch.float32)
                 banks = {role: bank.tensor for role, bank in host.items()}
             else:
                 banks = {
-                    "gate_up": _device_bank(gate_up_shape, gate.ne[0], gate.ggml_type, device),
-                    "down": _device_bank(tuple(d.shape), down.ne[0], down.ggml_type, device),
+                    "gate_up": _device_bank(gate_up_shape, gate.ggml_type, gate.ne[0], rows[0].dtype, device),
+                    "down": _device_bank(tuple(d.shape), down.ggml_type, down.ne[0], d.dtype, device),
                 }
+                if scaled:
+                    banks["global"] = torch.empty(experts, 4, dtype=torch.float32, device=device)
+            if scaled:
+                banks["global"].copy_(_expert_scales(parts, down, experts))
             if dummy:
                 banks["gate_up"].zero_()
                 banks["down"].zero_()
@@ -138,7 +151,7 @@ def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int
                 sources[role].append(bank)
             total += sum(t.numel() * t.element_size() for t in banks.values())
     logger.info_rank0(f"GGUF expert banks: {num_layers} layers, {total / 2**30:.1f} GiB {'on ' + str(device) if device is not None else 'in host RAM'}")
-    return ExpertBanks("gguf", sources, kind=QuantKind.GGUF, kernel="ggml", layout=None, layer_tags=tags, row_tail_bytes=tails, streamed=layer_sink is not None)
+    return ExpertBanks("gguf_scaled" if scaled else "gguf", sources, kind=QuantKind.GGUF, kernel="ggml", layout=None, layer_tags=tags, row_tail_bytes=tails, streamed=layer_sink is not None)
 
 
 __all__ = ["load_gguf_expert_banks"]

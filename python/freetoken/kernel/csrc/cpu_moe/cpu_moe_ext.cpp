@@ -28,17 +28,10 @@
 #include <freetoken/hip_compat.h>
 #include <torch/extension.h>
 
-#if defined(__linux__)
-#include <pthread.h>
-#include <sched.h>
-#define CPU_MOE_HAS_AFFINITY 1
-#else
-#define CPU_MOE_HAS_AFFINITY 0
-#endif
-
 #include "format.h"
 #include "gpu_sync.h"
 #include "gpu_sync_io.h"
+#include "threads.h"
 
 namespace freetoken::cpu_moe {
 
@@ -48,28 +41,11 @@ std::unique_ptr<MoeFormat> make_mxfp4_format(const MoeParams& p, const FormatArg
 std::unique_ptr<MoeFormat> make_ds_fp4_format(const MoeParams& p, const FormatArgs& a);
 std::unique_ptr<MoeFormat> make_fp8_block_format(const MoeParams& p, const FormatArgs& a);
 std::unique_ptr<MoeFormat> make_gguf_format(const MoeParams& p, const FormatArgs& a);
+std::unique_ptr<MoeFormat> make_gguf_scaled_format(const MoeParams& p, const FormatArgs& a);
 void set_ggml_cpu(uintptr_t addr);
+void bind_locked_fetch(pybind11::module_& m);
 
 namespace {
-
-inline void pin_this_thread(int cpu) {
-#if CPU_MOE_HAS_AFFINITY
-  cpu_set_t set;
-  CPU_ZERO(&set);
-  CPU_SET(cpu, &set);
-  pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
-#else
-  (void)cpu;
-#endif
-}
-
-inline void cpu_relax() {
-#if CPU_MOE_X86
-  _mm_pause();
-#elif defined(__aarch64__)
-  asm volatile("yield" ::: "memory");
-#endif
-}
 
 constexpr int kMaxTopK = 64;
 
@@ -97,6 +73,7 @@ inline MoeTask from_word(uint64_t w) {
 const std::pair<const char*, std::unique_ptr<MoeFormat> (*)(const MoeParams&, const FormatArgs&)> kFormats[] = {
     {"bf16", make_bf16_format},     {"nvfp4", make_nvfp4_format},         {"mxfp4_triton", make_mxfp4_format},
     {"ds_fp4", make_ds_fp4_format}, {"fp8_block", make_fp8_block_format}, {"gguf", make_gguf_format},
+    {"gguf_scaled", make_gguf_scaled_format},
 };
 
 std::unique_ptr<MoeFormat> make_format(const std::string& name, const MoeParams& p, const FormatArgs& a) {
@@ -564,6 +541,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            [](CpuMoeExecutor& e, bool v) { e.spin_wait.store(v, std::memory_order_relaxed); },
            py::arg("enabled"))
       .def("get_spin_wait", [](const CpuMoeExecutor& e) { return e.spin_wait.load(); });
+  freetoken::cpu_moe::bind_locked_fetch(m);
   m.def("memops_probe", &GpuSync::probe, py::arg("stream"));
   m.def("kernel_io_probe", &freetoken::cpu_moe::KernelIo::probe, py::arg("stream"));
   m.def("host_func_capture_safe", &GpuSync::host_func_capture_safe);
