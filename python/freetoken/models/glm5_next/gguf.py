@@ -508,12 +508,47 @@ def _float(info: GgufTensorInfo) -> torch.Tensor:
     return torch.from_numpy(flat).view(*reversed(ne))
 
 
-def _kv_b(kb: GgufTensorInfo, vb: GgufTensorInfo, num_heads: int, kv_lora: int) -> torch.Tensor:
+def _cuda_target(device: torch.device | str | None) -> torch.device | None:
+    """The CUDA device to decode quantized rows on, or None for the numpy path."""
+    if device is None or torch.device(device).type != "cuda":
+        return None
+    return torch.device(device)
+
+
+def _cast(info: GgufTensorInfo, dtype: torch.dtype, device: torch.device | str | None = None) -> torch.Tensor:
+    """Dense ``dtype`` tensor in torch order from a (possibly quantized) tensor.
+
+    The GPU path decodes with the vendored ggml kernel on ``device`` (the packed rows
+    move to CUDA as packed bytes - the kernel takes device tensors, a host dequant
+    would not even feed it), the CPU path with the vendored gguf-py numpy quants; the
+    two never mix within one tensor (their fp16 scale chains round differently in
+    edge cases). The legs deliberately diverge for a degenerate [n, 1] tensor: the
+    unquantized leg keeps _float's collapse to 1-D (n,), the quantized leg keeps the
+    2-D ggml matrix form (1, n); consumers shape-check at load_state_dict."""
+    if not is_quantized(info.ggml_type):
+        return _float(info).to(dtype)
+    ne = tuple(int(d) for d in info.ne)
+    # keep the ggml 2-D matrix form; a writer's degenerate trailing unit dim (some
+    # files ship the conv kernels 4-D) squeezes away
+    while len(ne) > 2 and ne[-1] == 1:
+        ne = ne[:-1]
+    k = ne[0]
+    target = _cuda_target(device)
+    if target is not None:
+        from freetoken.kernel import ggml as ggml_kernel
+
+        flat = ggml_kernel.dequantize(matrix(info).to(target), info.ggml_type, k, dtype)
+    else:
+        flat = _float(info).to(dtype)
+    return flat.reshape(tuple(reversed(ne)))
+
+
+def _kv_b(kb: GgufTensorInfo, vb: GgufTensorInfo, num_heads: int, kv_lora: int, device: torch.device | None = None) -> torch.Tensor:
     """Per-head k [kv_lora, nope] (stored transposed) + v [v, kv_lora] -> the module's fused dense [heads * (nope + v), kv_lora]."""
-    k = _float(kb).transpose(1, 2)  # [heads, nope, kv_lora]
-    fused_w = torch.cat([k, _float(vb)], dim=1)
+    k = _cast(kb, torch.bfloat16, device).transpose(1, 2)  # [heads, nope, kv_lora]
+    fused_w = torch.cat([k, _cast(vb, torch.bfloat16, device)], dim=1)
     assert fused_w.shape[0] == num_heads, (fused_w.shape, num_heads)
-    return fused_w.reshape(num_heads * fused_w.shape[1], kv_lora).to(torch.bfloat16).contiguous()
+    return fused_w.reshape(num_heads * fused_w.shape[1], kv_lora).contiguous()
 
 
 def iter_gguf_weights(
@@ -560,7 +595,7 @@ def iter_gguf_weights(
         return info
 
     def bf16(name: str) -> torch.Tensor:
-        return _float(t(name)).to(torch.bfloat16)
+        return _cast(t(name), torch.bfloat16, device)
 
     emb = t("token_embd")
     if emb.ggml_type != q8_0:
@@ -585,7 +620,7 @@ def iter_gguf_weights(
         # mHC mixing tensors, fp32 on every layer
         for sub in ("attn", "ffn"):
             for part in ("fn", "base", "scale"):
-                yield f"{pre}.hc_{sub}_{part}", _float(t(f"{blk}.hc_{sub}_{part}"))
+                yield f"{pre}.hc_{sub}_{part}", _cast(t(f"{blk}.hc_{sub}_{part}"), torch.float32, device)
 
         if args.is_kda_layer(layer):
             sa = f"{pre}.self_attn"
@@ -593,13 +628,13 @@ def iter_gguf_weights(
             group = [packed(f"{blk}.{n}") for n in ("attn_q", "attn_k", "attn_v", "ssm_beta", "ssm_f_a", "ssm_g_a")]
             yield from fused(f"{sa}.in_proj", group, [matrix(i) for i in group], hidden)
             # the GGUF conv kernels already carry the [channels, 1, kernel] singleton dim
-            conv = torch.cat([_float(t(f"{blk}.ssm_conv1d_{q}")) for q in ("q", "k", "v")], dim=0)
-            yield f"{sa}.conv1d.weight", conv.to(torch.bfloat16)
+            conv = torch.cat([_cast(t(f"{blk}.ssm_conv1d_{q}"), torch.bfloat16, device) for q in ("q", "k", "v")], dim=0)
+            yield f"{sa}.conv1d.weight", conv
             for proj, src, k in (("f_b_proj", "ssm_f_b", d), ("g_b_proj", "ssm_g_b", d), ("o_proj", "attn_output", p)):
                 info = packed(f"{blk}.{src}")
                 yield from fused(f"{sa}.{proj}", [info], [matrix(info)], k)
             # the converter stores A_log pre-transformed as -exp(A_log); the kernels want the raw log
-            ssm_a = _float(t(f"{blk}.ssm_a"))
+            ssm_a = _cast(t(f"{blk}.ssm_a"), torch.float32, device)
             if not torch.isfinite(ssm_a).all():
                 # NaN >= 0 is False, so a NaN row would slip the sign check and log()
                 # would silently poison the recurrent gate
@@ -610,7 +645,7 @@ def iter_gguf_weights(
                     f"{blk}.ssm_a: ssm_a holds -exp(A_log) but {bad} entries are >= 0; cannot derive A_log"
                 )
             yield f"{sa}.A_log", torch.log(-ssm_a)
-            yield f"{sa}.dt_bias", _float(t(f"{blk}.ssm_dt.bias"))
+            yield f"{sa}.dt_bias", _cast(t(f"{blk}.ssm_dt.bias"), torch.float32, device)
             yield f"{sa}.o_norm.weight", bf16(f"{blk}.ssm_norm")
         else:
             sa = f"{pre}.self_attn"
@@ -623,7 +658,7 @@ def iter_gguf_weights(
                 info = packed(f"{blk}.{src}")
                 yield from fused(f"{sa}.{proj}", [info], [matrix(info)], k)
             yield f"{sa}.kv_b_proj.weight", _kv_b(
-                t(f"{blk}.attn_k_b"), t(f"{blk}.attn_v_b"), args.num_heads, args.kv_lora_rank
+                t(f"{blk}.attn_k_b"), t(f"{blk}.attn_v_b"), args.num_heads, args.kv_lora_rank, device
             )
             yield f"{sa}.q_a_layernorm.weight", bf16(f"{blk}.attn_q_a_norm")
             yield f"{sa}.kv_a_layernorm.weight", bf16(f"{blk}.attn_kv_a_norm")
@@ -631,12 +666,12 @@ def iter_gguf_weights(
             # (glm_moe_dsa's indexer reasoning), dequantized at load when the file quantized them
             wqb = packed(f"{blk}.indexer.attn_q_b")
             yield from fused(f"{sa}.indexer.wq_b", [wqb], [matrix(wqb)], args.q_lora_rank)
-            yield f"{sa}.indexer.wk.weight", _float(t(f"{blk}.indexer.attn_k")).to(torch.bfloat16)
-            yield f"{sa}.indexer.weights_proj.weight", _float(t(f"{blk}.indexer.proj")).to(torch.bfloat16)
+            yield f"{sa}.indexer.wk.weight", _cast(t(f"{blk}.indexer.attn_k"), torch.bfloat16, device)
+            yield f"{sa}.indexer.weights_proj.weight", _cast(t(f"{blk}.indexer.proj"), torch.bfloat16, device)
             yield f"{sa}.indexer.k_norm.weight", bf16(f"{blk}.indexer.k_norm")
             yield f"{sa}.indexer.k_norm.bias", bf16(f"{blk}.indexer.k_norm.bias")
             yield f"{sa}.indexer.index_kpool_compress_gate", bf16(f"{blk}.indexer_compressor_gate")
-            yield f"{sa}.indexer.index_kpool_compress_ape", _float(t(f"{blk}.indexer_compressor_ape"))
+            yield f"{sa}.indexer.index_kpool_compress_ape", _cast(t(f"{blk}.indexer_compressor_ape"), torch.float32, device)
 
         mlp = f"{pre}.mlp"
         if layer < config.first_k_dense_replace:
@@ -649,7 +684,7 @@ def iter_gguf_weights(
                 yield from fused(f"{mlp}.{proj}", [info], [matrix(info)], k)
         else:
             yield f"{mlp}.gate.weight", bf16(f"{blk}.ffn_gate_inp")
-            yield f"{mlp}.e_score_correction_bias", _float(t(f"{blk}.exp_probs_b.bias"))
+            yield f"{mlp}.e_score_correction_bias", _cast(t(f"{blk}.exp_probs_b.bias"), torch.float32, device)
             shared_i = config.moe_intermediate_size * max(1, config.n_shared_experts)
             for proj, src, k in (
                 ("gate_proj", "ffn_gate_shexp", hidden),
@@ -735,12 +770,6 @@ _MOE_MAP = {
     "ffn_up_shexp.weight": ("mlp.shared_experts.up_proj.weight", "qw"),
     "ffn_down_shexp.weight": ("mlp.shared_experts.down_proj.weight", "qw"),
 }
-
-
-def _cuda_target(device: torch.device | str | None) -> torch.device | None:
-    """The CUDA device to decode quantized rows on, or None for the numpy path."""
-    if device is None or torch.device(device).type != "cuda":
-        return None
 
 
 def ftw_tensor_types(model_path: str) -> dict[str, int]:
