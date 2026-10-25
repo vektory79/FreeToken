@@ -1,7 +1,7 @@
 """Numerical verification: every mmproj tower tensor vs the NVFP4 reference (CPU-only).
 
-Reads the operator's mmproj GGUF through the phase-2 vision reader
-(freetoken.models.glm5_next.gguf.iter_gguf_vision_weights) and the bf16 NVFP4 FTW
+Reads the operator's mmproj GGUF through the main tower reader
+(freetoken.models.glm5_next.gguf.iter_mmproj_weights) and the bf16 NVFP4 FTW
 reference (RedHatAI/GLM-5.3-Flash-NVFP4-FTW) through iter_ftw_weights, then emits
 a per-tensor max_abs_diff table as markdown. Both sides are compared in fp32;
 the source ggml dtype (F32 / BF16) is carried per row so systematic casts are
@@ -32,8 +32,9 @@ def main() -> None:
     args = parser.parse_args()
 
     from freetoken.checkpoint.ftw import iter_ftw_weights
+    from freetoken.models.gguf.mmproj import Mmproj
     from freetoken.models.gguf.reader import gguf_tensor_index, load_gguf_metadata
-    from freetoken.models.glm5_next.gguf import _VISION_BLOCK_MAP, _VISION_MM_MAP, iter_gguf_vision_weights
+    from freetoken.models.glm5_next.gguf import _BLOCK, _PATCH, _TOP, iter_mmproj_weights
 
     source_dtype = {
         t.name: ("F32" if t.ggml_type == 0 else "BF16" if t.ggml_type == 30 else str(t.ggml_type))
@@ -43,13 +44,13 @@ def main() -> None:
     # is param-level (visual.*), so the source dtype must be looked up through it
     depth = int(load_gguf_metadata(args.mmproj)["clip.vision.block_count"])
     src_of: dict[str, list[str]] = {}
-    for suffix, rel in _VISION_BLOCK_MAP.items():
+    for suffix, rel in _BLOCK.items():
         for layer in range(depth):
             src_of.setdefault(f"visual.blocks.{layer}.{rel}", []).append(f"v.blk.{layer}.{suffix}")
-    for mmproj_name, visual in _VISION_MM_MAP.items():
-        src_of.setdefault(visual, []).append(mmproj_name)
+    for mmproj_name, visual in _TOP.items():
+        src_of.setdefault(f"visual.{visual}", []).append(mmproj_name)
     # the two patch-embedding slices stack into one param: carry both source dtypes
-    src_of["visual.patch_embed.proj.weight"] = ["v.patch_embd.weight", "v.patch_embd.weight.1"]
+    src_of["visual.patch_embed.proj.weight"] = list(_PATCH)
     src_of["visual.patch_embed.proj.bias"] = ["v.patch_embd.bias"]
     src_of["visual.post_layernorm.weight"] = ["v.post_ln.weight"]
 
@@ -57,7 +58,7 @@ def main() -> None:
         dtypes = sorted({source_dtype[s] for s in src_of.get(name, []) if s in source_dtype})
         return "/".join(dtypes) if dtypes else "-"
 
-    got = dict(iter_gguf_vision_weights(args.mmproj))
+    got = dict(iter_mmproj_weights(Mmproj(args.mmproj, "verify", "glm5v", "BF16")))
     ref = {
         name: tensor.clone()
         for name, tensor in iter_ftw_weights(

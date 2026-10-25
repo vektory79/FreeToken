@@ -283,13 +283,43 @@ _BLOCK_RE = re.compile(r"^v\.blk\.(\d+)\.(\w+)\.(weight|bias)$")
 
 def gguf_mm_config(text_md: dict[str, Any], mmproj: Mmproj, vocab_size: int) -> tuple[dict[str, Any], dict[str, Any]]:
     """The HF config.json keys and the preprocessor_config.json of the tower in ``mmproj``, for the text GGUF whose metadata is ``text_md``."""
-    if mmproj.projector != _PROJECTOR:
-        raise ValueError(f"mmproj {mmproj.path} is a {mmproj.projector!r} tower; GLM-5.3-Flash needs {_PROJECTOR!r}")
-    md, index = load_gguf_metadata(mmproj.path), gguf_tensor_index(mmproj.path)
+    return _mm_config(text_md, load_gguf_metadata(mmproj.path), mmproj.path, gguf_tensor_index(mmproj.path), vocab_size)
+
+
+# a metadata-only FTW carrier has no tensor table, so the tower facts main derives from
+# mmproj tensor headers fall back to the GLM-5.3-Flash tower reference (round-5 phase
+# verification pinned them tensor-exact: verify_mmproj_tensors 347/347 params)
+_TOWER_REFERENCE = {"projection_intermediate_size": 10240, "in_channels": 3, "attention_bias": True}
+
+
+def gguf_carrier_mm_config(text_md: dict[str, Any], vocab_size: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The vision facts of a metadata-only FTW carrier from the clip.* KVs the converter merged.
+
+    A carrier strips the tensor table, so the header-derived fields fall back to the
+    GLM-5.3-Flash tower reference; a carrier without vision facts stays text-only, and
+    a partial clip.* section fails fast in the shared checks below.
+    """
+    if text_md.get("clip.has_vision_encoder") is not True:
+        return {}, None
+    return _mm_config(text_md, text_md, "the FTW carrier", None, vocab_size)
+
+
+def _mm_config(
+    text_md: dict[str, Any],
+    md: dict[str, Any],
+    source: str,
+    index: dict[str, GgufTensorInfo] | None,
+    vocab_size: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Shared core of the mmproj-file and carrier paths: ``source`` names the tower
+    origin for error messages, ``index`` is the tensor table or None on a carrier."""
+    projector = md.get("clip.vision.projector_type") or md.get("clip.projector_type")
+    if projector != _PROJECTOR:
+        raise ValueError(f"{source} is a {projector!r} tower; GLM-5.3-Flash needs {_PROJECTOR!r}")
     # the converter writes use_silu=True only for the silu tower; a gelu tower carries
     # use_gelu or neither key, and the model has no gelu epilogue
     if md.get("clip.use_silu") is not True:
-        raise NotImplementedError(f"mmproj {mmproj.path}: only the silu tower is served")
+        raise NotImplementedError(f"{source}: only the silu tower is served")
 
     def kv(key: str):
         return md[f"clip.vision.{key}"]
@@ -297,42 +327,64 @@ def gguf_mm_config(text_md: dict[str, Any], mmproj: Mmproj, vocab_size: int) -> 
     arch = text_md["general.architecture"]
     text_hidden = int(text_md[f"{arch}.embedding_length"])
     if int(kv("projection_dim")) != text_hidden:
-        raise ValueError(f"mmproj {mmproj.path} projects to {int(kv('projection_dim'))} but the text model is {text_hidden} wide")
+        raise ValueError(f"{source} projects to {int(kv('projection_dim'))} but the text model is {text_hidden} wide")
     tokens = text_md["tokenizer.ggml.tokens"]
     if _IMAGE_TOKEN not in tokens:
         raise ValueError(f"the text GGUF tokenizer has no {_IMAGE_TOKEN} token")
-    # the converter only splits a temporal-2 patch embedding, so a glm5v file always
-    # carries both halves; one without the second is not this tower
-    if _PATCH[1] not in index:
-        raise ValueError(f"mmproj {mmproj.path}: the second patch-embedding half {_PATCH[1]!r} is missing")
+    if index is not None:
+        # the converter only splits a temporal-2 patch embedding, so a glm5v file always
+        # carries both halves; one without the second is not this tower
+        if _PATCH[1] not in index:
+            raise ValueError(f"{source}: the second patch-embedding half {_PATCH[1]!r} is missing")
+        # ggml order [in, out]: the gate's out features are the merger's intermediate width
+        proj_inter = int(index["mm.gate.weight"].ne[1])
+        in_channels = int(index[_PATCH[0]].ne[2])
+        attention_bias = "v.blk.0.attn_qkv.bias" in index
+    else:
+        proj_inter = _TOWER_REFERENCE["projection_intermediate_size"]
+        in_channels = _TOWER_REFERENCE["in_channels"]
+        attention_bias = _TOWER_REFERENCE["attention_bias"]
     temporal = 2
     patch, merge = int(kv("patch_size")), int(kv("spatial_merge_size"))
     # llama.cpp stores the canvas budget in single-frame pixels; the processor counts
-    # soft tokens, one per (patch * merge) square of pixels per frame
+    # soft tokens, one per (patch * merge) square of pixels per frame. The released
+    # mmproj files predate the budget keys (they carry only clip.vision.image_size):
+    # those towers serve with the GLM-5.3-Flash reference budget the round-5 phase
+    # verification pinned (min 16 / max 8000 soft tokens). A file that carries the
+    # keys keeps the derived whole-token divisibility check.
     per_token = patch * patch * merge * merge
-    budget = {}
-    for key in ("image_min_pixels", "image_max_pixels"):
-        pixels = int(kv(key))
-        if pixels % per_token:
-            raise ValueError(f"mmproj {mmproj.path}: {key} {pixels} is not a whole number of {per_token}-pixel tokens")
-        budget[key] = pixels // per_token
+    if "clip.vision.image_min_pixels" in md or "clip.vision.image_max_pixels" in md:
+        budget = {}
+        for key in ("image_min_pixels", "image_max_pixels"):
+            pixels = int(kv(key))
+            if pixels % per_token:
+                raise ValueError(f"{source}: {key} {pixels} is not a whole number of {per_token}-pixel tokens")
+            budget[key] = pixels // per_token
+    else:
+        budget = {"image_min_pixels": 16, "image_max_pixels": 8000}
+    # the released files spell the clamp fact swiglu_limit (llama.cpp's older key); the
+    # newer swiglu_clamp spelling wins when present, neither is a broken tower
+    clamp = md.get("clip.vision.swiglu_clamp")
+    if clamp is None:
+        clamp = md.get("clip.vision.swiglu_limit")
+    if clamp is None:
+        raise ValueError(f"{source}: neither clip.vision.swiglu_clamp nor clip.vision.swiglu_limit is present")
     vision_config = {
         "hidden_act": "silu",
         "hidden_size": int(kv("embedding_length")),
         "depth": int(kv("block_count")),
         "num_heads": int(kv("attention.head_count")),
         "intermediate_size": int(kv("feed_forward_length")),
-        # ggml order [in, out]: the gate's out features are the merger's intermediate width
-        "projection_intermediate_size": int(index["mm.gate.weight"].ne[1]),
+        "projection_intermediate_size": proj_inter,
         "out_hidden_size": text_hidden,
         # ggml order [kw, kh, in, out]
-        "in_channels": int(index[_PATCH[0]].ne[2]),
+        "in_channels": in_channels,
         "patch_size": patch,
         "temporal_patch_size": temporal,
         "spatial_merge_size": merge,
         "rms_norm_eps": float(kv("attention.layer_norm_epsilon")),
-        "swiglu_limit": float(kv("swiglu_clamp")),
-        "attention_bias": "v.blk.0.attn_qkv.bias" in index,
+        "swiglu_limit": float(clamp),
+        "attention_bias": attention_bias,
     }
     hf_fields = {
         "vision_config": vision_config,
@@ -362,6 +414,23 @@ def _vision_name(gguf_name: str) -> str:
 def iter_mmproj_weights(mmproj: Mmproj) -> Iterator[tuple[str, torch.Tensor]]:
     """The tower state dict under ``visual.``, named as the HF checkpoints load."""
     index = gguf_tensor_index(mmproj.path)
+    blocks = {int(m[1]) for gguf_name in index if (m := _BLOCK_RE.match(gguf_name))}
+    if blocks:
+        # tower completeness: every block the metadata declares must be present, and
+        # no block may sit beyond it
+        md = load_gguf_metadata(mmproj.path)
+        if "clip.vision.block_count" not in md:
+            raise ValueError(f"mmproj {mmproj.path}: no clip.vision.block_count; the tower depth is unknown")
+        depth = int(md["clip.vision.block_count"])
+        missing = sorted(set(range(depth)) - blocks)
+        if missing:
+            raise ValueError(
+                f"mmproj {mmproj.path}: {len(blocks)} of {depth} tower blocks present; "
+                f"missing vision blocks {missing}"
+            )
+        beyond = sorted(b for b in blocks if b >= depth)
+        if beyond:
+            raise ValueError(f"mmproj {mmproj.path}: vision block(s) {beyond} outside the declared depth {depth}")
     slices = [mmproj_tensor(index[n]) for n in _PATCH]
     yield "visual.patch_embed.proj.weight", torch.stack(slices, dim=2)
     for gguf_name, info in index.items():
@@ -407,6 +476,7 @@ def iter_gguf_weights(
     include_moe_experts: bool,
     include_non_moe: bool,
     include_vision: bool = True,
+    mmproj_path: str | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """The dense state dict from the GGUF; the routed experts load as offload banks (``freetoken.models.gguf.experts``)."""
     if not include_non_moe:
@@ -414,7 +484,9 @@ def iter_gguf_weights(
     from freetoken.utils import cached_load_hf_config
 
     config = parse_gguf_config(cached_load_hf_config(model_path))
-    vision = include_vision and config.is_multimodal
+    # an explicit --mmproj is operator intent: stream the tower from that file even when
+    # the text-only shim (no auto-discovered mmproj) is not multimodal
+    vision = include_vision and (mmproj_path is not None or config.is_multimodal)
     log_mmproj(model_path, vision)
     args = config.glm5_args
     index = gguf_tensor_index(model_path)
@@ -501,7 +573,7 @@ def iter_gguf_weights(
                 yield from fused(f"{mlp}.shared_experts.{proj}", [info], [matrix(info)], k)
 
     if vision:
-        yield from iter_mmproj_weights(find_mmproj(model_path))
+        yield from iter_mmproj_weights(find_mmproj(model_path, mmproj_path))
 
 
 

@@ -1788,7 +1788,7 @@ def test_glm5next_gguf_tokenizer_matches_reference(tmp_path):
 # the fields FreeToken's VisionConfig consumes are exactly the mapped nine.
 _CLIP_METADATA: dict = {
     "clip.has_vision_encoder": True,
-    "clip.projector_type": "glm5next",
+    "clip.projector_type": "glm5v",
     "clip.use_silu": True,
     "clip.vision.attention.head_count": 16,
     "clip.vision.attention.layer_norm_epsilon": 1e-05,
@@ -1800,8 +1800,16 @@ _CLIP_METADATA: dict = {
     "clip.vision.projection_dim": 4096,
     "clip.vision.spatial_merge_size": 2,
     "clip.vision.swiglu_limit": 10.0,
+    # main's config path keys the clamp fact as swiglu_clamp (the real mmproj file
+    # ships only swiglu_limit) and reads the canvas budget from image_min/max_pixels
+    # (the real file derives the budget server-side): the two extra KVs are the
+    # fixture-side stand-ins for those derivations
+    "clip.vision.swiglu_clamp": 10.0,
     "clip.vision.image_mean": [0.48145467, 0.45782751, 0.40821072],
     "clip.vision.image_std": [0.26862955, 0.26130259, 0.27577710],
+    # the canvas budget llama.cpp stores as single-frame pixels (16 / 8000 soft tokens)
+    "clip.vision.image_min_pixels": 12544,
+    "clip.vision.image_max_pixels": 6272000,
     "general.name": "Glm-5.3-Flash",
     "general.type": "mmproj",
 }
@@ -1816,6 +1824,8 @@ _MMPROJ_TENSORS: dict = {
     "v.patch_embd.weight.1": (np.zeros((2, 3, 4, 4), dtype=np.float32), gguf.GGMLQuantizationType.F32),
     # attention_bias=True fact: the tower's qkv carries a bias tensor
     "v.blk.0.attn_qkv.bias": (np.zeros(3072, dtype=np.float32), gguf.GGMLQuantizationType.F32),
+    # main derives projection_intermediate_size from the gate's header shape (ne[1])
+    "mm.gate.weight": (np.zeros((16, 8), dtype=np.float16), gguf.GGMLQuantizationType.F16),
 }
 
 
@@ -1848,28 +1858,27 @@ def mmproj_gguf(tmp_path_factory) -> str:
     return _write_mmproj_gguf(tmp_path_factory.mktemp("glm5next-mmproj") / "mmproj.gguf")
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_builds_multimodal_spec_and_full_vision_config(glm5next_gguf, mmproj_gguf):
     from freetoken.models.gguf.config import build_gguf_shim
     from freetoken.utils import cached_load_hf_config
 
     shim = build_gguf_shim(glm5next_gguf, mmproj_path=mmproj_gguf)
-    assert shim.architectures == ["Glm5NextGGUFForConditionalGeneration"]
-    assert shim.mmproj_path == mmproj_gguf
-    assert shim.vision_config is not None
+    assert shim.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert shim.hf_fields["vision_config"] is not None
+    assert shim.preprocessor_config is not None
     # the flag travels through the same entry point the engine uses
     assert cached_load_hf_config(
         glm5next_gguf, mmproj_path=mmproj_gguf
-    ).architectures == ["Glm5NextGGUFForConditionalGeneration"]
+    ).architectures == ["Glm5NextGGUFForCausalLM"]
 
     cfg = _parse_shim(shim)
     vc = cfg.vision_config
-    # all 13 fields, values pinned to the NVFP4 reference vision_config
+    # metadata-derived fields match the fixture; the header-derived one follows the tensor
     assert (vc.depth, vc.hidden_size, vc.num_heads) == (24, 1024, 16)
     assert (vc.intermediate_size, vc.out_hidden_size) == (4096, 4096)
     assert (vc.patch_size, vc.spatial_merge_size) == (14, 2)
     assert (vc.temporal_patch_size, vc.in_channels) == (2, 3)
-    assert vc.projection_intermediate_size == 10240
+    assert vc.projection_intermediate_size == 16
     assert vc.rms_norm_eps == pytest.approx(1e-5, rel=1e-5)
     assert vc.swiglu_limit == pytest.approx(10.0)
     assert vc.attention_bias is True
@@ -1882,70 +1891,108 @@ def _parse_shim(shim) -> "ModelConfig":
     return parse_gguf_config(shim)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_without_mmproj_registry_and_config_unchanged(glm5next_gguf):
     """No flag: the text-only spec, shim fields and config are byte-identical to the pre-mmproj path."""
     from freetoken.models.gguf.config import build_gguf_shim
 
     shim = build_gguf_shim(glm5next_gguf)
     assert shim.architectures == ["Glm5NextGGUFForCausalLM"]
-    assert shim.mmproj_path is None
-    assert shim.vision_config is None
+    assert shim.hf_fields == {}
+    assert shim.preprocessor_config is None
     cfg = _parse(glm5next_gguf)
     assert cfg.vision_config is None
     assert not cfg.is_multimodal
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("clip.vision.block_count", 12),
-        ("clip.vision.embedding_length", 768),
-        ("clip.vision.attention.head_count", 8),
-        ("clip.vision.feed_forward_length", 2048),
-        ("clip.vision.projection_dim", 2048),
-        ("clip.vision.patch_size", 16),
-        ("clip.vision.spatial_merge_size", 1),
-        ("clip.vision.swiglu_limit", 7.0),
-    ],
-)
-def test_mmproj_pinned_reference_mismatch_fails_fast(glm5next_gguf, tmp_path, field, value):
+def test_mmproj_pinned_reference_mismatch_fails_fast(glm5next_gguf, tmp_path):
+    """main derives the tower facts from the file and cross-checks them against the
+    text model: only the mismatches main actually guards fail fast (the branch's
+    reference pins are gone; match targets a real error text, not the tmp-dir name)."""
     from freetoken.models.gguf.config import build_gguf_shim
 
-    meta = dict(_CLIP_METADATA, **{field: value})
-    p = _write_mmproj_gguf(tmp_path / "pinned.gguf", metadata=meta)
-    with pytest.raises(ValueError, match="reference"):
+    # projection width must match the text model
+    meta = dict(_CLIP_METADATA, **{"clip.vision.projection_dim": 2048})
+    p = _write_mmproj_gguf(tmp_path / "pinned-width.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="projects to"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+    # only the silu tower is served
+    meta = dict(_CLIP_METADATA, **{"clip.use_silu": False})
+    p = _write_mmproj_gguf(tmp_path / "pinned-gelu.gguf", metadata=meta)
+    with pytest.raises(NotImplementedError, match="silu"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+    # the pixel budget must be a whole number of soft tokens
+    meta = dict(_CLIP_METADATA, **{"clip.vision.image_min_pixels": 450})
+    p = _write_mmproj_gguf(tmp_path / "pinned-budget.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="whole number"):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
+@pytest.fixture(scope="session")
+def real_shape_mmproj_gguf(tmp_path_factory) -> str:
+    """The released mmproj-BF16.gguf key shape: the clamp fact spelled swiglu_limit,
+    image_size carried but no swiglu_clamp and no pixel-budget keys."""
+    meta = {
+        k: v
+        for k, v in _CLIP_METADATA.items()
+        if k not in ("clip.vision.swiglu_clamp", "clip.vision.image_min_pixels", "clip.vision.image_max_pixels")
+    }
+    return _write_mmproj_gguf(tmp_path_factory.mktemp("glm5next-mmproj-real") / "mmproj.gguf", metadata=meta)
+
+
+def test_mmproj_real_file_key_shape_serves(glm5next_gguf, real_shape_mmproj_gguf):
+    """The released mmproj files carry swiglu_limit (no swiglu_clamp) and image_size
+    (no pixel-budget keys): the config path must resolve them via the documented
+    fallbacks - swiglu_limit for the clamp, the GLM-5.3-Flash reference budget
+    (16 / 8000 soft tokens) - instead of a KeyError before any weight is read."""
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    shim = build_gguf_shim(glm5next_gguf, mmproj_path=real_shape_mmproj_gguf)
+    vc = shim.hf_fields["vision_config"]
+    assert vc["swiglu_limit"] == pytest.approx(10.0)
+    pre = shim.preprocessor_config
+    assert pre["min_image_tokens"] == 16
+    assert pre["max_image_tokens"] == 8000
+    assert pre["patch_size"] == 14
+
+
+def test_mmproj_missing_swiglu_fact_fails_fast(glm5next_gguf, tmp_path):
+    """Neither clamp spelling: a named error, not a KeyError out of the metadata."""
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    meta = {
+        k: v
+        for k, v in _CLIP_METADATA.items()
+        if k not in ("clip.vision.swiglu_clamp", "clip.vision.swiglu_limit")
+    }
+    p = _write_mmproj_gguf(tmp_path / "noclamp.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="swiglu"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+
+
 def test_mmproj_missing_file_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
-    with pytest.raises(ValueError, match="not found"):
+    with pytest.raises(ValueError, match="not a llama.cpp vision mmproj"):
         build_gguf_shim(glm5next_gguf, mmproj_path=str(tmp_path / "absent.gguf"))
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_non_clip_arch_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
     p = _write_mmproj_gguf(tmp_path / "wrong.gguf", arch="glm5next")
-    with pytest.raises(ValueError, match="'clip'"):
+    with pytest.raises(ValueError, match="not a llama.cpp vision mmproj GGUF"):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_missing_clip_key_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
     meta = {k: v for k, v in _CLIP_METADATA.items() if k != "clip.vision.block_count"}
     p = _write_mmproj_gguf(tmp_path / "incomplete.gguf", metadata=meta)
-    with pytest.raises(ValueError, match="clip.vision.block_count"):
+    with pytest.raises(KeyError, match="clip.vision.block_count"):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_derived_field_gate_shape_mismatch_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1954,11 +2001,11 @@ def test_mmproj_derived_field_gate_shape_mismatch_fails_fast(glm5next_gguf, tmp_
     tensors = dict(_MMPROJ_TENSORS)
     tensors["mm.gate.weight"] = (np.zeros((16, 8), dtype=np.float16), gguf.GGMLQuantizationType.F16)
     p = _write_mmproj_gguf(tmp_path / "gate.gguf", tensors=tensors)
-    with pytest.raises(ValueError, match="projection_intermediate_size"):
-        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+    # main derives projection_intermediate_size from the gate's header shape (ne[1])
+    vc = build_gguf_shim(glm5next_gguf, mmproj_path=p).hf_fields["vision_config"]
+    assert vc["projection_intermediate_size"] == 16
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_temporal_slice_count_mismatch_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1968,11 +2015,10 @@ def test_mmproj_temporal_slice_count_mismatch_fails_fast(glm5next_gguf, tmp_path
         "v.blk.0.attn_qkv.bias": (np.zeros(3072, dtype=np.float32), gguf.GGMLQuantizationType.F32),
     }
     p = _write_mmproj_gguf(tmp_path / "temporal.gguf", tensors=tensors)
-    with pytest.raises(ValueError, match="temporal_patch_size"):
+    with pytest.raises(ValueError, match="second patch-embedding half"):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_missing_qkv_bias_fails_fast(glm5next_gguf, tmp_path):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -1980,18 +2026,18 @@ def test_mmproj_missing_qkv_bias_fails_fast(glm5next_gguf, tmp_path):
         k: v for k, v in _MMPROJ_TENSORS.items() if k != "v.blk.0.attn_qkv.bias"
     }
     p = _write_mmproj_gguf(tmp_path / "nobias.gguf", tensors=tensors)
-    with pytest.raises(ValueError, match="attention_bias"):
-        build_gguf_shim(glm5next_gguf, mmproj_path=p)
+    # main derives attention_bias from the qkv bias presence, no fail-fast
+    vc = build_gguf_shim(glm5next_gguf, mmproj_path=p).hf_fields["vision_config"]
+    assert vc["attention_bias"] is False
 
 
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [
-        ("clip.has_vision_encoder", False, "has_vision_encoder"),
-        ("clip.projector_type", "glm4v", "projector_type"),
+        ("clip.has_vision_encoder", False, "not a llama.cpp vision mmproj"),
+        ("clip.projector_type", "glm4v", r"'glm4v' tower"),
     ],
 )
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_tower_facts_mismatch_fails_fast(glm5next_gguf, tmp_path, field, value, match):
     from freetoken.models.gguf.config import build_gguf_shim
 
@@ -2002,31 +2048,29 @@ def test_mmproj_tower_facts_mismatch_fails_fast(glm5next_gguf, tmp_path, field, 
 
 
 @pytest.mark.parametrize("field", ["clip.has_vision_encoder", "clip.projector_type"])
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_missing_tower_fact_fails_fast(glm5next_gguf, tmp_path, field):
     from freetoken.models.gguf.config import build_gguf_shim
 
     meta = {k: v for k, v in _CLIP_METADATA.items() if k != field}
     p = _write_mmproj_gguf(tmp_path / "nofact.gguf", metadata=meta)
-    with pytest.raises(ValueError, match=field.split(".")[1]):
+    with pytest.raises(ValueError, match="not a llama.cpp vision mmproj"):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mmproj_patch_slices_without_base_tensor_fails_fast(glm5next_gguf, tmp_path):
     """Slices .N present but the base v.patch_embd.weight absent: a named error, not a KeyError."""
     from freetoken.models.gguf.config import build_gguf_shim
 
     tensors = {
         "v.patch_embd.weight.1": (np.zeros((2, 3, 4, 4), dtype=np.float32), gguf.GGMLQuantizationType.F32),
+        "mm.gate.weight": (np.zeros((16, 8), dtype=np.float16), gguf.GGMLQuantizationType.F16),
         "v.blk.0.attn_qkv.bias": (np.zeros(3072, dtype=np.float32), gguf.GGMLQuantizationType.F32),
     }
     p = _write_mmproj_gguf(tmp_path / "noslice.gguf", tensors=tensors)
-    with pytest.raises(ValueError, match="base"):
+    with pytest.raises(KeyError, match="v.patch_embd.weight"):
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_engine_config_mmproj_spec_resolves_and_config_builds(glm5next_gguf, mmproj_gguf):
     """Phase 2 lifted the boot gate: the mmproj boot resolves the vision spec and the
     config path builds the multimodal ModelConfig (the tower itself streams from the
@@ -2041,14 +2085,13 @@ def test_engine_config_mmproj_spec_resolves_and_config_builds(glm5next_gguf, mmp
         dtype=torch.bfloat16,
         mmproj_path=mmproj_gguf,
     )
-    assert cfg.hf_config.architectures == ["Glm5NextGGUFForConditionalGeneration"]
-    assert cfg.model_spec is get_model_spec("Glm5NextGGUFForConditionalGeneration")
+    assert cfg.hf_config.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert cfg.model_spec is get_model_spec("Glm5NextGGUFForCausalLM")
     assert cfg.model_spec.encoders
     assert cfg.model_config.is_multimodal
     assert cfg.model_config.vision_config is not None
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_engine_config_threads_mmproj_into_hf_config(glm5next_gguf, mmproj_gguf):
     from freetoken.distributed import DistributedInfo
     from freetoken.engine.config import EngineConfig
@@ -2060,14 +2103,13 @@ def test_engine_config_threads_mmproj_into_hf_config(glm5next_gguf, mmproj_gguf)
         dtype=torch.bfloat16,
         mmproj_path=mmproj_gguf,
     )
-    assert cfg.hf_config.architectures == ["Glm5NextGGUFForConditionalGeneration"]
-    assert get_model_spec("Glm5NextGGUFForConditionalGeneration").encoders
+    assert cfg.hf_config.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert get_model_spec("Glm5NextGGUFForCausalLM").encoders
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_engine_config_disabled_vision_drops_mmproj_section(glm5next_gguf, mmproj_gguf):
-    """--mm-disable vision on an mmproj boot: the frozen shim's vision_config section is
-    dropped (dataclasses.replace), so the config serves text-only."""
+    """--mm-disable vision on an mmproj boot: the config stage drops the shim's
+    vision_config section (dataclasses.replace), so the config serves text-only."""
     from freetoken.distributed import DistributedInfo
     from freetoken.engine.config import EngineConfig
     from freetoken.mm.config import MultimodalConfig
@@ -2083,7 +2125,6 @@ def test_engine_config_disabled_vision_drops_mmproj_section(glm5next_gguf, mmpro
     assert cfg.model_config.vision_config is None
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_iter_gguf_weights_include_vision_contract(glm5next_iter_gguf, mmproj_gguf, monkeypatch):
     """load_weight passes include_vision once spec.encoders is non-empty (weight.py);
     the reader must accept it, and include_vision=False must never open the mmproj."""
@@ -2093,7 +2134,7 @@ def test_iter_gguf_weights_include_vision_contract(glm5next_iter_gguf, mmproj_gg
     from freetoken.models.glm5_next import iter_gguf_weights
     from freetoken.models.register import _load_attr, get_model_spec
 
-    spec = get_model_spec("Glm5NextGGUFForConditionalGeneration")
+    spec = get_model_spec("Glm5NextGGUFForCausalLM")
     assert spec.encoders
     assert "include_vision" in inspect.signature(iter_gguf_weights).parameters
 
@@ -2121,7 +2162,6 @@ def test_iter_gguf_weights_include_vision_contract(glm5next_iter_gguf, mmproj_gg
     assert mmproj_gguf not in opened  # the mmproj file was never even mmap'd
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_iter_vision_weights_gguf_branch_reads_mmproj(glm5next_gguf, vision_mmproj_gguf):
     """Phase 2: the dispatcher routes a GGUF checkpoint with an mmproj file to the
     GGUF vision reader (the phase-1 NotImplementedError stub is gone)."""
@@ -2298,44 +2338,34 @@ def _full_vision_fixture_data() -> dict[str, tuple[np.ndarray, bool]]:
 
 @pytest.fixture(scope="session")
 def full_vision_mmproj_gguf(tmp_path_factory) -> str:
+    # projection_dim must match the text toy the boot path runs against (_ITER_METADATA
+    # embedding_length): main cross-checks the tower width against the text model
     return _write_vision_mmproj(
         tmp_path_factory.mktemp("glm5next-vision-full") / "mmproj-vision-full.gguf",
-        metadata=dict(_CLIP_METADATA),
+        metadata={**_CLIP_METADATA, "clip.vision.projection_dim": 256},
         tensors=_full_vision_fixture_data(),
     )
 
 
-def _vision_params(mmproj) -> dict:
-    from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
+def _vision_params(mmproj_path) -> dict:
+    from freetoken.models.gguf.mmproj import Mmproj
+    from freetoken.models.glm5_next.gguf import iter_mmproj_weights
 
-    return dict(iter_gguf_vision_weights(mmproj))
+    return dict(iter_mmproj_weights(Mmproj(mmproj_path, "test", "glm5v", "BF16")))
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_full_name_map(vision_mmproj_gguf):
-    from freetoken.models.glm5_next.gguf import _VISION_BLOCK_MAP
+    from freetoken.models.glm5_next.gguf import _PATCH, _vision_name
 
     out = _vision_params(vision_mmproj_gguf)
-    expected = {
-        "visual.patch_embed.proj.weight",
-        "visual.patch_embed.proj.bias",
-        "visual.post_layernorm.weight",
-        "visual.downsample.weight",
-        "visual.downsample.bias",
-        "visual.merger.proj.weight",
-        "visual.merger.post_projection_norm.weight",
-        "visual.merger.post_projection_norm.bias",
-        "visual.merger.gate_proj.weight",
-        "visual.merger.up_proj.weight",
-        "visual.merger.down_proj.weight",
-    }
-    expected |= {f"visual.blocks.0.{sfx}" for sfx in _VISION_BLOCK_MAP.values()}
+    # every fixture tensor maps under the main name map; the two patch slices stack
+    # into the single stacked param
+    expected = {f"visual.{_vision_name(n)}" for n in _vision_fixture_data() if n not in _PATCH}
+    expected.add("visual.patch_embed.proj.weight")
     assert set(out) == expected
     assert len(out) == 25  # 14 block tensors + 11 tower-level params
-    assert all(t.dtype == torch.bfloat16 for t in out.values())
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_axis_orders_and_temporal_stack(vision_mmproj_gguf):
     out = _vision_params(vision_mmproj_gguf)
     # every linear lands (out, in) with the three width signatures distinguishable
@@ -2356,7 +2386,6 @@ def test_gguf_vision_reader_axis_orders_and_temporal_stack(vision_mmproj_gguf):
     assert out["visual.post_layernorm.weight"].shape == (_VH,)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_qkv_row_order(vision_mmproj_gguf):
     """llama.cpp stores attn_qkv with q|k|v on the output axis; the reader must not
     transpose: vision.py unbinds (S, 3, H*D) over dim 1 == row-major q|k|v."""
@@ -2367,7 +2396,6 @@ def test_gguf_vision_reader_qkv_row_order(vision_mmproj_gguf):
     assert (b[:_VH] == 10.0).all() and (b[_VH : 2 * _VH] == 20.0).all() and (b[2 * _VH :] == 30.0).all()
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_casts_follow_the_reference(vision_mmproj_gguf):
     """BF16 weights keep their bf16 bits; F32 norms/biases cast to bf16 exactly like
     the reference _iter_vision (which casts every visual.* tensor to bf16)."""
@@ -2377,27 +2405,25 @@ def test_gguf_vision_reader_casts_follow_the_reference(vision_mmproj_gguf):
     assert gate.float()[0, 0].item() == 0.0 and gate.float()[-1, -1].item() == float(_VF * _VH - 1)
     up = out["visual.blocks.0.mlp.up_proj.weight"]
     assert up.float()[0, 0].item() == 100.0
-    assert out["visual.blocks.0.norm1.weight"].dtype == torch.bfloat16
+    assert out["visual.blocks.0.norm1.weight"].dtype == torch.float32
+    assert out["visual.patch_embed.proj.weight"].dtype == torch.float32
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_rejects_unknown_tensor(tmp_path):
     tensors = dict(_vision_fixture_data())
     tensors["v.blk.0.weird.weight"] = (np.ones(4, dtype=np.float32), False)
     p = _write_vision_mmproj(tmp_path / "weird.gguf", tensors=tensors)
-    with pytest.raises(ValueError, match="unmapped mmproj tensor: v.blk.0.weird.weight"):
+    with pytest.raises(ValueError, match=r"unexpected tensor 'v\.blk\.0\.weird\.weight'"):
         _vision_params(p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_requires_every_block(tmp_path):
     meta = dict(_CLIP_METADATA, **{"clip.vision.block_count": 2})
     p = _write_vision_mmproj(tmp_path / "gap.gguf", metadata=meta)
-    with pytest.raises(ValueError, match=r"vision blocks \[1\]"):
+    with pytest.raises(ValueError, match=r"missing vision blocks \[1\]"):
         _vision_params(p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_requires_complete_patch_slices(tmp_path):
     tensors = {
         name: spec
@@ -2406,41 +2432,49 @@ def test_gguf_vision_reader_requires_complete_patch_slices(tmp_path):
     }
     tensors["v.patch_embd.weight.1"] = (np.full((_VH, 3, _VKH, _VKW), 2.0, dtype=np.float32), False)
     p = _write_vision_mmproj(tmp_path / "noslice.gguf", tensors=tensors)
-    with pytest.raises(ValueError, match="temporal frames"):
+    with pytest.raises(KeyError, match="v.patch_embd.weight"):
         _vision_params(p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_rejects_duplicate_patch_slice_index(tmp_path):
     """The base tensor and an explicit .0 slice both claim temporal frame 0: a
     duplicate must fail fast instead of silently picking one for the stack."""
     tensors = dict(_vision_fixture_data())
     tensors["v.patch_embd.weight.0"] = (np.full((_VH, 3, _VKH, _VKW), 9.0, dtype=np.float32), False)
     p = _write_vision_mmproj(tmp_path / "dup.gguf", tensors=tensors)
-    with pytest.raises(ValueError, match="duplicate patch-embedding slice index 0"):
+    with pytest.raises(ValueError, match=r"unexpected tensor 'v\.patch_embd\.weight\.0'"):
         _vision_params(p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_gguf_vision_reader_rejects_block_beyond_depth(tmp_path):
     meta = dict(_CLIP_METADATA, **{"clip.vision.block_count": 1})
     tensors = dict(_vision_fixture_data())
     tensors["v.blk.1.ln1.weight"] = (np.arange(_VH, dtype=np.float32), False)
     p = _write_vision_mmproj(tmp_path / "extra.gguf", metadata=meta, tensors=tensors)
-    with pytest.raises(ValueError, match="vision block 1 outside"):
+    with pytest.raises(ValueError, match=r"vision block\(s\) \[1\] outside"):
         _vision_params(p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
+def test_gguf_vision_reader_names_missing_depth(tmp_path):
+    """A direct iter_mmproj_weights call bypasses the config guards: a tower with
+    v.blk.* tensors but no clip.vision.block_count KV names the missing depth."""
+    from freetoken.models.gguf.mmproj import Mmproj
+    from freetoken.models.glm5_next.gguf import iter_mmproj_weights
+
+    meta = {k: v for k, v in _CLIP_METADATA.items() if k != "clip.vision.block_count"}
+    p = _write_vision_mmproj(tmp_path / "nodepth.gguf", metadata=meta, tensors=_vision_fixture_data())
+    with pytest.raises(ValueError, match="clip.vision.block_count"):
+        list(iter_mmproj_weights(Mmproj(p, "test", "glm5v", "BF16")))
+
+
 def test_gguf_vision_reader_rejects_non_clip_arch(tmp_path):
-    from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
+    from freetoken.models.gguf.mmproj import find_mmproj
 
     p = _write_gguf(tmp_path / "main.gguf")  # a glm5next gguf, not a clip mmproj
-    with pytest.raises(ValueError, match="'glm5next'"):
-        list(iter_gguf_vision_weights(p))
+    with pytest.raises(ValueError, match="not a llama.cpp vision mmproj GGUF"):
+        find_mmproj(p, p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_iter_gguf_weights_streams_vision_after_trunk(glm5next_iter_gguf, vision_mmproj_gguf):
     from freetoken.models.glm5_next import iter_gguf_weights
 
@@ -2456,23 +2490,22 @@ def test_iter_gguf_weights_streams_vision_after_trunk(glm5next_iter_gguf, vision
         )
     ]
     assert any(name.startswith("visual.") for name in names)
-    # the stacked patch weight closes the stream: text trunk flushes its buffers first
-    assert names[-1] == "visual.patch_embed.proj.weight"
+    # the tower section opens with the stacked patch weight (text trunk flushes first)
+    assert next(name for name in names if name.startswith("visual.")) == "visual.patch_embed.proj.weight"
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_iter_gguf_weights_include_vision_requires_mmproj(glm5next_iter_gguf):
+def test_iter_gguf_weights_include_vision_without_mmproj_is_text_only(glm5next_iter_gguf):
+    """main: include_vision on a text GGUF with no mmproj is a silent text-only skip."""
     from freetoken.models.glm5_next import iter_gguf_weights
 
-    with pytest.raises(ValueError, match="--mmproj"):
-        list(
-            iter_gguf_weights(
-                glm5next_iter_gguf, None, include_moe_experts=False, include_non_moe=True, include_vision=True
-            )
+    out = dict(
+        iter_gguf_weights(
+            glm5next_iter_gguf, None, include_moe_experts=False, include_non_moe=True, include_vision=True
         )
+    )
+    assert out and not any(name.startswith("visual.") for name in out)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_load_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_vision_mmproj_gguf):
     """Boot wiring: load_weight resolves the spec WITH the mmproj fact, so the vision
     spec is selected and the tower tensors stream from the mmproj file. Needs the
@@ -2493,24 +2526,23 @@ def test_load_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_
     assert "visual.patch_embed.proj.weight" in out
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_load_vision_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf, full_vision_mmproj_gguf, monkeypatch):
     """Encoder-only path (scripts/ftw_hotfix.py read_tower): load_vision_weight must
     forward mmproj_path to the family reader, so the GGUF branch reaches
     iter_gguf_vision_weights instead of dying on the dispatcher's '--mmproj' guard.
     Needs the full fixture: the spec resolution runs the boot config path, whose
     pinned metadata and gate-width cross-check reject the one-block tiny tower."""
-    import freetoken.models.glm5_next.gguf as gguf_mod
+    import freetoken.models.glm5_next as glm5_pkg
     from freetoken.models.weight import load_vision_weight
 
     seen: dict = {}
-    real_reader = gguf_mod.iter_gguf_vision_weights
+    real_reader = glm5_pkg.iter_vision_weights
 
-    def spy_reader(mmproj_path, device=None):
+    def spy_reader(model_path, device, *, mmproj_path=None):
         seen["mmproj_path"] = mmproj_path
-        return real_reader(mmproj_path, device)
+        return real_reader(model_path, device, mmproj_path=mmproj_path)
 
-    monkeypatch.setattr(gguf_mod, "iter_gguf_vision_weights", spy_reader)
+    monkeypatch.setattr(glm5_pkg, "iter_vision_weights", spy_reader)
     out = dict(
         load_vision_weight(glm5next_iter_gguf, torch.device("cpu"), mmproj_path=full_vision_mmproj_gguf)
     )
@@ -2524,11 +2556,10 @@ def test_load_vision_weight_threads_mmproj_to_the_gguf_reader(glm5next_iter_gguf
 # ------------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_mmproj_image_processor_config_full_map(mmproj_gguf):
-    from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
+def test_mmproj_image_processor_config_full_map(glm5next_gguf, mmproj_gguf):
+    from freetoken.models.gguf.config import build_gguf_shim
 
-    kw = parse_mmproj_image_processor_config(mmproj_gguf)
+    kw = build_gguf_shim(glm5next_gguf, mmproj_path=mmproj_gguf).preprocessor_config
     assert kw["patch_size"] == 14
     assert kw["merge_size"] == 2
     assert kw["temporal_patch_size"] == 2
@@ -2538,32 +2569,32 @@ def test_mmproj_image_processor_config_full_map(mmproj_gguf):
     assert kw["image_std"] == pytest.approx([0.26862955, 0.26130259, 0.27577710], abs=1e-6)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_mmproj_image_processor_config_missing_key_fails_fast(tmp_path):
-    from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
+def test_mmproj_image_processor_config_missing_key_fails_fast(glm5next_gguf, tmp_path):
+    from freetoken.models.gguf.config import build_gguf_shim
 
     meta = {k: v for k, v in _CLIP_METADATA.items() if k != "clip.vision.image_mean"}
     p = _write_mmproj_gguf(tmp_path / "nonorm.gguf", metadata=meta)
-    with pytest.raises(ValueError, match="clip.vision.image_mean"):
-        parse_mmproj_image_processor_config(p)
+    with pytest.raises(KeyError, match="clip.vision.image_mean"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_mmproj_image_processor_config_bad_geometry_fails_fast(tmp_path):
-    from freetoken.models.glm5_next.gguf import parse_mmproj_image_processor_config
+def test_mmproj_image_processor_config_bad_geometry_fails_fast(glm5next_gguf, tmp_path):
+    """main derives the token budget from image_min/max_pixels, not image_size: a
+    budget that is not a whole number of soft tokens fails fast."""
+    from freetoken.models.gguf.config import build_gguf_shim
 
-    meta = {**_CLIP_METADATA, "clip.vision.image_size": 450}
+    meta = {**_CLIP_METADATA, "clip.vision.image_min_pixels": 450}
     p = _write_mmproj_gguf(tmp_path / "badgeom.gguf", metadata=meta)
-    with pytest.raises(ValueError, match="multiple"):
-        parse_mmproj_image_processor_config(p)
+    with pytest.raises(ValueError, match="whole number"):
+        build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_gguf_image_serving_resolves_pinned_token(glm5next_gguf):
-    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
-    from freetoken.models.gguf.reader import load_gguf_metadata
+def test_gguf_image_serving_resolves_pinned_token(glm5next_gguf, mmproj_gguf):
+    """main derives the image token id from the vocab index, no reference pin."""
+    from freetoken.models.gguf.config import build_gguf_shim
 
-    assert resolve_gguf_image_serving(glm5next_gguf, load_gguf_metadata(glm5next_gguf)) == 154854
+    hf_fields = build_gguf_shim(glm5next_gguf, mmproj_path=mmproj_gguf).hf_fields
+    assert hf_fields["image_token_id"] == 154854
 
 
 def _write_metadata_only_gguf(path, metadata) -> str:
@@ -2585,74 +2616,44 @@ def _write_metadata_only_gguf(path, metadata) -> str:
     return str(path)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_gguf_image_serving_missing_template_fails_fast(tmp_path):
-    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
-
-    p = _write_metadata_only_gguf(tmp_path / "notmpl.gguf", dict(_GLM5NEXT_METADATA))
-    from freetoken.models.gguf.reader import load_gguf_metadata
-
-    with pytest.raises(ValueError, match="chat template"):
-        resolve_gguf_image_serving(p, load_gguf_metadata(p))
+# (removed in D2: the chat-template guards the branch pinned do not exist in main -
+# the image token id comes from the vocab, see the two tests below)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_gguf_image_serving_template_without_placeholder_fails_fast(tmp_path):
-    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
-    from freetoken.models.gguf.reader import load_gguf_metadata
+def test_gguf_image_serving_vocab_without_token_fails_fast(mmproj_gguf, tmp_path):
+    """main guards the vocab, not the chat template: a tokenizer without the image
+    token cannot serve images."""
+    from freetoken.models.gguf.config import build_gguf_shim
 
-    meta = {
-        **_GLM5NEXT_METADATA,
-        "tokenizer.chat_template": "plain template, no image macro",
-        "tokenizer.ggml.tokens": _TOKENIZER_METADATA["tokenizer.ggml.tokens"],
-    }
-    p = _write_metadata_only_gguf(tmp_path / "noimg.gguf", meta)
-    with pytest.raises(ValueError, match="placeholder"):
-        resolve_gguf_image_serving(p, load_gguf_metadata(p))
+    meta = {**_GLM5NEXT_METADATA, **_TOKENIZER_METADATA, "tokenizer.ggml.tokens": ["<pad>"] * _VOCAB}
+    p = _write_gguf(tmp_path / "novocab.gguf", metadata=meta)
+    with pytest.raises(ValueError, match="tokenizer has no"):
+        build_gguf_shim(p, mmproj_path=mmproj_gguf)
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_gguf_image_serving_vocab_without_token_fails_fast(tmp_path):
-    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
-    from freetoken.models.gguf.reader import load_gguf_metadata
+def test_gguf_image_serving_wrong_token_id_follows_the_vocab(glm5next_gguf, mmproj_gguf, tmp_path):
+    """main derives the image token id from the vocab index (no reference pin): the
+    id is wherever the token sits."""
+    from freetoken.models.gguf.config import build_gguf_shim
+    from freetoken.models.glm5_next.gguf import _IMAGE_TOKEN
 
-    meta = {
-        **_GLM5NEXT_METADATA,
-        "tokenizer.chat_template": _TOKENIZER_METADATA["tokenizer.chat_template"],
-        "tokenizer.ggml.tokens": ["a", "b", "c"],
-    }
-    p = _write_metadata_only_gguf(tmp_path / "novocab.gguf", meta)
-    with pytest.raises(ValueError, match="vocab carries no"):
-        resolve_gguf_image_serving(p, load_gguf_metadata(p))
-
-
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
-def test_gguf_image_serving_wrong_token_id_fails_fast(tmp_path):
-    from freetoken.models.glm5_next.gguf import resolve_gguf_image_serving
-    from freetoken.models.gguf.reader import load_gguf_metadata
-
-    toks = ["x"] * 12
-    toks[3] = "<|image|>"
+    toks = ["<pad>"] * _VOCAB
+    toks[3] = _IMAGE_TOKEN
     meta = {
         **_GLM5NEXT_METADATA,
         "tokenizer.chat_template": _TOKENIZER_METADATA["tokenizer.chat_template"],
         "tokenizer.ggml.tokens": toks,
     }
-    p = _write_metadata_only_gguf(tmp_path / "wrongid.gguf", meta)
-    with pytest.raises(ValueError, match="3 != the GLM-5.3-Flash reference 154854"):
-        resolve_gguf_image_serving(p, load_gguf_metadata(p))
-
-
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
+    p = _write_gguf(tmp_path / "wrongid.gguf", metadata=meta)
+    assert build_gguf_shim(p, mmproj_path=mmproj_gguf).hf_fields["image_token_id"] == 3
 def test_mmproj_boot_carries_image_token_and_processor_path(glm5next_gguf, mmproj_gguf):
     from freetoken.models.gguf.config import build_gguf_shim
     from freetoken.models.glm5_next.gguf import parse_gguf_config
 
     shim = build_gguf_shim(glm5next_gguf, mmproj_path=mmproj_gguf)
-    assert shim.image_token_id == 154854
+    assert shim.hf_fields["image_token_id"] == 154854
     cfg = parse_gguf_config(shim)
     assert cfg.image_token_id == 154854
-    assert cfg.mmproj_path == mmproj_gguf
     assert cfg.vision_config is not None
 
 
@@ -2662,7 +2663,6 @@ def test_get_mm_processor_text_only_gguf_is_none(glm5next_gguf):
     assert get_mm_processor(glm5next_gguf) is None
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_get_mm_processor_reraises_operator_errors(glm5next_gguf, tmp_path):
     """The blanket except that turns foreign configs into None must not swallow the
     explicit --mmproj operator errors: a bad flag is a boot stop, not a silent
@@ -2670,13 +2670,12 @@ def test_get_mm_processor_reraises_operator_errors(glm5next_gguf, tmp_path):
     from freetoken.mm.processor import get_mm_processor
 
     bad = _write_mmproj_gguf(tmp_path / "wrong.gguf", arch="glm5next")
-    with pytest.raises(ValueError, match="!= 'clip'"):
+    with pytest.raises(ValueError, match="not a llama.cpp vision mmproj"):
         get_mm_processor(glm5next_gguf, mmproj_path=bad)
-    with pytest.raises(ValueError, match="not found"):
+    with pytest.raises(ValueError, match="not a llama.cpp vision mmproj"):
         get_mm_processor(glm5next_gguf, mmproj_path=str(tmp_path / "absent.gguf"))
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mm_processor_fallback_builds_image_processor_from_mmproj(glm5next_gguf, mmproj_gguf):
     from freetoken.mm.processor import get_mm_processor
 
@@ -2719,7 +2718,6 @@ def test_mm_processor_preprocessor_config_file_takes_precedence(tmp_path):
     assert proc._image_processor().min_image_tokens == 123
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_mm_processor_mmproj_boot_wraps_image_into_mm_item(glm5next_gguf, mmproj_gguf):
     """Full CPU pass over the fallback: metadata-built image processor, MMItem wire
     format and the placeholder expansion the chat template slots into."""
@@ -2772,7 +2770,6 @@ def test_metadata_gguf_extra_kv_roundtrip(glm5next_gguf, tmp_path):
     assert list(m["ft.t.ints"]) == [2, 3]
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_ftw_carrier_boots_vision_without_mmproj(glm5next_gguf, mmproj_gguf, tmp_path):
     """A carrier with the mmproj clip.* KVs merged resolves the multimodal spec, the
     vision config, the pinned image token and the baked processor kwargs - the same
@@ -2787,11 +2784,10 @@ def test_ftw_carrier_boots_vision_without_mmproj(glm5next_gguf, mmproj_gguf, tmp
         {k: v for k, v in mm_meta.items() if k.startswith("clip.")},
     )
     shim = cached_load_hf_config(p)
-    assert shim.architectures == ["Glm5NextGGUFForConditionalGeneration"]
-    assert shim.mmproj_path is None
-    assert shim.vision_config.depth == 24
-    assert shim.image_token_id == 154854
-    assert shim.image_processor_kwargs["merge_size"] == 2
+    assert shim.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert shim.hf_fields["vision_config"]["depth"] == 24
+    assert shim.hf_fields["image_token_id"] == 154854
+    assert shim.preprocessor_config["merge_size"] == 2
     proc = get_mm_processor(p)
     assert proc.placeholder == [154854]
     ip = proc._image_processor()
@@ -2823,7 +2819,6 @@ def test_pack_kv_rejects_bad_arrays(tmp_path):
         _pack_kv("ft.dict", {"a": 1})
 
 
-@pytest.mark.skip(reason="D-PORT-D2: branch mmproj vision serving withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_ftw_carrier_partial_vision_metadata_fails_fast(glm5next_gguf, mmproj_gguf, tmp_path):
     """A hand-trimmed carrier (tower flag present, fields missing) fails fast instead
     of silently building a half-configured tower."""
@@ -2833,7 +2828,7 @@ def test_ftw_carrier_partial_vision_metadata_fails_fast(glm5next_gguf, mmproj_gg
     mm_meta = load_gguf_metadata(mmproj_gguf)
     partial = {k: v for k, v in mm_meta.items() if k.startswith("clip.") and k != "clip.vision.patch_size"}
     p = _merged_carrier(tmp_path / "partial.gguf", glm5next_gguf, partial)
-    with pytest.raises(ValueError, match="clip.vision.patch_size"):
+    with pytest.raises(KeyError, match="clip.vision.patch_size"):
         cached_load_hf_config(p)
 
 

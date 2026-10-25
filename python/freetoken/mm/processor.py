@@ -84,9 +84,20 @@ class MMProcessor(ABC):
         """The checkpoint's image processor, loaded on first use (tokenizer workers share the instance across threads)."""
         with self._image_processor_lock:
             if self._image_processor_instance is None:
-                from freetoken.utils import load_image_processor
+                # an mmproj boot bakes the preprocessor facts into the config shim the
+                # processor was constructed from; a fresh model_path lookup would read
+                # a text-only shim (the flag is not part of the path)
+                preprocessor = getattr(getattr(self, "_hf_config", None), "preprocessor_config", None)
+                if preprocessor is not None:
+                    from transformers.models.auto.image_processing_auto import get_image_processor_class_from_name
 
-                self._image_processor_instance = load_image_processor(self.model_path)
+                    self._image_processor_instance = get_image_processor_class_from_name(
+                        preprocessor["image_processor_type"]
+                    ).from_dict(preprocessor)
+                else:
+                    from freetoken.utils import load_image_processor
+
+                    self._image_processor_instance = load_image_processor(self.model_path)
             return self._image_processor_instance
 
     def get_mm_processor_kwargs(self, mm: MultimodalConfig) -> dict[str, Any]:

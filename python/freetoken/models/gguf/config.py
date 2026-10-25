@@ -140,6 +140,19 @@ def build_gguf_shim(model_path: str, mmproj_path: str | None = None) -> GgufConf
     if mmproj is not None:
         registry_key = GGUF_MMPROJ_TO_REGISTRY.get((arch, mmproj.projector), registry_key)
     hf_fields, preprocessor_config = ({}, None) if mmproj is None else mm_fields(model_path, mmproj)
+    if mmproj is None and spec.encoders and not names:
+        # a metadata-only carrier (an FTW's source_metadata.gguf) carries no tower file;
+        # the converter merges the tower facts into its KV section and the family hook
+        # rebuilds the vision facts from them. Families without the hook (and carriers
+        # without vision facts) keep the text-only carrier contract.
+        from freetoken.models.register import _load_attr
+
+        try:
+            carrier_hook = _load_attr(spec.module, "gguf_carrier_mm_config")
+        except AttributeError:
+            carrier_hook = None
+        if carrier_hook is not None:
+            hf_fields, preprocessor_config = carrier_hook(metadata, vocab_size)
     return GgufConfigShim(
         architectures=[registry_key],
         model_path=model_path,

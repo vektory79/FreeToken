@@ -16,6 +16,7 @@ from freetoken.mm.processor import MMProcessor, PromptReplacement, content_hash
 class Glm5NextMMProcessor(MMProcessor):
     def __init__(self, hf_config: Any, model_path: str, mm: MultimodalConfig) -> None:
         super().__init__(model_path, mm)
+        self._hf_config = hf_config
         vc = hf_config.vision_config
         self.image_token_id = hf_config.image_token_id
         # the template renders the begin/end wrapper tokens itself; only <|image|> expands
