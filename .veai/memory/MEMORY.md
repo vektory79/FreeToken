@@ -94,3 +94,4 @@
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-77e5b594b1d8.md) — Git index keeps stale staged versions from parallel sessions; re-stage explicit paths before every commit
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-1152a9d2a5e0.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
 - [ft-merge-round6-pending-handoff](ft-merge-round6-pending-handoff-58002cb4f5d1.md) — Round 6 merge CLOSED: d66f6e3 green, boot-smoke 22.21 tok/s; port debt D2/D4/D5 kb/cases/round6-deferred-ports
+- [no-dual-logic-directive](no-dual-logic-directive-7142f401aa6e.md) — No dual logic main vs vektory79: branch work is delta on main primitives; semantic test dedup, not name-based

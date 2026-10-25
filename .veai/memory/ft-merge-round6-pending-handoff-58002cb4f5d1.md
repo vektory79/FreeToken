@@ -3,7 +3,7 @@ name: "ft-merge-round6-pending-handoff"
 description: "Round 6 merge CLOSED: d66f6e3 green, boot-smoke 22.21 tok/s; port debt D2/D4/D5 kb/cases/round6-deferred-ports"
 type: project
 lastUpdated: 2026-10-25T01:37
-lastRecall: 2026-10-25T01:38
+lastRecall: 2026-10-25T12:43
 ---
 
 # Round 6 merge (2026-10-24/25): CLOSED - CPU + cloud-window verified, HEAD d66f6e3

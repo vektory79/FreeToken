@@ -3,7 +3,7 @@ name: "ft-gguf-mmproj-vision-brief"
 description: "mmproj GGUF vision case CLOSED phases 1-5 (e35577d..f67449b), 347/347 tensors exact, HW PASS, TRAPS T68-T75"
 type: project
 lastUpdated: 2026-10-11T20:22
-lastRecall: 2026-10-24T11:03
+lastRecall: 2026-10-25T12:43
 ---
 
 # GGUF glm5next vision (mmproj) support - research done, brief ready

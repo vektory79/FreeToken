@@ -3,7 +3,7 @@ name: "ft-merge-round5-deferred-ports"
 description: "Merge round5 f0eed55: D1-D5 DONE; residuals fixed; kb links repaired (8bba8e5); only fa/fi/trtllm open"
 type: project
 lastUpdated: 2026-10-23T21:53
-lastRecall: 2026-10-25T01:38
+lastRecall: 2026-10-25T11:56
 ---
 
 # Round 5 merge (2026-10-17): ggml re-platform, D1-D5 deferred ports campaign
