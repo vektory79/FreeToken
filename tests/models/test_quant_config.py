@@ -391,11 +391,6 @@ def test_probed_layers_get_the_method_their_config_says(case: Case, monkeypatch)
         case.check(model, idx)
 
 
-@pytest.mark.skip(
-    "stale pin: main #737 added the nvfp4 w4a4 kernel on sm_120, so w4a4 joined the "
-    "usable-here set and auto no longer lands on triton; recalibrate the pins with "
-    "the D5 nvfp4 port"
-)
 def test_hybrid_explicit_kernel_error_names_the_usable_alternative(monkeypatch):
     """A GPU-only kernel requested under hybrid must say which kernel would run here; the bare rejection sent the user hunting through the kernel tables."""
     from freetoken.kernel import backend
@@ -404,7 +399,9 @@ def test_hybrid_explicit_kernel_error_names_the_usable_alternative(monkeypatch):
     monkeypatch.setattr(backend, "is_vllm_installed", lambda: True)
     monkeypatch.setattr(backend, "is_flashinfer_installed", lambda: True)
     cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=ModelOptConfig.SCHEMES["NVFP4"], strategy="hybrid", decode_target="cpu")
-    with pytest.raises(KernelSelectionError, match=r"has no CPU executor format.*\(usable here: triton\)"):
+    # w4a4 (#737) is usable wherever triton is: its unusable_reason only adds the
+    # scheme/activation-scale gates, both satisfied by the ModelOpt NVFP4 scheme
+    with pytest.raises(KernelSelectionError, match=r"has no CPU executor format.*\(usable here: w4a4, triton\)"):
         select_kernel(Nvfp4MoEMethod.candidates, "b12x", cfg)
 
 
@@ -432,21 +429,26 @@ def test_hybrid_auto_fp8_kernel_error_lists_what_was_skipped():
         select_kernel(Fp8BlockMoEMethod.candidates, "auto", cfg)
 
 
-@pytest.mark.skip(
-    "stale pin: main #737 added the nvfp4 w4a4 kernel on sm_120, so w4a4 joined the "
-    "usable-here set and auto no longer lands on triton; recalibrate the pins with "
-    "the D5 nvfp4 port"
-)
-def test_nvfp4_auto_selection_still_lands_on_triton(monkeypatch):
-    """The shared probe behind auto selection must not shift what it picks: triton stays first for nvfp4 under CPU and GPU decode, b12x reachable only by explicit request."""
-    from freetoken.kernel import backend
+def test_nvfp4_auto_selection_lands_on_w4a4_where_available(monkeypatch):
+    """The shared probe behind auto selection must not shift what it picks: w4a4 (#737's
+    sm_120 prefill kernel) leads the table wherever its availability probe passes, triton
+    takes over when it does not, b12x reachable only by explicit request."""
+    from freetoken.kernel import backend, nvfp4_moe
 
     monkeypatch.setattr(backend, "device_capability", lambda: (12, 0))
     monkeypatch.setattr(backend, "is_vllm_installed", lambda: True)
     monkeypatch.setattr(backend, "is_flashinfer_installed", lambda: True)
+    monkeypatch.setattr(nvfp4_moe, "w4a4_available", lambda device_index: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     for strategy, decode_target in (("hybrid", "cpu"), ("offload", "gpu")):
         cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=ModelOptConfig.SCHEMES["NVFP4"], strategy=strategy, decode_target=decode_target)
-        assert select_kernel(Nvfp4MoEMethod.candidates, "auto", cfg).name == "triton", strategy
+        assert select_kernel(Nvfp4MoEMethod.candidates, "auto", cfg).name == "w4a4", strategy
+    # without the sm_120 prefill probe the same machine degrades to triton
+    monkeypatch.setattr(nvfp4_moe, "w4a4_available", lambda device_index: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=ModelOptConfig.SCHEMES["NVFP4"], strategy="hybrid", decode_target="cpu")
+    assert select_kernel(Nvfp4MoEMethod.candidates, "auto", cfg).name == "triton"
     cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=ModelOptConfig.SCHEMES["NVFP4"], strategy="hybrid", decode_target="cpu")
     assert select_kernel(Nvfp4MoEMethod.candidates, "triton", cfg).name == "triton"
 

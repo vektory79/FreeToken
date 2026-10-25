@@ -1440,7 +1440,6 @@ def test_dequant_q8_0_reference_matches_handcrafted_blocks(tmp_path):
     )
 
 
-@pytest.mark.skip(reason="D-PORT-D5: gpu dequant branch re-lands with the nvfp4-kv read-path port")
 def test_cast_gpu_branch_moves_packed_rows_to_kernel(tmp_path, monkeypatch):
     # review-B TP: the GPU branch must hand the kernel CUDA-packed rows, not the CPU
     # mmap bytes (op_dequantize takes kDLCUDA tensors); the branch is picked by the
