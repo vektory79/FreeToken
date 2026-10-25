@@ -3,13 +3,17 @@ title: "\"Round 6 порт-долг: ре-имплементация D2/D4/D5 п
 date: 2026-10-25
 hardware: "\"GPU-волны (boot-smoke, CUDA/vision-тесты, A/B decode) - в cloud-окне; CPU-подготовка и тесты - в любое время\""
 commits: "\"база - d66f6e3 (round-6 merge, parents 23c1f02 + 32056cf); источники веточной функциональности - коммиты round-5 кампании: D2 7bc68b0, D3 393b682, D4 9314c9b, D5 660c814\""
-status: "\"ОТКРЫТА - фазы не начаты\""
+status: "\"В РАБОТЕ - D2 CPU-часть закрыта (523452b/e1de1df); GPU-smoke #810 и verify 347/347 ждут cloud-окно; D4/D5/D3 не начаты\""
 tags: [merge, upstream, round6, deferred-ports, D-PORT, mmproj, vision, gguf-loader, nvfp4, kv-quant, stale-pin, no-dual-logic]
 ---
 
 # TASK: round 6 - порт-долг: ре-имплементация D2/D4/D5 поверх main + честный A/B D3 после D5
 
-Status: ОТКРЫТА 2026-10-25 - фазы не начаты. Три фазы порт-долга после round-6
+Status: В РАБОТЕ 2026-10-25. D2 (mmproj-зрение): CPU-часть закрыта коммитами
+523452b "feat(models): serve gguf mmproj vision through the main mmproj path"
+и e1de1df "feat(checkpoint): pack gguf mmproj vision into ftw carriers on
+convert" - см. раздел 4, "Исполнение (2026-10-25)"; GPU-smoke #810 и verify
+347/347 ожидают cloud-окно. Не начаты: D4, D5, D3. Три фазы порт-долга после round-6
 merge: D2 (mmproj-зрение), D4 (контракт gguf-лоадера), D5 (nvfp4-KV generic
 read-path) и фаза D3 - честный A/B decode строго ПОСЛЕ D5. Рамка всего кейса -
 директива пользователя 2026-10-25 о запрете двойных логик (раздел 0): веточный
@@ -212,6 +216,47 @@ is not wired in this build (deferred with the D2 mmproj port)"; HF-путь
 поверх main - FTW-vision carrier конвертируется (convert_checkpoint c
 mmproj_path) и бутится без --mmproj; vision-smoke PASS; контрольная батарея по
 FAILURE SET против базлайна раздела 0; grep-ревью "нет файлов с двумя логиками".
+
+### Исполнение (2026-10-25)
+
+CPU-часть фазы закрыта двумя коммитами: 523452b "feat(models): serve gguf
+mmproj vision through the main mmproj path" (8 файлов, +337/-242) и e1de1df
+"feat(checkpoint): pack gguf mmproj vision into ftw carriers on convert".
+Статья фазы (карта маркеров, суставы, уроки) -
+[round6-d2-mmproj-vision-port](../../topics/round6-d2-mmproj-vision-port.md).
+
+По критериям приёмки:
+
+- Карта тестов полная: классификация 48 маркеров (44 D-PORT-D2 + 4 D-PORT-1)
+  пробным прогоном `pytest -p no:skipping` - c=38 переписаны под main, d=2
+  доимплементированы, e=8 сняты после суставов; исходы (a)/(b) - пусто, пар
+  семантических дублей нет: main 32056cf mmproj-тестов не имеет, а три теста,
+  считавшиеся "немаркированными main-тестами" (2647/2680/2723), сами были
+  помечены D-PORT-D2. Стартовая гипотеза (~24 -> a/b) опровергнута прогоном.
+  Счётчики grep-ом совпадают: D-PORT-D2 44 -> 0, D-PORT-1 4 -> 0;
+  D-PORT-D4 37 не тронуты.
+- Семантические дубли: пусто (см. выше), удалять было нечего; веточные
+  iter_gguf_vision_weights и reader удалены, остаётся main.
+- Packing работает поверх main: kwarg mmproj_path в convert_checkpoint,
+  clip.* KVs через main collision-гвардию write_metadata_gguf, семейный хук
+  gguf_carrier_mm_config для бута carrier без --mmproj (с документированным
+  _TOWER_REFERENCE); проводка weight.py:263 заменена делегированием на main
+  iter_mmproj_weights; коммент USER DECISION 4 закрыт кодом. CPU-покрытие -
+  зелёное; железный бут carrier - в cloud-окне.
+- Выполненные follow-up-правки, найденные ревью-проходом: толерантность
+  key-shape реального файла (swiglu_limit-фоллбэк + референсный бюджет
+  GLM-5.3-Flash min 16 / max 8000 soft-токенов при отсутствии бюджетных
+  ключей; проверено против реального артефакта mmproj-BF16.gguf), именованная
+  ошибка на отсутствующий clip.vision.block_count вместо raw KeyError,
+  перепин вакуумного теста test_mmproj_pinned_reference_mismatch_fails_fast
+  на три реальных кросс-чека main.
+- Контрольная батарея: финальный прогон двух файлов сюит - 99 passed /
+  47 skipped / 0 failed (по FAILURE SET против базлайна раздела 0).
+- grep-ревью "нет файлов с двумя логиками" - без находок.
+
+Остаток фазы - GPU-часть, cloud-окно: MMProj vision smoke #810 (boot --mmproj +
+e2e-картинка), бут FTW-vision carrier без --mmproj, verify 347/347 на реальном
+чекпойнте адаптированным scripts/verify_mmproj_tensors.py.
 
 ## 5. Фаза D4 - контракт gguf-лоадера (main-wins #721/#810; ветка 9314c9b - референс)
 
