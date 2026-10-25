@@ -190,6 +190,7 @@ def convert_checkpoint(
     quant_backend: str | None = None,
     shard_limit: int = DEFAULT_SHARD_LIMIT,
     device: str | None = None,
+    mmproj_path: str | None = None,
 ) -> dict:
     """Write ``model_path`` as an FTW checkpoint at ``out_dir``. Returns the index dict.
 
@@ -203,6 +204,17 @@ def convert_checkpoint(
 
     if is_ftw_checkpoint(model_path):
         raise SystemExit(f"{model_path} is already an FTW checkpoint")
+    if mmproj_path is not None:
+        from freetoken.models.gguf.reader import load_gguf_metadata
+
+        if not os.path.isfile(mmproj_path):
+            raise ValueError(f"--mmproj file not found: {mmproj_path}")
+        mmproj_arch = load_gguf_metadata(mmproj_path).get("general.architecture")
+        if mmproj_arch != "clip":
+            raise ValueError(
+                f"--mmproj {mmproj_path!r}: architecture {mmproj_arch!r} != 'clip'; "
+                "an mmproj file carries the vision tower"
+            )
     tp = try_get_tp_info()
     if tp is None:
         set_tp_info(rank=0, size=1)
@@ -222,7 +234,8 @@ def convert_checkpoint(
         torch.zeros(1, device=dev)  # init CUDA context (needed by nvfp4 backend pick / pinning)
 
     cfg = EngineConfig(model_path=model_path, tp_info=DistributedInfo(tp.rank, tp.size),
-                       dtype=dtype, moe_strategy=moe_backend, quant_backend=quant_backend)
+                       dtype=dtype, moe_strategy=moe_backend, quant_backend=quant_backend,
+                       mmproj_path=mmproj_path)
     mc = cfg.model_config
     # every MoE strategy reads the routed experts from the banks, fused included
     offload = getattr(mc, "is_moe", False)
@@ -246,10 +259,12 @@ def convert_checkpoint(
     dense_bytes = 0
     from freetoken.models.gguf.reader import gguf_config_source
 
-    # an FTW keeps only a GGUF's text metadata, so it cannot build an mmproj tower
-    include_vision = gguf_config_source(model_path) is None
+    # a GGUF source streams the tower from the --mmproj file (the visual.* tensors land
+    # in the FTW); an HF source packs its inline vision tensors like it always did
+    include_vision = (mmproj_path is not None) if gguf_config_source(model_path) is not None else True
     for name, tensor in count_bar(load_weight(model_path, torch.device("cpu"),
-                                              include_moe_experts=include_moe_experts, include_vision=include_vision),
+                                              include_moe_experts=include_moe_experts, include_vision=include_vision,
+                                              mmproj_path=mmproj_path),
                                   "Converting dense weights"):
         writer.add_tensor(name, tensor, kind="weight")
         n_weight += 1
@@ -342,8 +357,14 @@ def convert_checkpoint(
     _progress("finalize")  # writing shard index + copying config/tokenizer
     # A raw-GGUF source with --mmproj: merge the mmproj's clip.* tower facts into the
     # metadata-only carrier, so the FTW boot rebuilds tower config + image processor
-    # with no --mmproj and never opens the source .gguf (USER DECISION 4).
-    copied = _copy_metadata(model_path, out_dir)
+    # with no --mmproj and never opens the source .gguf. The collision guard (an extra
+    # KV clashing with a source KV) lives in write_metadata_gguf.
+    extra_kvs = None
+    if mmproj_path is not None:
+        from freetoken.models.gguf.reader import load_gguf_metadata
+
+        extra_kvs = {k: v for k, v in load_gguf_metadata(mmproj_path).items() if k.startswith("clip.")}
+    copied = _copy_metadata(model_path, out_dir, extra_kvs=extra_kvs)
 
     try:
         fingerprint = _source_fingerprint(model_path, mc, device=dev)

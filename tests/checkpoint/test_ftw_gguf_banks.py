@@ -462,27 +462,28 @@ def ftw_gguf_vision_ckpt(tmp_path_factory):
     src = _write_ftw_source_gguf(tmp_path_factory.mktemp("ftw-gguf-vision-src") / "banks.gguf")
     mmproj = _write_vision_mmproj(
         tmp_path_factory.mktemp("ftw-gguf-vision-mmproj") / "mmproj.gguf",
-        metadata=dict(_CLIP_METADATA),
+        metadata={**_CLIP_METADATA, "clip.vision.projection_dim": _FT_H},
         tensors=_full_vision_fixture_data(),
     )
     out = tmp_path_factory.mktemp("ftw-gguf-vision-out") / "ckpt"
     # CPU conversion: the tower tensors stream through the same load_weight path
-    # as a GPU conversion; no CUDA context needed for the toy geometry
+    # as a GPU conversion; no CUDA context needed for the toy geometry. The tower
+    # width must match the toy text model (projection_dim == _FT_H).
     convert_checkpoint(src, str(out), device="cpu", mmproj_path=mmproj)
     return mmproj, str(out)
 
 
-@pytest.mark.skip(reason="D-PORT-1: gguf->FTW mmproj vision packing withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_ftw_gguf_vision_tensors_roundtrip(ftw_gguf_vision_ckpt):
     """Every tower tensor the mmproj reader yields lands in the FTW under its
     FreeToken visual.* name with the reader's exact shape - the packing is the
     load_weight stream, so a drift shows up as a missing/renamed tensor."""
     import json
 
-    from freetoken.models.glm5_next.gguf import iter_gguf_vision_weights
+    from freetoken.models.gguf.mmproj import Mmproj
+    from freetoken.models.glm5_next.gguf import iter_mmproj_weights
 
     mmproj, out = ftw_gguf_vision_ckpt
-    expect = dict(iter_gguf_vision_weights(mmproj))
+    expect = dict(iter_mmproj_weights(Mmproj(mmproj, "test", "glm5v", "BF16")))
     index = json.load(open(os.path.join(out, "freetoken_weight.json")))
     got = {
         t["name"]: tuple(t["shape"])
@@ -494,7 +495,6 @@ def test_ftw_gguf_vision_tensors_roundtrip(ftw_gguf_vision_ckpt):
         assert got[name] == tuple(tensor.shape), name
 
 
-@pytest.mark.skip(reason="D-PORT-1: gguf->FTW mmproj vision packing withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_ftw_gguf_vision_metadata_carrier(ftw_gguf_vision_ckpt):
     """The metadata-only carrier merges the mmproj's clip.* KVs and keeps the main
     GGUF's tokenizer facts (chat template + vocab) byte-verbatim alongside."""
@@ -516,7 +516,6 @@ def test_ftw_gguf_vision_metadata_carrier(ftw_gguf_vision_ckpt):
     assert carrier["tokenizer.ggml.tokens"][154854] == _IMAGE_TOKEN
 
 
-@pytest.mark.skip(reason="D-PORT-1: gguf->FTW mmproj vision packing withdrawn in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_ftw_gguf_vision_boot_without_mmproj(ftw_gguf_vision_ckpt):
     """The converted FTW boots multimodal with NO --mmproj: config path resolves the
     vision spec from the merged carrier, and the mm-processor builds its fallback
@@ -527,13 +526,12 @@ def test_ftw_gguf_vision_boot_without_mmproj(ftw_gguf_vision_ckpt):
 
     _, out = ftw_gguf_vision_ckpt
     shim = cached_load_hf_config(out)
-    assert shim.architectures == ["Glm5NextGGUFForConditionalGeneration"]
-    assert shim.mmproj_path is None
-    assert shim.vision_config.depth == 24
-    assert shim.vision_config.patch_size == 14
-    assert shim.image_token_id == 154854
-    assert shim.image_processor_kwargs["patch_size"] == 14
-    assert shim.image_processor_kwargs["min_image_tokens"] == 16
+    assert shim.architectures == ["Glm5NextGGUFForCausalLM"]
+    assert shim.hf_fields["vision_config"]["depth"] == 24
+    assert shim.hf_fields["vision_config"]["patch_size"] == 14
+    assert shim.hf_fields["image_token_id"] == 154854
+    assert shim.preprocessor_config["patch_size"] == 14
+    assert shim.preprocessor_config["min_image_tokens"] == 16
     assert ftw_lacks_vision(out) is False
     proc = get_mm_processor(out)
     assert proc is not None
@@ -707,7 +705,6 @@ def test_ftw_legacy_gate_up_banks_merge_on_load(tmp_path, monkeypatch):
         assert torch.equal(gu[:, 4:], up_t)
 
 
-@pytest.mark.skip(reason="D-PORT-1: convert_checkpoint lost the mmproj_path kwarg in round-6 merge (main-wins #803/#810); restore with the D2 port")
 def test_convert_mmproj_non_clip_fails_fast(tmp_path):
     from test_glm5_next_gguf import _write_mmproj_gguf
     from freetoken.checkpoint.convert import convert_checkpoint
