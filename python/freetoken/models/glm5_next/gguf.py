@@ -114,6 +114,17 @@ def to_gguf(name: str, tensors: dict[str, int]) -> tuple[str, ...]:
     return tuple(f"blk.{m.group(1)}.{leaf}" for leaf in _LAYER_LEAVES.get(m.group(2), ()))
 
 
+def _scalar(val, key: str):
+    """Fold a llama key_or_arr value (scalar, or uniform per-layer array) to a scalar."""
+    if isinstance(val, (list, tuple)):
+        if not val:
+            raise ValueError(f"glm5next.{key} is an empty per-layer array")
+        if len(set(val)) > 1:
+            raise ValueError(f"glm5next.{key} varies per layer; FreeToken carries one scalar")
+        return val[0]
+    return val
+
+
 def _layer_types(shim: "GgufConfigShim", num_layers: int) -> tuple[str, ...]:
     """Per-decoder-layer kinds: DSA where the MLA projections sit, KDA elsewhere, from the
     per-block ``attention.head_count_kv`` list (0 on the KDA blocks, 1 on the MLA ones).
@@ -147,13 +158,34 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
             raise KeyError(f"missing GGUF metadata key {prefix}.{key}")
         return val
 
-    # block_count also counts the MTP block a GGUF carries after the decoder
-    n_mtp = int(kv("nextn_predict_layers", 0) or 0)
-    num_layers = int(need("block_count")) - n_mtp
-    layer_types = _layer_types(shim, num_layers)
-    first_dense = int(need("leading_dense_block_count"))
+    kv_vocab = kv("vocab_size")
+    if kv_vocab is not None and int(_scalar(kv_vocab, "vocab_size")) != int(shim.vocab_size):
+        raise ValueError(
+            f"{prefix}.vocab_size {kv_vocab} != vocab sized from token_embd.weight ({shim.vocab_size})"
+        )
 
-    heads = int(need("attention.head_count"))
+    # block_count also counts the MTP block a GGUF carries after the decoder
+    block_count = int(need("block_count"))
+    n_mtp = int(kv("nextn_predict_layers", 0) or 0)
+    if not 0 <= n_mtp < block_count:
+        raise ValueError(f"{prefix}.nextn_predict_layers {n_mtp} outside 0..{block_count - 1}")
+    num_layers = block_count - n_mtp
+    layer_types = _layer_types(shim, num_layers)
+    from .args import KDA_LAYER
+
+    n_kda = layer_types.count(KDA_LAYER)
+    if not 0 < n_kda < num_layers:
+        # an all-KDA (or all-DSA) trunk has no layer of one kind; llama.cpp needs
+        # 0 < n_recr < n_layer the same way
+        raise ValueError(
+            f"{prefix}: {n_kda} KDA layers of {num_layers} trunk layers "
+            "(llama.cpp requires 0 < n_recr < n_layer)"
+        )
+    first_dense = int(need("leading_dense_block_count"))
+    if not 0 <= first_dense <= num_layers:
+        raise ValueError(f"{prefix}.leading_dense_block_count {first_dense} outside 0..{num_layers}")
+
+    heads = int(_scalar(need("attention.head_count"), "attention.head_count"))
     qk_nope, v_head = int(need("attention.key_length_mla")), int(need("attention.value_length_mla"))
     # NoPE: the main attention carries no rotary dims (rope survives only in the indexer)
     if int(kv("rope.dimension_count", 0) or 0) != 0:
@@ -167,7 +199,14 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
     conv_q = next((i for i in index.values() if i.name.endswith("ssm_conv1d_q.weight")), None)
     kda_heads = conv_q.ne[2] // kda_head_dim if conv_q is not None else heads
 
-    kpool = int(kv("attention.indexer.kpool", 1) or 1)
+    kpool_raw = kv("attention.indexer.kpool")
+    kpool = 1 if kpool_raw is None else int(_scalar(kpool_raw, "attention.indexer.kpool"))
+    index_topk = int(need("attention.indexer.top_k"))
+    if kpool <= 0 or index_topk <= 0:
+        # a non-positive kpool would pass the modulo check and silently disable compression
+        raise ValueError(f"{prefix}.attention.indexer: kpool {kpool} and top_k {index_topk} must be > 0")
+    if index_topk % kpool != 0:
+        raise ValueError(f"indexer.top_k {index_topk} not divisible by indexer.kpool {kpool}")
     # the compressor tensors exist exactly when the indexer pools; a metadata-only GGUF
     # keeps the fact only through kpool > 1
     names = gguf_tensor_names(shim.model_path)
@@ -188,6 +227,14 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
         raise NotImplementedError(f"{shim.model_path}: non-uniform swiglu_clamp_exp / swiglu_clamp_shexp is not served")
     if int(kv("expert_gating_func", 2) or 2) != 2:
         raise NotImplementedError(f"{shim.model_path}: expert_gating_func other than sigmoid (2) is not served")
+    moe_inter = int(_scalar(need("expert_feed_forward_length"), "expert_feed_forward_length"))
+    n_shared = int(kv("expert_shared_count", 1) or 1)
+    shexp_ffn = kv("expert_shared_feed_forward_length")
+    if shexp_ffn is not None and int(_scalar(shexp_ffn, "expert_shared_feed_forward_length")) != moe_inter * n_shared:
+        raise ValueError(
+            f"{prefix}.expert_shared_feed_forward_length {shexp_ffn} != "
+            f"expert_feed_forward_length * expert_shared_count ({moe_inter} * {n_shared})"
+        )
     text = SimpleNamespace(
         **_FAMILY_DEFAULTS,
         num_hidden_layers=num_layers,
@@ -197,7 +244,7 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
         hidden_size=int(need("embedding_length")),
         num_attention_heads=heads,
         vocab_size=int(shim.vocab_size),
-        intermediate_size=int(need("feed_forward_length")),
+        intermediate_size=int(_scalar(need("feed_forward_length"), "feed_forward_length")),
         rms_norm_eps=float(need("attention.layer_norm_rms_epsilon")),
         max_position_embeddings=int(need("context_length")),
         q_lora_rank=int(need("attention.q_lora_rank")),
@@ -208,7 +255,7 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
         mla_use_nope=True,
         index_n_heads=int(need("attention.indexer.head_count")),
         index_head_dim=int(need("attention.indexer.key_length")),
-        index_topk=int(need("attention.indexer.top_k")),
+        index_topk=index_topk,
         indexer_types=indexer_types,
         index_kpool=kpool,
         index_kpool_compress=kpool_compress,
@@ -225,9 +272,9 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
         hc_sinkhorn_iters=int(need("hyper_connection.sinkhorn_iterations")),
         hc_eps=float(need("hyper_connection.epsilon")),
         n_routed_experts=int(need("expert_count")),
-        n_shared_experts=int(kv("expert_shared_count", 1) or 1),
+        n_shared_experts=n_shared,
         num_experts_per_tok=int(need("expert_used_count")),
-        moe_intermediate_size=int(need("expert_feed_forward_length")),
+        moe_intermediate_size=moe_inter,
         norm_topk_prob=bool(need("expert_weights_norm")),
         routed_scaling_factor=float(need("expert_weights_scale")),
         n_group=int(kv("expert_group_count", 1) or 1),
@@ -491,15 +538,44 @@ def iter_gguf_weights(
     args = config.glm5_args
     index = gguf_tensor_index(model_path)
     hidden = config.hidden_size
+    from freetoken.third_party.gguf.constants import GGMLQuantizationType
+
+    q8_0, q6_k = int(GGMLQuantizationType.Q8_0), int(GGMLQuantizationType.Q6_K)
+    consumed: set[str] = set()
 
     def t(name: str) -> GgufTensorInfo:
-        return index[name if name in index else f"{name}.weight"]
+        key = name if name in index else f"{name}.weight"
+        consumed.add(key)
+        return index[key]
+
+    def packed(name: str) -> GgufTensorInfo:
+        # the convert swap builds every packed linear as Q8_0; a deviant dense row
+        # would otherwise die as a late loader shape assert
+        info = t(name)
+        if info.ggml_type != q8_0:
+            raise ValueError(
+                f"{info.name} is {GGMLQuantizationType(info.ggml_type).name}; "
+                "the convert swap builds packed linears as Q8_0"
+            )
+        return info
 
     def bf16(name: str) -> torch.Tensor:
         return _float(t(name)).to(torch.bfloat16)
 
-    yield from fused("model.embed_tokens", [t("token_embd")], [matrix(t("token_embd"))], hidden)
-    yield from fused("lm_head", [t("output")], [matrix(t("output"))], hidden)
+    emb = t("token_embd")
+    if emb.ggml_type != q8_0:
+        raise ValueError(
+            f"{emb.name} is {GGMLQuantizationType(emb.ggml_type).name}; "
+            "the convert swap builds the embedding as Q8_0"
+        )
+    yield from fused("model.embed_tokens", [emb], [matrix(emb)], hidden)
+    out = t("output")
+    if out.ggml_type != q6_k:
+        raise ValueError(
+            f"{out.name} is {GGMLQuantizationType(out.ggml_type).name}; "
+            "the convert swap builds the untied head as Q6_K"
+        )
+    yield from fused("lm_head", [out], [matrix(out)], hidden)
     yield "model.norm.weight", bf16("output_norm")
 
     for layer in range(config.num_layers):
@@ -514,16 +590,26 @@ def iter_gguf_weights(
         if args.is_kda_layer(layer):
             sa = f"{pre}.self_attn"
             p, h, d = args.linear_num_heads * args.linear_head_dim, args.linear_num_heads, args.linear_head_dim
-            group = [t(f"{blk}.{n}") for n in ("attn_q", "attn_k", "attn_v", "ssm_beta", "ssm_f_a", "ssm_g_a")]
+            group = [packed(f"{blk}.{n}") for n in ("attn_q", "attn_k", "attn_v", "ssm_beta", "ssm_f_a", "ssm_g_a")]
             yield from fused(f"{sa}.in_proj", group, [matrix(i) for i in group], hidden)
             # the GGUF conv kernels already carry the [channels, 1, kernel] singleton dim
             conv = torch.cat([_float(t(f"{blk}.ssm_conv1d_{q}")) for q in ("q", "k", "v")], dim=0)
             yield f"{sa}.conv1d.weight", conv.to(torch.bfloat16)
             for proj, src, k in (("f_b_proj", "ssm_f_b", d), ("g_b_proj", "ssm_g_b", d), ("o_proj", "attn_output", p)):
-                info = t(f"{blk}.{src}")
+                info = packed(f"{blk}.{src}")
                 yield from fused(f"{sa}.{proj}", [info], [matrix(info)], k)
             # the converter stores A_log pre-transformed as -exp(A_log); the kernels want the raw log
-            yield f"{sa}.A_log", torch.log(-_float(t(f"{blk}.ssm_a")))
+            ssm_a = _float(t(f"{blk}.ssm_a"))
+            if not torch.isfinite(ssm_a).all():
+                # NaN >= 0 is False, so a NaN row would slip the sign check and log()
+                # would silently poison the recurrent gate
+                raise ValueError(f"{blk}.ssm_a: ssm_a holds non-finite entries; cannot derive A_log")
+            bad = int((ssm_a >= 0).sum())
+            if bad:
+                raise ValueError(
+                    f"{blk}.ssm_a: ssm_a holds -exp(A_log) but {bad} entries are >= 0; cannot derive A_log"
+                )
+            yield f"{sa}.A_log", torch.log(-ssm_a)
             yield f"{sa}.dt_bias", _float(t(f"{blk}.ssm_dt.bias"))
             yield f"{sa}.o_norm.weight", bf16(f"{blk}.ssm_norm")
         else:
@@ -534,7 +620,7 @@ def iter_gguf_weights(
                 ("kv_a_proj_with_mqa", "attn_kv_a_mqa", hidden),
                 ("o_proj", "attn_output", args.num_heads * args.v_head_dim),
             ):
-                info = t(f"{blk}.{src}")
+                info = packed(f"{blk}.{src}")
                 yield from fused(f"{sa}.{proj}", [info], [matrix(info)], k)
             yield f"{sa}.kv_b_proj.weight", _kv_b(
                 t(f"{blk}.attn_k_b"), t(f"{blk}.attn_v_b"), args.num_heads, args.kv_lora_rank
@@ -543,7 +629,8 @@ def iter_gguf_weights(
             yield f"{sa}.kv_a_layernorm.weight", bf16(f"{blk}.attn_kv_a_norm")
             # wq_b serves its checkpoint quant (packed); wk / weights_proj are dense modules
             # (glm_moe_dsa's indexer reasoning), dequantized at load when the file quantized them
-            yield from fused(f"{sa}.indexer.wq_b", [t(f"{blk}.indexer.attn_q_b")], [matrix(t(f"{blk}.indexer.attn_q_b"))], args.q_lora_rank)
+            wqb = packed(f"{blk}.indexer.attn_q_b")
+            yield from fused(f"{sa}.indexer.wq_b", [wqb], [matrix(wqb)], args.q_lora_rank)
             yield f"{sa}.indexer.wk.weight", _float(t(f"{blk}.indexer.attn_k")).to(torch.bfloat16)
             yield f"{sa}.indexer.weights_proj.weight", _float(t(f"{blk}.indexer.proj")).to(torch.bfloat16)
             yield f"{sa}.indexer.k_norm.weight", bf16(f"{blk}.indexer.k_norm")
@@ -558,7 +645,7 @@ def iter_gguf_weights(
                 ("up_proj", "ffn_up", hidden),
                 ("down_proj", "ffn_down", config.intermediate_size),
             ):
-                info = t(f"{blk}.{src}")
+                info = packed(f"{blk}.{src}")
                 yield from fused(f"{mlp}.{proj}", [info], [matrix(info)], k)
         else:
             yield f"{mlp}.gate.weight", bf16(f"{blk}.ffn_gate_inp")
@@ -569,8 +656,19 @@ def iter_gguf_weights(
                 ("up_proj", "ffn_up_shexp", hidden),
                 ("down_proj", "ffn_down_shexp", shared_i),
             ):
-                info = t(f"{blk}.{src}")
+                info = packed(f"{blk}.{src}")
                 yield from fused(f"{mlp}.shared_experts.{proj}", [info], [matrix(info)], k)
+
+    # anything the trunk never asked for is a corrupt or unknown file: name it
+    for leftover in sorted(set(index) - consumed):
+        if leftover.startswith("blk."):
+            head, sep, suffix = leftover[len("blk."):].partition(".")
+            if sep and head.isdigit():
+                if int(head) >= config.num_layers:
+                    continue  # the MTP/draft block, ignored like the HF reader
+                if suffix.startswith(("ffn_gate_exps", "ffn_up_exps", "ffn_down_exps")):
+                    continue  # routed banks load through models/gguf/experts
+        raise ValueError(f"unmapped glm5next GGUF tensor: {leftover}")
 
     if vision:
         yield from iter_mmproj_weights(find_mmproj(model_path, mmproj_path))
