@@ -2,7 +2,7 @@
 title: "Регламент интеграции origin/main в приватную ветку: волны, прерванная волна, boot-smoke"
 date: 2026-09-22
 hardware: RTX 5090 32GB (boot-smoke)
-branch-commits: "vektory79; слияния: раунд 1 - merge-коммит 380e9eb (родители 6e673ab + afd99cb, 8 конфликтных файлов / 16 ханков), раунд 2 - afd99cb -> cac247a (ноль конфликтов), раунд 3 - merge 5001504 (родители 1445fc1 + 6410c97, ноль текстовых конфликтов, продолжен после прерывания), раунд 4 - merge aa0e71c (родители 41d3581 + 581fdca = upstream/main, 3 конфликта по 1 ханку), раунд 5 - merge f0eed55 (родители b8c3794 + 11c1adb = upstream/main, один аменд после ревью); rebase-подход отклонён в пользу merge"
+branch-commits: "vektory79; слияния: раунд 1 - merge-коммит 380e9eb (родители 6e673ab + afd99cb, 8 конфликтных файлов / 16 ханков), раунд 2 - afd99cb -> cac247a (ноль конфликтов), раунд 3 - merge 5001504 (родители 1445fc1 + 6410c97, ноль текстовых конфликтов, продолжен после прерывания), раунд 4 - merge aa0e71c (родители 41d3581 + 581fdca = upstream/main, 3 конфликта по 1 ханку), раунд 5 - merge f0eed55 (родители b8c3794 + 11c1adb = upstream/main, один аменд после ревью), раунд 6 - merge 594934d -> amend 220b79e (родители 23c1f02 + 32056cf = upstream/main, 27 конфликтных файлов, один аменд после ревью F1-F5); rebase-подход отклонён в пользу merge"
 status: validated
 tags: [merge, main, upstream, remotes, waves, discovery, adaptation-log, test-results, boot-smoke, provenance, merge-tree, stash, duplicates]
 ---
@@ -149,6 +149,50 @@ f0eed55 (родители b8c3794 + 11c1adb), бэкап - backup/vektory79-pre-
   может оставить веточные хвосты со ссылками на неопределённые имена; резолв -
   "ханки main'а + вплетение тел main'а", затем grep по каждому выброшенному имени
   хелпера на живые ссылки по всему дереву.
+
+## Раунд 6 (2026-10-24/25): второй re-platform upstream/main, ловушки main-wins
+
+upstream/main 32056cf (38 коммитов, 202 файла, +11997/-1528) пере-платформировал
+NVFP4-квант-механику (#732/#739 BREAKING, #737 w4a4 на sm_120), hybrid fetch
+(#742/#778/#734) и принёс собственные mmproj-пути (#803/#810), дублирующие
+веточные порты D2/D4 round 5. Merge 594934d (родители 23c1f02 + 32056cf),
+27 конфликтных файлов; режим по директиве пользователя ДО волны - минимальный
+зелёный merge + deferred-ports; после ревью один аменд (F1-F5) -> 220b79e.
+Кейс волны и карта порт-долга round 6 -
+[../cases/merge-round6-upstream-main/TASK.md](../cases/merge-round6-upstream-main/TASK.md).
+Процедурные уроки:
+
+- **Main-wins-резолв МОЛЧА вернул регрессию round 5.** Резолв "theirs" на
+  register.py потерял веточный точечный фикс `_gguf_tensor_types` (48915b4:
+  FTW -> индекс-мета gguf_tensor_types -> семейный контракт ftw_tensor_types ->
+  громкий re-convert RuntimeError) - баг "gguf->FTW не бутится" вернулся,
+  поймал ровно один тест (test_ftw_quant_config_resolves_schemes). Правило:
+  при main-wins на файле, где ветка имеет точечные фиксы, grepить веточные
+  фиксы по списку недавних коммитов ветки, а не полагаться на union/main-wins
+  механику резолва.
+- **Счётчики тестов в test-results.md обязаны быть замеренными, а не
+  пересказанными.** Ревью нашло 2 расхождения волны: test_cache_budget заявлено
+  53 passed, замер на 220b79e - 51 passed; сплит skip-маркеров заявлен
+  D-PORT-D2 x30 / D-PORT-D4 x51, grep-факт - x44 / x37 (суммы 35 passed /
+  91 skipped сходятся). Бухгалтерия по памяти ломается на многофазной волне -
+  только замер на финальном дереве.
+- **Осиротелый хелпер после main-wins rewrite.** `_gguf_auto_floor_gate`
+  (engine.py) остался без единого прод-call-site: юнит-тесты звали def напрямую
+  и были зелёными, маскируя мёртвую гвардию fail-fast unfundable slot floors,
+  при этом wiring-тест был красный. Правило: grep call-sites каждого веточного
+  хелпера, попавшего в main-wins файл; def без прод-call-site = либо вживить,
+  если зависимости живы (здесь гейт зависел только от gguf_signature_groups /
+  check_partition_floors / _resolve_auto_moe_cache_size), либо формально
+  задеферить.
+- **Skip-маркеры с именованным D-PORT - по round-5 дисциплине, но сплит причин
+  замерять grep-ом.** Выведенные D2/D4-тесты без маркеров громко падали
+  (test_glm5_next_gguf.py на сыром merge: 90 failed / 35 passed); только
+  маркировка reason= именованный порт сделала merge честно зелёным (итог
+  35 passed / 91 skipped).
+
+Статус раунда: CPU-зелёный (0 failed на 220b79e: checkpoint 69 passed / 13
+skipped, test_cache_budget 51/2, test_glm5_next_gguf 35/91, консолидированный
+прогон 155/16); boot-smoke и GPU-порции отложены в cloud-окно.
 
 ## Правила разрешения конфликтов
 

@@ -163,6 +163,14 @@ Specification / Acceptance / Checklist.
   Шаблон discovery-этапа:
   [merge-main-round2-work/discovery-report.md](merge-main-work/merge-main-round2-work/discovery-report.md);
   триаж находок — [rebase-onto-main-work/findings-triage.md](merge-main-work/rebase-onto-main-work/findings-triage.md).
+- [merge-round6-upstream-main/](merge-round6-upstream-main/) — кейс round-6
+  merge upstream/main 32056cf (38 коммитов, второй re-platform-раунд):
+  минимальный зелёный merge + deferred-ports; findings F1-F5 (потерянный
+  main-wins-ом веточный фикс register.py, осиротелый floor gate, skip-дисциплина)
+  закрыты амендом 594934d -> 220b79e; порт-долг round 6 - D2 mmproj (withdrawn,
+  main-wins #803/#810), D4 loader contract, D5 nvfp4-KV. Вход:
+  [TASK.md](merge-round6-upstream-main/TASK.md). Статус: CPU-зелёный
+  (0 failed); boot-smoke и GPU-порции отложены в cloud-окно.
 - [mmq-prefill-kernel/](mmq-prefill-kernel/) — бриф v0->v2: как нулевой
   эксперимент (сортировка пар) уточнил цель следующей итерации. Вход:
   [TASK.md](mmq-prefill-kernel/TASK.md).
@@ -209,6 +217,20 @@ Specification / Acceptance / Checklist.
   стека), аудиты мёртвого кода и тестов зафиксированы остатками в сек. 9
   TASK.md. Карта портов -
   [../topics/round5-ggml-replatform-deferred-ports.md](../topics/round5-ggml-replatform-deferred-ports.md).
+- [round6-deferred-ports/](round6-deferred-ports/) — план порт-долга round 6
+  (после минимального зелёного merge upstream/main 32056cf, HEAD d66f6e3):
+  D2 mmproj-зрение (выведен main-wins #803/#810: 44 skip-маркера D-PORT-D2
+  в test_glm5_next_gguf + 4 D-PORT-1 в tests/checkpoint/test_ftw_gguf_banks
+  + RuntimeError weight.py:263 + MMProj vision smoke #810), D4 контракт
+  gguf-лоадера (main-wins #721, 37 skip-маркеров D-PORT-D4;
+  ftw_tensor_types уже возвращён фиксом F1), D5 nvfp4-KV generic read-path
+  (ветка 660c814 + перекалибровка 2 stale-pin тестов test_quant_config)
+  и фаза D3 - честный A/B decode строго после D5 (fp8-KV 22.21 tok/s против
+  nvfp4-эталона 27.71 tok/s сейчас несравнимы; ре-порт слот-пулов 393b682
+  или NO-GO - решает замер). Секция "Не входит": glm_dsa OutOfResources
+  (baseline с 09-12), module-skip test_gguf_expert_banks, 33 CPU-skip
+  nvfp4_w4a4. Вход: [TASK.md](round6-deferred-ports/TASK.md).
+  Статус: ОТКРЫТА 2026-10-25 - фазы не начаты.
 
 ## Навигация
 

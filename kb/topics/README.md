@@ -16,7 +16,7 @@
 | [moe-hybrid-cost-model.md](moe-hybrid-cost-model.md) | Из чего складывается шаг декода гибридного MoE; пределы флаговых рычагов |
 | [ftw-load-path.md](ftw-load-path.md) | Как GGUF превращается в FTW и почему бут падает с 94-132 с до 52 с; контракт silent-None |
 | [gguf-upstream-map.md](gguf-upstream-map.md) | Карта upstream llama.cpp GLM5NEXT для GGUF-портов; что проверять перед новым портом |
-| [merge-wave-procedure.md](merge-wave-procedure.md) | Регламент слияния origin/main и upstream/main в ветку: волны, правила конфликтов, резолв целевого remote, продолжение прерванной волны |
+| [merge-wave-procedure.md](merge-wave-procedure.md) | Регламент слияния origin/main и upstream/main в ветку: волны, правила конфликтов, резолв целевого remote, продолжение прерванной волны; ловушки main-wins раунда 6 - потерянный веточный фикс register.py, осиротелый floor gate, замеренные счётчики |
 | [round5-ggml-replatform-deferred-ports.md](round5-ggml-replatform-deferred-ports.md) | Что main пере-платформировал в GGUF-стеке в раунде 5 (vendored ggml, слот-пулы, deps) и карта порт-долга D1-D5 ветки со статусами |
 | [glm5next-gguf-loader-port.md](glm5next-gguf-loader-port.md) | Как порт D4 (коммит 9314c9b) вернул glm5next GGUF-сервинг на вендоренном ggml: дублирующийся ключ схемы, GPU-касты под op_dequantize, pad_rows MMQ-хвоста, GGUF->FTW стриминг, corr-методика кросс-валидации |
 | [hybrid-moe-slot-pools-port.md](hybrid-moe-slot-pools-port.md) | Как порт D3 (коммит 393b682) закрылся тремя гейтами конфига поверх слот-пулов main: format screen, header-отказ hybrid, auto floor gate; T2 не возвращён; гибрид 27.71 tok/s против offload 21.00 (+32%) |
