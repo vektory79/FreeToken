@@ -474,6 +474,13 @@ device=cuda, гоняющий GPU-ногу _cast (CPU-часть сюит её �
 бут nvfp4-KV 786k-рецепта (эталон 27.71 tok/s). Качественный A/B без
 деградации - фаза D3 (раздел 7), не D5.
 
+Follow-up fp8-block закрыт: старые пины test_quant_config.py (~строки 410/422)
+утверждали недостижимые reject-пути - TritonFp8BlockMoEKernel обзавёлся
+cpu_format='fp8_block' (cpu_ok в _common_reject), KernelSelectionError больше не
+поднимается; оба теста переписаны на пин успешного выбора
+(test_hybrid_explicit_fp8_kernel_request_is_served,
+test_hybrid_auto_fp8_kernel_lands_on_triton), консолидированный прогон 260/53/0.
+
 ## 7. Фаза D3 - честный A/B decode (только ПОСЛЕ D5)
 
 Цель: решить замером, нужен ли ре-порт веточной hybrid-механики (393b682:
