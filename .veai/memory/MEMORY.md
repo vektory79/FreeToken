@@ -84,7 +84,6 @@
 - [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-75d61a728aa1.md) — mmproj GGUF vision case CLOSED phases 1-5 (e35577d..f67449b), 347/347 tensors exact, HW PASS, TRAPS T68-T75
 - [ft-w1narrow-ngram-wave](ft-w1narrow-ngram-wave-60722281b1c8.md) — W1-narrow CLOSED: A/B NO-GO on target profile (ngram acceptance 0); stage0 method flaw; scaffold uncommitted
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-fbb3d9b43663.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
-- [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-9a35bd8777d3.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-ea3cd19f711b.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-merge-round5-deferred-ports](ft-merge-round5-deferred-ports-94670d11c055.md) — Merge round5 f0eed55: D1-D5 DONE; residuals fixed; kb links repaired (8bba8e5); only fa/fi/trtllm open
 - [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-e8f30d956dd0.md) — Spec-decode GLM-5.3-Flash case CLOSED NO-GO: W0 R4 3.76, W0.5 cW 0.50, W1 ngram acceptance=0 (stage0 method flaw)
@@ -93,3 +92,5 @@
 - [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-fd804af7adee.md) — GGUF glm5next VRAM: post-round5 matrix in USED MiB (5 configs + ladders), 0.80 floor, kb report used-based
 - [ru-style-no-calques](ru-style-no-calques-6598bec9e18b.md) — User style rule: no Russified calques like робастный in Russian texts; codified in AGENTS.md ## Language (e596bba)
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-77e5b594b1d8.md) — Git index keeps stale staged versions from parallel sessions; re-stage explicit paths before every commit
+- [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-1152a9d2a5e0.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
+- [ft-merge-round6-pending-handoff](ft-merge-round6-pending-handoff-58002cb4f5d1.md) — Round 6 merge CLOSED: d66f6e3 green, boot-smoke 22.21 tok/s; port debt D2/D4/D5 kb/cases/round6-deferred-ports

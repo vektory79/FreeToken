@@ -3,7 +3,7 @@ name: "ft-gguf-serving-vram-headroom"
 description: "GGUF glm5next VRAM: post-round5 matrix in USED MiB (5 configs + ladders), 0.80 floor, kb report used-based"
 type: project
 lastUpdated: 2026-10-24T20:32
-lastRecall: 2026-10-24T19:08
+lastRecall: 2026-10-24T21:17
 ---
 
 # GGUF glm5next serving VRAM headroom: measured config matrices (RTX 5090, 32607 MiB)

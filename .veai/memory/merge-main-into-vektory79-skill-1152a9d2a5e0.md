@@ -2,8 +2,8 @@
 name: "merge-main-into-vektory79-skill"
 description: "Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3"
 type: project
-lastUpdated: 2026-10-17T18:07
-lastRecall: 2026-10-17T17:25
+lastUpdated: 2026-10-25T00:52
+lastRecall: 2026-10-24T23:01
 ---
 
 # Skill merge-main-into-vektory79 (оркестрирующий)
@@ -28,3 +28,5 @@ Review cycle: review-1 fail (1 блокер: у call_test_agent не был за
 **Актуализация 2026-10-05:** скилл после round-4 правок - 230 строк (было 198), закоммичен 1a3bbe3 "chore(skills): fold merge round 4 lessons into merge-main-into-vektory79" (родитель d1ce146 docs(kb) round-4 дистиллят). Новые режимы в скилле: all-remote discovery (nothing-to-merge только при пустой дельте по ВСЕМ remote), SPLIT_ROUND (занятая VRAM: CPU-only merge по одобрению + pending-handoff + amend при падении boot-smoke в cloud-окне), предклассификация GPU-only тестов, tee boot-smoke stdout, ревью A/B одним агентом при занятой VRAM, triage-класс deferred-followup (пример F1 -> 9ac8830), сверка git diff --cached при финализации, kb-shell-read и edit_file-heredoc заметки.
 
 **Round 5 (2026-10-17) - первый RE-PLATFORM раунд, merge f0eed55 (parents b8c3794+11c1adb, amend docs+comment; kb 8a62625).** Upstream/main пере-платформил GGUF (вендоренные ggml-ядра вместо csrc/gguf, per-format slot pools, layers/quantization/*). Новый стандартный форк: РЕШЕНИЕ О ГЛУБИНЕ до merge-волны (minimal green merge + deferred ports D1-D5 vs полная адаптация в merge-коммите) - пользователь выбрал minimal green. Skip-маркировка отложенных сюит (183+ тестов) легитимна при reason=именованный порт + probe-верификации честности ревьюером; счётчики skip в логах обязаны совпадать с фактическими маркерами (engine 18; test_cache_budget 9 D3 + 1 D4). Boot-smoke: старый рецепт может упасть на НОВЫХ assert-ах конфига main (cache-budget арифметика) - классифицировать как config-вопрос, адаптировать рецепт, девиацию документировать (r3: offload-стратегия, FTW NVFP4, /ready 87s). Stash-collision протокол: каждый путь в stash сверять с worktree (equal-or-newer), отсутствующее - в архив task-папки, потом drop - не盲-pop поверх пересозданных memory-файлов. engine.py auto-union оставляет висячие веточные хвосты с undefined именами - резолвить как "main-хунки + сплайс", затем grep каждого удалённого хелпера. All-remote discovery сработал как задуман (origin/main содержится в upstream/main). D1-D5 ledger: kb/topics/round5-ggml-replatform-deferred-ports.md + память ft-merge-round5-deferred-ports.
+
+**Round 6 (2026-10-24/25) - второй re-platform upstream/main, merge 594934d -> amend 220b79e.** SPLIT-ROUND при занятой VRAM; pending-handoff в памяти ft-merge-round6-pending-handoff. Урок 1: main-wins-резолв МОЛЧА вернул round-5-регрессию (register.py потерял фикс _gguf_tensor_types, 48915b4; поймал test_ftw_quant_config_resolves_schemes) - при main-wins на файле с веточными фиксами grep-ить фиксы по недавним коммитам ветки. Урок 2: осиротелый хелпер после rewrite (engine.py _gguf_auto_floor_gate, 0 call-sites) - grep call-sites, юнит-тесты маскируют мёртвый прод-путь. Урок 3: счётчики test-results.md обязаны быть замеренными. Порт-долг: D2 выведен main-wins (#803/#810), D4 loader contract, D5 nvfp4 (2 stale-pin vs #737). kb: cases/merge-round6-upstream-main/TASK.md.
