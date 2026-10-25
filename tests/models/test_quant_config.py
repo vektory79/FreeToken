@@ -405,28 +405,20 @@ def test_hybrid_explicit_kernel_error_names_the_usable_alternative(monkeypatch):
         select_kernel(Nvfp4MoEMethod.candidates, "b12x", cfg)
 
 
-@pytest.mark.skip(
-    "stale pin: the triton fp8-block kernel gained a CPU executor format "
-    "(fp8_block.py cpu_format='fp8_block', coverage tests/moe/test_cpu_moe_fp8_block.py), "
-    "so 'GPU-only' no longer holds - a new test under the current contract is needed"
-)
-def test_hybrid_explicit_fp8_kernel_error_reports_an_empty_table():
-    """fp8 experts ship one kernel and it decodes on the GPU only: the explicit request must say no kernel can run here, not name an alternative that does not exist."""
+def test_hybrid_explicit_fp8_kernel_request_is_served():
+    """The triton fp8-block kernel decodes on the CPU executor (cpu_format='fp8_block'): the explicit request succeeds instead of being rejected as GPU-only."""
     cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=Fp8BlockConfig.SCHEMES["BLOCK"], strategy="hybrid", decode_target="cpu")
-    with pytest.raises(KernelSelectionError, match=r"has no CPU executor format.*\(no kernel in the table is usable here\)"):
-        select_kernel(Fp8BlockMoEMethod.candidates, "triton", cfg)
+    kernel = select_kernel(Fp8BlockMoEMethod.candidates, "triton", cfg)
+    assert kernel.name == "triton"
+    assert kernel.cpu_format == "fp8_block"
 
 
-@pytest.mark.skip(
-    "stale pin: the triton fp8-block kernel gained a CPU executor format "
-    "(fp8_block.py cpu_format='fp8_block', coverage tests/moe/test_cpu_moe_fp8_block.py), "
-    "so auto no longer rejects the table - a new test under the current contract is needed"
-)
-def test_hybrid_auto_fp8_kernel_error_lists_what_was_skipped():
-    """The auto branch's rejection carries the same per-kernel reasons the explicit path got."""
+def test_hybrid_auto_fp8_kernel_lands_on_triton():
+    """Auto over the single-entry fp8 table picks the one CPU-capable kernel, so hybrid fp8 experts get a cpu_spec instead of a rejection."""
     cfg = MoEConfig(num_experts=256, hidden=6144, intermediate=3072, top_k=4, scheme=Fp8BlockConfig.SCHEMES["BLOCK"], strategy="hybrid", decode_target="cpu")
-    with pytest.raises(KernelSelectionError, match=r"no usable kernel in table.*triton: has no CPU executor format"):
-        select_kernel(Fp8BlockMoEMethod.candidates, "auto", cfg)
+    kernel = select_kernel(Fp8BlockMoEMethod.candidates, "auto", cfg)
+    assert kernel.name == "triton"
+    assert kernel.cpu_format == "fp8_block"
 
 
 def test_nvfp4_auto_selection_lands_on_w4a4_where_available(monkeypatch):
