@@ -3,7 +3,7 @@ title: "\"Round 6 порт-долг: ре-имплементация D2/D4/D5 п
 date: 2026-10-25
 hardware: "\"GPU-волны (boot-smoke, CUDA/vision-тесты, A/B decode) - в cloud-окне; CPU-подготовка и тесты - в любое время\""
 commits: "\"база - d66f6e3 (round-6 merge, parents 23c1f02 + 32056cf); источники веточной функциональности - коммиты round-5 кампании: D2 7bc68b0, D3 393b682, D4 9314c9b, D5 660c814\""
-status: "\"В РАБОТЕ - D2 CPU-часть закрыта (523452b/e1de1df); GPU-smoke #810 и verify 347/347 ждут cloud-окно; D4/D5/D3 не начаты\""
+status: "\"В РАБОТЕ - D2 и D4 CPU-части закрыты (523452b/e1de1df, 2276069); GPU-smoke #810, verify 347/347, boot-smoke raw GGUF и кросс-валидация 38/38 ждут cloud-окно; D5/D3 не начаты; маркер 1433 переназначен D-PORT-D5\""
 tags: [merge, upstream, round6, deferred-ports, D-PORT, mmproj, vision, gguf-loader, nvfp4, kv-quant, stale-pin, no-dual-logic]
 ---
 
@@ -13,7 +13,11 @@ Status: В РАБОТЕ 2026-10-25. D2 (mmproj-зрение): CPU-часть з�
 523452b "feat(models): serve gguf mmproj vision through the main mmproj path"
 и e1de1df "feat(checkpoint): pack gguf mmproj vision into ftw carriers on
 convert" - см. раздел 4, "Исполнение (2026-10-25)"; GPU-smoke #810 и verify
-347/347 ожидают cloud-окно. Не начаты: D4, D5, D3. Три фазы порт-долга после round-6
+347/347 ожидают cloud-окно. D4 (контракт gguf-лоадера): CPU-часть закрыта
+коммитом 2276069 "feat(models): harden the glm5next gguf loader contract
+guards" - см. раздел 5, "Исполнение (2026-10-25)"; boot-smoke raw GGUF и
+кросс-валидация 38/38 ожидают cloud-окно; маркер 1433 переназначен
+D-PORT-D5. Не начаты: D5, D3. Три фазы порт-долга после round-6
 merge: D2 (mmproj-зрение), D4 (контракт gguf-лоадера), D5 (nvfp4-KV generic
 read-path) и фаза D3 - честный A/B decode строго ПОСЛЕ D5. Рамка всего кейса -
 директива пользователя 2026-10-25 о запрете двойных логик (раздел 0): веточный
@@ -292,6 +296,60 @@ grep-ом совпадают); возвращены только гарды/ко
 каждый сидит на main-примитивах; тесты зелёные; boot-smoke PASS; остаточных
 расхождений контракта нет (итог diff-ревью зафиксирован в kb-статье фазы);
 grep-ревью "нет файлов с двумя логиками".
+
+### Исполнение (2026-10-25)
+
+CPU-часть фазы закрыта одним коммитом: 2276069 "feat(models): harden the
+glm5next gguf loader contract guards" (2 файла, +299/-199: гварды в
+[models/glm5_next/gguf.py](../../python/freetoken/models/glm5_next/gguf.py),
+переписанные тесты в
+[tests/models/test_glm5_next_gguf.py](../../tests/models/test_glm5_next_gguf.py)).
+Статья фазы (карта маркеров, гварды, уроки) -
+[round6-d4-gguf-loader-contract](../../topics/round6-d4-gguf-loader-contract.md).
+
+По критериям приёмки:
+
+- Карта тестов полная: классификация 37 маркеров D-PORT-D4 пробным прогоном
+  "pytest -p no:skipping" - a=0 / b=1 / c=17 / d=18 / e=1; на доказательствах
+  маркер 1568 переклассифицирован (d) -> (c), итог c=18 / d=17. Пара исхода
+  (b): веточный test_ftw_text_only_carrier_unchanged удалён, семантику несёт
+  main-тест test_ftw_gguf_text_only_boot_unchanged
+  (tests/checkpoint/test_ftw_gguf_banks.py:542). Фрагмент F1
+  (ftw_tensor_types + 5 layer maps, возвращён при merge) уже покрыт зелёными
+  немаркированными тестами - кандидатов на разморозку из него нет. Счётчики
+  grep-ом совпадают: D-PORT-D4 37 -> 0; D-PORT-D5 несёт 1 переназначенный
+  маркер (1433 - GPU-деquant-ветка возвращается вместе с портом nvfp4-KV).
+- Возвращены только гварды сверх main-гвардов, все на main-примитивах
+  glm5_next/gguf.py: хелпер _scalar (фолдинг однородных per-layer массивов
+  attention.head_count / feed_forward_length / expert_feed_forward_length
+  вместо int(list) TypeError, с именованным ValueError), гварды
+  parse_gguf_config (vocab_size против тензорного, диапазон
+  nextn_predict_layers, KDA-транк 0 < n_recr < n_layer, диапазон
+  leading_dense_block_count, положительность kpool/top_k и top_k % kpool == 0,
+  expert_shared_feed_forward_length == moe_inter * n_shared), consumed-set
+  проверка полноты iter_gguf_weights (молчаливая потеря тензора закрыта;
+  исключения - MTP-блок blk.N >= num_layers и банки экспертов
+  ffn_{gate,up,down}_exps), гвард A_log на неположительный/не-finite ssm_a
+  (ловушка NaN в torch log), тайп-пины convert-контракта (token_embd Q8_0,
+  output Q6_K, Q8_0 на packed-линейных через packed()).
+- Тесты зелёные: 18 (c)-тестов переписаны под main-семантику (поверхность
+  ModelConfig, spec model_cls Glm5NextForConditionalGeneration +
+  checkpoint_roots model/model.language_model, двунаправленный to_gguf
+  round-trip против ftw-карт, main-типы и тексты ошибок, pre-keyed
+  токенизация). Контрольная батарея: два файла сюит 142 passed / 4 skipped /
+  0 failed; консолидированный прогон 241/13/0 (замер до NIT-правок).
+- Ревью-проход: вердикт READY FOR STOP GATE, NIT-ы применены (явный NaN-гвард
+  с новым тестом, роутинг _scalar для чтений vocab_size / kpool /
+  expert_shared, единый префикс текстов гвардов). Риск овер-пиннинга снят
+  прогоном против реального сервинг-артефакта GLM-5.3-Flash-UD-Q3_K_XL.gguf:
+  все гварды проходят, тайп-пины держатся на фактическом файле; нижние
+  UD-тиры, квантующие attention ниже Q8_0, фейлятся громко именованной
+  ошибкой.
+- grep-ревью "нет файлов с двумя логиками" - без находок.
+
+Остаток фазы - GPU-часть, cloud-окно: boot-smoke raw GGUF glm5next +
+кросс-валидация весов по методике round-5 D4 (38/38 non-permuted, плотные
+corr >= 0.9998, банки экспертов в квант-допуске).
 
 ## 6. Фаза D5 - nvfp4-KV generic read-path (ветка 660c814 - референс-спека)
 
