@@ -3,7 +3,7 @@ title: "\"Round 6 порт-долг: ре-имплементация D2/D4/D5 п
 date: 2026-10-25
 hardware: "\"GPU-волны (boot-smoke, CUDA/vision-тесты, A/B decode) - в cloud-окне; CPU-подготовка и тесты - в любое время\""
 commits: "\"база - d66f6e3 (round-6 merge, parents 23c1f02 + 32056cf); источники веточной функциональности - коммиты round-5 кампании: D2 7bc68b0, D3 393b682, D4 9314c9b, D5 660c814\""
-status: "\"В РАБОТЕ - D2 и D4 CPU-части закрыты (523452b/e1de1df, 2276069); GPU-smoke #810, verify 347/347, boot-smoke raw GGUF и кросс-валидация 38/38 ждут cloud-окно; D5/D3 не начаты; маркер 1433 переназначен D-PORT-D5\""
+status: "\"В РАБОТЕ - D2/D4/D5 CPU-части закрыты (523452b/e1de1df, 2276069, ee961f0/1eb556d); GPU-волны ждут cloud-окно: GPU-smoke #810, verify 347/347, boot-smoke raw GGUF + кросс-валидация 38/38, GPU-нога _cast на device=cuda, батареи tests/kernels, бут nvfp4-KV 786k; остался D3 A/B; отдельный follow-up: 2 stale-pin fp8_block теста test_quant_config\""
 tags: [merge, upstream, round6, deferred-ports, D-PORT, mmproj, vision, gguf-loader, nvfp4, kv-quant, stale-pin, no-dual-logic]
 ---
 
@@ -17,9 +17,16 @@ convert" - см. раздел 4, "Исполнение (2026-10-25)"; GPU-smoke 
 коммитом 2276069 "feat(models): harden the glm5next gguf loader contract
 guards" - см. раздел 5, "Исполнение (2026-10-25)"; boot-smoke raw GGUF и
 кросс-валидация 38/38 ожидают cloud-окно; маркер 1433 переназначен
-D-PORT-D5. Не начаты: D5, D3. Три фазы порт-долга после round-6
-merge: D2 (mmproj-зрение), D4 (контракт gguf-лоадера), D5 (nvfp4-KV generic
-read-path) и фаза D3 - честный A/B decode строго ПОСЛЕ D5. Рамка всего кейса -
+D-PORT-D5. D5 (nvfp4-KV): CPU-часть закрыта коммитами ee961f0 "feat(models):
+re-land the glm5next gguf loader gpu dequant branch" и 1eb556d "test(quant):
+recalibrate nvfp4 quant config pins for w4a4" - см. раздел 6, "Исполнение
+(2026-10-25)"; премиса ампутации read-path опровергнута учебной волной,
+маркер D-PORT-D5 снят (1 -> 0); GPU-нога _cast, батареи tests/kernels и бут
+nvfp4-KV 786k ждут cloud-окно. Не начаты: D3. Три фазы порт-долга после
+round-6 merge: D2 (mmproj-зрение), D4 (контракт gguf-лоадера), D5 (nvfp4-KV
+generic read-path) и фаза D3 - честный A/B decode строго ПОСЛЕ D5. Отдельный
+follow-up вне фаз: 2 stale-pin теста test_quant_config.py (triton
+fp8-block-кернел обзавёлся cpu_format='fp8_block'). Рамка всего кейса -
 директива пользователя 2026-10-25 о запрете двойных логик (раздел 0): веточный
 код - референс-спека, каждый портированный элемент ре-имплементируется ПОВЕРХ
 main-примитивов, тесты - без семантических дублей. Кейс волны слияния и
@@ -78,8 +85,10 @@ findings F1-F5 - [round 6 merge](../merge-round6-upstream-main/TASK.md);
 - Эталон nvfp4-KV стека (round-5, коммит 393b682): hybrid 786k nvfp4-рецепт
   (kv-reserve 786432, kv-cache-dtype nvfp4, memory-ratio 0.85,
   max-prefill-length 4096, moe-strategy hybrid, moe-cpu-threads 16),
-  decode 27.71 tok/s. Сейчас этот стек невоспроизводим: nvfp4-KV read-path
-  ампутирован (порт D5), hybrid-механика заменена main-ом (порт D3).
+  decode 27.71 tok/s. Сейчас этот стек невоспроизводим на дереве round-6 до
+  GPU-волны D5 (порт D5: премиса ампутации read-path опровергнута учебной
+  волной - вернулась только GPU-деquant-ветка _cast, бут nvfp4-KV впереди),
+  hybrid-механика заменена main-ом (порт D3).
 - 22.21 (fp8-KV) против 27.71 (nvfp4-KV) напрямую несравнимы - разные KV-типы
   И разные hybrid-механики; честное сравнение возможно только после D5
   (фаза D3).
@@ -359,11 +368,23 @@ corr >= 0.9998, банки экспертов в квант-допуске).
 0.82/4095; рецепты и полосы decode -
 [gguf-serving-perf-matrix](../../topics/gguf-serving-perf-matrix.md)).
 
-Что произошло: main #732/#739 (BREAKING) пере-платформировал NVFP4-квант-механику;
-read-path аргументы (pool_scale / kv_quant / pool_block_scale) на
-glm_dsa_sparse_attn / dsa.py ампутированы (kv-механика и e4m3-хелперы живы,
-wiring - нет); веточный generic read-path (660c814) на новое дерево не
-перенесён.
+Что произошло (премиса опровергнута учебной волной 2026-10-25): исходная
+формулировка - "main #732/#739 (BREAKING) пере-платформировал
+NVFP4-квант-механику; read-path аргументы (pool_scale / kv_quant /
+pool_block_scale) на glm_dsa_sparse_attn / dsa.py ампутированы (kv-механика
+и e4m3-хелперы живы, wiring - нет); веточный generic read-path (660c814) на
+новое дерево не перенесён" - НЕ подтвердилась. Факты против дерева: upstream
+main 32056cf KV-quant механики не содержит вовсе (ни kernel/triton/kv_nvfp4.py,
+ни kv_quant.py, ни supports_nvfp4_kv); веточный стек (660c814 + round-5
+store-стек) пережил merge целым; dsa-аргументы восстановлены amend-ом d66f6e3
+ещё в волне слияния (glm_dsa_sparse.py:444 has_nvfp4;
+tests/engine/test_kv_quant_config.py = 36 passed). Единственная
+ампутированная деталь - GPU-деquant-ветка _cast glm5next gguf-лоадера с
+осиротевшим _cuda_target (всегда None = молчаливый CPU-деquant под
+device=cuda), несущая единственный маркер D-PORT-D5; supports_nvfp4_kv
+точечно уже на main-бэкендах triton / dsa / qsa_sparse и закреплён
+существующими тестами. Фаза исполнялась по фактическому объёму (~3 стыка),
+не по исходной премисе; шаг 4 (качественный A/B) - это фаза D3 (раздел 7).
 
 Шаги:
 
@@ -376,7 +397,9 @@ wiring - нет); веточный generic read-path (660c814) на новое �
    [round5-d5-nvfp4-kv-generic](../../topics/round5-d5-nvfp4-kv-generic.md).
 2. Перекалибровать 2 stale-pin теста tests/models/test_quant_config.py:
    test_hybrid_explicit_kernel_error_names_the_usable_alternative и
-   test_nvfp4_auto_selection_still_lands_on_triton. Веточные пины ожидали
+   test_nvfp4_auto_selection_still_lands_on_triton (переименован при
+   исполнении в test_nvfp4_auto_selection_lands_on_w4a4_where_available).
+   Веточные пины ожидали
    "usable here: triton"; main #737 добавил nvfp4 w4a4 на sm_120 -> корректное
    ожидание "usable here: w4a4, triton". Разморозка - с новым пином и зелёным
    прогоном.
@@ -388,6 +411,68 @@ wiring - нет); веточный generic read-path (660c814) на новое �
 stale-pin теста зелёные с новой формулировкой; тесты kv_nvfp4 / kv_quant
 зелёные; boot nvfp4-KV конфига PASS; read-path не дублирует main-квант-механику,
 а сидит на ней (grep-ревью "нет файлов с двумя логиками").
+
+### Исполнение (2026-10-25)
+
+CPU-часть фазы закрыта двумя коммитами: ee961f0 "feat(models): re-land the
+glm5next gguf loader gpu dequant branch"
+([models/glm5_next/gguf.py](../../python/freetoken/models/glm5_next/gguf.py),
++50/-21) и 1eb556d "test(quant): recalibrate nvfp4 quant config pins for
+w4a4" (un-skip маркера 1433 в
+[tests/models/test_glm5_next_gguf.py](../../tests/models/test_glm5_next_gguf.py)
++ перекалибровка пинов в
+[tests/models/test_quant_config.py](../../tests/models/test_quant_config.py)).
+Статья фазы (премиса, _cast, пины, уроки) -
+[round6-d5-nvfp4-kv-dequant](../../topics/round6-d5-nvfp4-kv-dequant.md).
+
+По критериям приёмки (CPU-часть):
+
+- Премиса раздела опровергнута учебной волной против дерева (см. выше):
+  re-имплементация read-path не требовалась, фаза сжалась до ~3 стыков.
+- GPU-деquant-ветка _cast ре-ленднута на main-примитивах (матрица из
+  models/gguf/tensors.py, ядро kernel/ggml.dequantize - CUDA-контракт
+  op_dequantize в kernel/csrc/ggml/freetoken/ggml_ops.cu:406, CPU-нога -
+  main-овский _float): GPU-нога = packed-байты едут на CUDA и деquant-ятся
+  на устройстве, CPU-нога = _float, ноги не смешиваются в пределах одного
+  тензора; _cuda_target - честный device-гейт (старый осиротевший всегда
+  отдавал None = молчаливый CPU-деquant); device протянут через все
+  packed-row cast-места (bf16-хелпер, hc_* x6, conv1d, ssm_a, dt_bias,
+  _kv_b device-kwargs, indexer wk/weights_proj, compressor ape,
+  e_score_correction_bias); осознанная дельта против ветки 660c814: squeeze
+  ne при len(ne) > 2 сохраняет ggml 2-D форму матрицы, docstring
+  документирует асимметрию ног (n,) / (1,n) на дегенеративных [n, 1].
+  Ревью сверялся против референса 660c814 (~строки 717-756) и контракта
+  op_dequantize.
+- Оба stale-pin теста перекалиброваны:
+  test_hybrid_explicit_kernel_error_names_the_usable_alternative пинит
+  "(usable here: w4a4, triton)"
+  (host-независимый пин: _usable_here зондирует только unusable_reason,
+  без CUDA); test_nvfp4_auto_selection_still_lands_on_triton переписан и
+  переименован в test_nvfp4_auto_selection_lands_on_w4a4_where_available
+  (auto -> w4a4 при проходящем sm_120-пробе, triton при непроходящем; явный
+  запрос triton исполняется как задан; пробы monkeypatch-ены, тест
+  CPU-чистый).
+- supports_nvfp4_kv точечно уже на main-бэкендах triton / dsa / qsa_sparse
+  (attention/__init__.py), закреплён существующими тестами; fa / fi /
+  trtllm остаются False - external-kernel PR-ы, не D5.
+- Маркер: D-PORT-D5 1 -> 0 (тест 1433 un-skip-нут, тело не тронуто);
+  grep-счётчики сверены на актуальном дереве. Вне скоупа фазы (отдельный
+  follow-up, не атрибутировать D5): 2 других stale-pin теста
+  test_quant_config.py (~строки 410/422) - triton fp8-block-кернел обзавёлся
+  cpu_format='fp8_block', пины отстали.
+- Батареи: консолидированный прогон (tests/checkpoint +
+  tests/engine/test_cache_budget + tests/models/test_glm5_next_gguf +
+  tests/checkpoint/test_ftw_gguf_banks) 243 passed / 12 skipped / 0 failed;
+  сюита четырёх файлов (включая test_quant_config + test_kv_quant_config)
+  194 passed / 46 skipped / 0 failed; test_kv_quant_config отдельно
+  36 passed. Тесты kv_nvfp4 / kv_quant - GPU-батареи tests/kernels,
+  cloud-окно.
+
+Остаток фазы - GPU-часть, cloud-окно: бут-смоук raw GGUF glm5next с
+device=cuda, гоняющий GPU-ногу _cast (CPU-часть сюит её не трогает);
+батареи tests/kernels (test_kv_nvfp4, test_triton_attention, test_kv_fp8);
+бут nvfp4-KV 786k-рецепта (эталон 27.71 tok/s). Качественный A/B без
+деградации - фаза D3 (раздел 7), не D5.
 
 ## 7. Фаза D3 - честный A/B decode (только ПОСЛЕ D5)
 
