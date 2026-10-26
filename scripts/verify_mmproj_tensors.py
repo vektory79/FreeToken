@@ -17,7 +17,44 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from collections import Counter
+
+
+def _iter_ftw_visual_raw(reference: str, keep):
+    """Raw fallback when FTWReader rejects the reference: a pre-0db5023 conversion
+    stores NVFP4 global scales as fp16 and the reader fail-fasts on the index, but
+    the bf16 visual.* tower bytes are unaffected by that scale-dtype flip. Reads
+    each tensor straight from the index byte ranges across the raw shards, which
+    for plain bf16 weight entries is exactly what iter_ftw_weights does (its
+    _replay_entry / _pad_legacy_rows are no-ops for such entries)."""
+    import torch
+
+    from freetoken.checkpoint.ftw import INDEX_NAME
+
+    with open(os.path.join(reference, INDEX_NAME)) as f:
+        index = json.load(f)
+    shards = sorted(index["shards"], key=lambda s: s["global_off"])
+    for entry in index["tensors"]:
+        if entry.get("kind") != "weight" or not keep(entry["name"]):
+            continue
+        start, nbytes = entry["global_off"], entry["nbytes"]
+        pieces = []
+        for shard in shards:
+            lo = max(start, shard["global_off"])
+            hi = min(start + nbytes, shard["global_off"] + shard["nbytes"])
+            if lo >= hi:
+                continue
+            with open(os.path.join(reference, shard["file"]), "rb") as f:
+                f.seek(lo - shard["global_off"])
+                pieces.append(f.read(hi - lo))
+        raw = b"".join(pieces)
+        if len(raw) != nbytes:
+            raise OSError(f"{reference}: {entry['name']}: read {len(raw)}/{nbytes} bytes")
+        dt = getattr(torch, entry["dtype"])
+        tensor = torch.frombuffer(bytearray(raw), dtype=dt)
+        yield entry["name"], (tensor.view(*entry["shape"]) if entry["shape"] else tensor.view(())).clone()
 
 
 def main() -> None:
@@ -59,12 +96,24 @@ def main() -> None:
         return "/".join(dtypes) if dtypes else "-"
 
     got = dict(iter_mmproj_weights(Mmproj(args.mmproj, "verify", "glm5v", "BF16")))
-    ref = {
-        name: tensor.clone()
-        for name, tensor in iter_ftw_weights(
-            args.reference, keep=lambda n: n.startswith("visual.")
-        )
-    }
+    ref_note = ""
+    try:
+        ref = {
+            name: tensor.clone()
+            for name, tensor in iter_ftw_weights(
+                args.reference, keep=lambda n: n.startswith("visual.")
+            )
+        }
+    except ValueError as exc:
+        if "NVFP4 global scales as fp16" not in str(exc):
+            raise
+        ref_note = " (raw index+shard reads: pre-0db5023 fp16-scale carrier, tower bytes unaffected)"
+        ref = {
+            name: tensor.clone()
+            for name, tensor in _iter_ftw_visual_raw(
+                args.reference, lambda n: n.startswith("visual.")
+            )
+        }
 
     rows: list[dict] = []
     for name in sorted(set(got) | set(ref)):
@@ -97,7 +146,7 @@ def main() -> None:
         "# mmproj tensor verification: GGUF reader vs NVFP4 reference",
         "",
         f"- mmproj: `{args.mmproj}`",
-        f"- reference: `{args.reference}` (visual.* tensors, bf16)",
+        f"- reference: `{args.reference}` (visual.* tensors, bf16){ref_note}",
         f"- tensors: {len(rows)} (mmproj-side names {len(got)}, reference-side {len(ref)})",
         "- the table is param-level: the mmproj file holds 348 tensors, its two",
         "  v.patch_embd.weight slices stack into the single visual.patch_embed.proj.weight",
