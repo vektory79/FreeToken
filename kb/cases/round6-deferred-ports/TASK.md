@@ -3,26 +3,28 @@ title: "\"Round 6 порт-долг: ре-имплементация D2/D4/D5 п
 date: 2026-10-25
 hardware: "\"GPU-волны (boot-smoke, CUDA/vision-тесты, A/B decode) - в cloud-окне; CPU-подготовка и тесты - в любое время\""
 commits: "\"база - d66f6e3 (round-6 merge, parents 23c1f02 + 32056cf); источники веточной функциональности - коммиты round-5 кампании: D2 7bc68b0, D3 393b682, D4 9314c9b, D5 660c814\""
-status: "\"В РАБОТЕ - D2/D4/D5 CPU-части закрыты (523452b/e1de1df, 2276069, ee961f0/1eb556d); GPU-волны ждут cloud-окно: GPU-smoke #810, verify 347/347, boot-smoke raw GGUF + кросс-валидация 38/38, GPU-нога _cast на device=cuda, батареи tests/kernels, бут nvfp4-KV 786k; остался D3 A/B; отдельный follow-up: 2 stale-pin fp8_block теста test_quant_config\""
+status: "\"ЗАКРЫТ 2026-10-26 - приёмка CPU+GPU полная: D2 (523452b/e1de1df + GPU 2e82d81/82956fb), D4 (2276069), D5 (ee961f0/1eb556d) PASS на железе; D3: NO-GO на ре-порт 393b682, nvfp4-KV 23.60 tok/s (свежий профиль) против гэпа -15..-18% к 27.71; открытые follow-ups вне кейса: decode-гэп (отдельный кейс), Fix-3 донесение (fix3-харнесс), CLI --mmproj, fp8-vs-nvfp4 при одинаковых фракциях\""
 tags: [merge, upstream, round6, deferred-ports, D-PORT, mmproj, vision, gguf-loader, nvfp4, kv-quant, stale-pin, no-dual-logic]
 ---
 
 # TASK: round 6 - порт-долг: ре-имплементация D2/D4/D5 поверх main + честный A/B D3 после D5
 
-Status: В РАБОТЕ 2026-10-25. D2 (mmproj-зрение): CPU-часть закрыта коммитами
+Status: ЗАКРЫТ 2026-10-26 (приёмка CPU+GPU полная, вердикт D3 зафиксирован;
+открытые follow-ups - в конце абзаца). D2 (mmproj-зрение): CPU-часть закрыта коммитами
 523452b "feat(models): serve gguf mmproj vision through the main mmproj path"
 и e1de1df "feat(checkpoint): pack gguf mmproj vision into ftw carriers on
 convert" - см. раздел 4, "Исполнение (2026-10-25)"; GPU-smoke #810 и verify
-347/347 ожидают cloud-окно. D4 (контракт gguf-лоадера): CPU-часть закрыта
+347/347 - PASS 2026-10-25/26. D4 (контракт gguf-лоадера): CPU-часть закрыта
 коммитом 2276069 "feat(models): harden the glm5next gguf loader contract
 guards" - см. раздел 5, "Исполнение (2026-10-25)"; boot-smoke raw GGUF и
-кросс-валидация 38/38 ожидают cloud-окно; маркер 1433 переназначен
+кросс-валидация 38/38 - PASS 2026-10-26; маркер 1433 переназначен
 D-PORT-D5. D5 (nvfp4-KV): CPU-часть закрыта коммитами ee961f0 "feat(models):
 re-land the glm5next gguf loader gpu dequant branch" и 1eb556d "test(quant):
 recalibrate nvfp4 quant config pins for w4a4" - см. раздел 6, "Исполнение
 (2026-10-25)"; премиса ампутации read-path опровергнута учебной волной,
 маркер D-PORT-D5 снят (1 -> 0); GPU-нога _cast, батареи tests/kernels и бут
-nvfp4-KV 786k ждут cloud-окно. Не начаты: D3. Три фазы порт-долга после
+nvfp4-KV 786k - PASS 2026-10-26. D3 исполнен 2026-10-26: NO-GO на ре-порт
+393b682 (раздел 7). Три фазы порт-долга после
 round-6 merge: D2 (mmproj-зрение), D4 (контракт gguf-лоадера), D5 (nvfp4-KV
 generic read-path) и фаза D3 - честный A/B decode строго ПОСЛЕ D5. Отдельный
 follow-up вне фаз: 2 stale-pin теста test_quant_config.py (triton
@@ -37,7 +39,13 @@ findings F1-F5 - [round 6 merge](../merge-round6-upstream-main/TASK.md);
 процедура интеграционных волн -
 [merge-wave-procedure](../../topics/merge-wave-procedure.md). Каждый порт -
 отдельная кампания со своими волнами, приёмкой и серией коммитов; push - только
-по явной команде пользователя.
+по явной команде пользователя. GPU-приёмка закрыта 2026-10-25/26 (cloud-окно,
+статья волны -
+[round6-gpu-acceptance-and-d3-verdict](../../topics/round6-gpu-acceptance-and-d3-verdict.md)):
+D2/D4/D5 PASS, D3 - NO-GO на ре-порт; открытые follow-ups вне кейса -
+decode-гэп -15..-18% к 27.71 (отдельный кейс расследования), Fix-3 донесение
+(отдельный кандидат под fix3-харнесс), CLI-флаг --mmproj у
+`ft checkpoint convert`, fp8-vs-nvfp4 при одинаковых фракциях.
 
 ## 0. Контекст: что произошло
 
@@ -267,9 +275,18 @@ mmproj vision through the main mmproj path" (8 файлов, +337/-242) и e1de1
   47 skipped / 0 failed (по FAILURE SET против базлайна раздела 0).
 - grep-ревью "нет файлов с двумя логиками" - без находок.
 
-Остаток фазы - GPU-часть, cloud-окно: MMProj vision smoke #810 (boot --mmproj +
-e2e-картинка), бут FTW-vision carrier без --mmproj, verify 347/347 на реальном
-чекпойнте адаптированным scripts/verify_mmproj_tensors.py.
+GPU-часть - PASS 2026-10-25/26 (cloud-окно; подробно -
+[round6-gpu-acceptance-and-d3-verdict](../../topics/round6-gpu-acceptance-and-d3-verdict.md)):
+verify 347/347 exact (max_abs_diff 0, unmatched 0; raw-index fallback для
+legacy fp16-scale носителя - 82956fb "fix(scripts): read legacy fp16-scale
+ftw references via raw index in mmproj verify"); boot raw GGUF + --mmproj
+READY 180 с, image e2e 23.95 tok/s (projector-гейт: реальный unsloth mmproj
+несёт clip.projector_type="glm5next" -> алиасы _PROJECTOR_ALIASES =
+(glm5v, glm5next), 2e82d81 "fix(models): accept the glm5next projector
+alias in gguf mm config"); FTW-vision carrier (347 visual.* + 15 clip.*,
+конверт 266 с) бутится БЕЗ --mmproj READY 71 с, image e2e 24.86 tok/s.
+Follow-up: у `ft checkpoint convert` CLI нет флага --mmproj (паковка -
+только python API).
 
 ## 5. Фаза D4 - контракт gguf-лоадера (main-wins #721/#810; ветка 9314c9b - референс)
 
@@ -356,9 +373,14 @@ glm5next gguf loader contract guards" (2 файла, +299/-199: гварды в
   ошибкой.
 - grep-ревью "нет файлов с двумя логиками" - без находок.
 
-Остаток фазы - GPU-часть, cloud-окно: boot-smoke raw GGUF glm5next +
-кросс-валидация весов по методике round-5 D4 (38/38 non-permuted, плотные
-corr >= 0.9998, банки экспертов в квант-допуске).
+GPU-часть - PASS 2026-10-26 (cloud-окно; подробно -
+[round6-gpu-acceptance-and-d3-verdict](../../topics/round6-gpu-acceptance-and-d3-verdict.md)):
+кросс-валидация round-6 carrier против raw GGUF - 38/38 round-5 пар
+(41 строка отчёта) без перестановок, 23/23 ggml-payload пары байт-идентичны
+(конвертер перепаковывает вербатим), плотные corr 1.000000 (bf16-repack
+пары 0.999999, выше пола 0.9998), банки corr 1.000000 / maxabs 0;
+boot-smoke raw GGUF text-only READY 138 с (round-5 бэнд 133-145), все
+гварды 2276069 молчат на реальном артефакте, traceback 0.
 
 ## 6. Фаза D5 - nvfp4-KV generic read-path (ветка 660c814 - референс-спека)
 
@@ -468,11 +490,14 @@ w4a4" (un-skip маркера 1433 в
   36 passed. Тесты kv_nvfp4 / kv_quant - GPU-батареи tests/kernels,
   cloud-окно.
 
-Остаток фазы - GPU-часть, cloud-окно: бут-смоук raw GGUF glm5next с
-device=cuda, гоняющий GPU-ногу _cast (CPU-часть сюит её не трогает);
-батареи tests/kernels (test_kv_nvfp4, test_triton_attention, test_kv_fp8);
-бут nvfp4-KV 786k-рецепта (эталон 27.71 tok/s). Качественный A/B без
-деградации - фаза D3 (раздел 7), не D5.
+GPU-часть - PASS 2026-10-26 (cloud-окно; подробно -
+[round6-gpu-acceptance-and-d3-verdict](../../topics/round6-gpu-acceptance-and-d3-verdict.md)):
+GPU-батареи tests/kernels (test_kv_nvfp4, test_triton_attention,
+test_kv_fp8) 170 passed / 0 failed / 0 skipped; бут nvfp4-KV 786k на raw
+GGUF (GPU-нога _cast на device=cuda) READY 109 с, KV 787136 токенов =
+2.87 GiB, слот-гейт молчит, пик VRAM 29949 MiB; decode 20.25 tok/s при
+fetch-капе 1 (сравнимо с 22.21 fp8, тоже кап-1). Качественный A/B -
+фаза D3 (раздел 7), исполнена ниже.
 
 Follow-up fp8-block закрыт: старые пины test_quant_config.py (~строки 410/422)
 утверждали недостижимые reject-пути - TritonFp8BlockMoEKernel обзавёлся
@@ -513,6 +538,41 @@ eviction, #742 pinned staging), или NO-GO. Прецедент round-5 D1: с�
 карта элементов (каждый - дельта на main-примитивах) и grep-ревью "нет файлов
 с двумя логиками"; матрица обновлена.
 
+### Исполнение (2026-10-26)
+
+Волна исполнена в cloud-окне (дерево 82956fb, сериализованно, клиент декода -
+методология базлайна 22.21); таблицы и детали -
+[round6-gpu-acceptance-and-d3-verdict](../../topics/round6-gpu-acceptance-and-d3-verdict.md).
+
+- Находка, изменившая постановку: benchbw-профиль на диске v5 (схема до
+  merge) отвергается движком v6 молча (один warning) -> fetch-кап 1 на
+  КАЖДОМ гибридном буте round 6, включая базлайн 22.21 fp8 и замер D5
+  20.25. FULL перепрогон `ft bench bw --dtype all --model <raw GGUF>
+  --cpu-threads 16` -> профиль v6, фракции gguf-видов 26.1/29.9/30.2%.
+- Замер задания (nvfp4-KV 786k, resolved фракции, overlap-on): 23.60 tok/s
+  клиент / 22.88 сервер-медиана. Контролы 2x2: resolved+off 23.75 (флаг
+  overlap на декод нейтрален), кап-1+off 23.40, кап-1+on 21.77 (повтор
+  D5-конфига; кап-1 вредит только при overlap-on, -12..-16%).
+- Против 22.21 fp8: +6.3%, но fp8 тоже был кап-1 - дельта при одинаковых
+  фракциях НЕ измерена (follow-up). Против 27.71 (round-5 эталон: кап-1 +
+  overlap-off по уроку 5
+  [hybrid-moe-slot-pools-port](../../topics/hybrid-moe-slot-pools-port.md),
+  другая методология): matched-пара кап-1+off -> 23.40 клиент / 22.79
+  сервер = гэп -15..-18%, устойчив против межбутного шума ~1.5 tok/s.
+- Картография ре-порта 393b682 ПУСТА: per-format слот-пулы уже на main
+  (engine.py:943, "MoE slot pools: unified, 3 pools of 29-1095"),
+  fail-fast гейты в дереве (cache_budget.py:87, slot-floor), benchbw-gguf -
+  преимущество round 6; отсутствует только Fix-3 донесение (интерлив-
+  вытеснение, декод-пробой неизмеряемо).
+- ВЕРДИКТ: NO-GO на ре-порт 393b682 как средства закрытия decode-гэпа.
+  Формальный критерий ">= эталона" не выполнен - серая зона зафиксирована,
+  бинарный вердикт заменён парой "NO-GO на ре-порт + новый кейс на гэп"
+  (per-token ~42.7-43.9 против ~36.1 мс/токен при bs=1; подозреваемые -
+  chain-kernels/handshake, GPU-нога _cast nvfp4-KV). Fix-3 - отдельный
+  кандидат под fix3-харнесс. Матрица
+  [gguf-serving-perf-matrix](../../topics/gguf-serving-perf-matrix.md)
+  обновлена (приложение round 6 + урок профиля).
+
 ## 8. Не входит (не-долг round 6)
 
 - 2x glm_dsa OutOfResources - известный baseline с 2026-09-12, не регрессия
@@ -540,3 +600,10 @@ eviction, #742 pinned staging), или NO-GO. Прецедент round-5 D1: с�
   (nvfp4-KV, round-5 эталон); по D3-механике вынесен вердикт ре-порт/NO-GO.
 - Статусы фаз обновлены в этом файле по мере исполнения; каждый порт - своя
   серия коммитов по правилам репо; push - только пользователь.
+- ЗАВЕРШЕНО 2026-10-26: карты и счётчики - D-PORT-D2 44 -> 0, D-PORT-1
+  4 -> 0, D-PORT-D4 37 -> 0, D-PORT-D5 1 -> 0 (переназначенный маркер
+  1433), 2 stale-pin fp8_block теста перекалиброваны; smokes PASS (D2 -
+  vision raw + carrier, D4 - boot raw GGUF, D5 - бут nvfp4-KV 786k);
+  A/B вердикт D3 зафиксирован (NO-GO на ре-порт; открытые follow-ups -
+  decode-гэп, Fix-3, CLI --mmproj, fp8-vs-nvfp4). Приёмка кейса CPU+GPU
+  полная.
