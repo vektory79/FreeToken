@@ -1,9 +1,9 @@
 ---
 name: "git-stale-index-parallel-sessions"
-description: "Git index keeps stale staged versions from parallel sessions; re-stage explicit paths before every commit"
+description: "Git stale index/parallel sessions: 6 case lessons; verify HEAD by branch+churn, not exact hash (amend-orphan case)"
 type: project
-lastUpdated: 2026-10-24T20:40
-lastRecall: 2026-10-26T13:55
+lastUpdated: 2026-10-26T22:09
+lastRecall: 2026-10-26T22:06
 ---
 
 # Stale git index + параллельные пользовательские коммиты
@@ -17,3 +17,6 @@ lastRecall: 2026-10-26T13:55
 **(3)-(4) 2026-09-28, два случая в decode-кампаниях:** в индексе снова лежали чужие staged-записи от параллельных сессий - в первый раз два kb-файла из другого коммит-вейва, во второй - файлы (lever3-microfix-ab.md, decode-chain-microfusion.md), которые вообще ещё нигде не были закоммичены (staged кем-то параллельно). Протокол сработал в обоих случаях: git reset -> явный add путями -> сверка `git diff --cached --stat` с ожидаемым набором -> коммит.
 
 (5) 2026-10-24, vram-headroom kb wave: pre-commit status again showed stale staged entries from the parallel kb-distill session (`A  kb/methods/vram-peak-measurement.md`, `AM kb/topics/*.md`) mixed with .veai/memory churn; explicit-path re-add per logical commit (kb/ -> AGENTS.md -> .veai/) + fresh status check landed all three commits cleanly. .tasks/ is gitignored (line 230) - wave probe artifacts intentionally stay uncommitted.
+
+## Кейс 6 (2026-10-26): параллельная сессия AMEND'нула свой коммит
+Параллельная сессия закоммитила cf6a5ed chore(memory) и тут же amend'нула его в 1786420 - cf6a5ed остался висеть только в reflog. Бриф делегату, цитировавший точный HEAD cf6a5ed, оказался "неверным", хотя история линейна. Урок: в брифах указывать HEAD с допуском - верифицировать по ветке + форме churn, а не по точному хэшу; ожидаемо, что чужие chore(memory)-коммиты могут появиться между брифом и исполнением (прецедент-кейсы 1-6 выше).

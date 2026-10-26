@@ -3,7 +3,7 @@ name: "ftw-legacy-fold-ram-peak"
 description: "FTW legacy fold 198 GiB OOM fixed: zero-scratch VERIFIED f12e554 (~143 GiB); old carrier delete + push = user decisions"
 type: project
 lastUpdated: 2026-10-24T14:16
-lastRecall: 2026-10-24T14:47
+lastRecall: 2026-10-26T17:05
 ---
 
 # FTW legacy carrier boot RAM peak: fold double-buffer, 198 GiB vs 125.17 (2026-10-21)

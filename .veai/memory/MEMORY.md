@@ -89,10 +89,11 @@
 - [ftw-new-carrier-slowload](ftw-new-carrier-slowload-7f3dce4f4d49.md) — FTW new carrier 148s boot: NOT banks (25s, faster); tier compact on idle loop + bimodal warmup; fix = background compact
 - [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-fd804af7adee.md) — GGUF glm5next VRAM: post-round5 matrix in USED MiB (5 configs + ladders), 0.80 floor, kb report used-based
 - [ru-style-no-calques](ru-style-no-calques-6598bec9e18b.md) — User style rule: no Russified calques like робастный in Russian texts; codified in AGENTS.md ## Language (e596bba)
-- [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-77e5b594b1d8.md) — Git index keeps stale staged versions from parallel sessions; re-stage explicit paths before every commit
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-1152a9d2a5e0.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
 - [no-dual-logic-directive](no-dual-logic-directive-7142f401aa6e.md) — No dual logic main vs vektory79: branch work is delta on main primitives; semantic test dedup, not name-based
 - [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-9294bfcf30d2.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
 - [ft-merge-round6-pending-handoff](ft-merge-round6-pending-handoff-fa9e5cd83af6.md) — Round-6 merge closed at d66f6e3, boot-smoke PASS; CUDA kernel-splice trap; port debt in round6-deferred-ports-execution
 - [round6-deferred-ports-execution](round6-deferred-ports-execution-0be57ce77a4a.md) — round6-deferred-ports: CPU+GPU port-debt closed; D3 verdict NO-GO; decode-gap and Fix-3 split into follow-up cases
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-1e3dc850d380.md) — gguf-native-serving skill ledger: TRAPS T01-T95 committed (73cceb0); run-garbage rule added uncommitted to sec.11
+- [ftw-sources-second-disk](ftw-sources-second-disk-30fe4b345dc7.md) — Missing FTW/HF sources: search /media/data/ai/models/; 3 legacy NVFP4 carriers reconverted to -FTW-new, GPU boot pending
+- [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a1b7ac45a507.md) — Git stale index/parallel sessions: 6 case lessons; verify HEAD by branch+churn, not exact hash (amend-orphan case)

@@ -3,6 +3,7 @@ name: "ftw-new-carrier-slowload"
 description: "FTW new carrier 148s boot: NOT banks (25s, faster); tier compact on idle loop + bimodal warmup; fix = background compact"
 type: project
 lastUpdated: 2026-10-24T15:08
+lastRecall: 2026-10-26T15:09
 ---
 
 # FTW new carrier "slow boot" 148s vs legacy 81s: carrier NOT at fault (2026-10-22 forensics)
