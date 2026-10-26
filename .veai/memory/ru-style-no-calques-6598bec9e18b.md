@@ -3,7 +3,7 @@ name: "ru-style-no-calques"
 description: "User style rule: no Russified calques like робастный in Russian texts; codified in AGENTS.md ## Language (e596bba)"
 type: feedback
 lastUpdated: 2026-10-24T20:39
-lastRecall: 2026-10-24T20:39
+lastRecall: 2026-10-25T18:43
 ---
 
 # Language style: no Russified calques (робастный etc.)

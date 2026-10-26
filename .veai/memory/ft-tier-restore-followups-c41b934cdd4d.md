@@ -3,7 +3,7 @@ name: "ft-tier-restore-followups"
 description: "Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625"
 type: project
 lastUpdated: 2026-10-08T10:04
-lastRecall: 2026-10-08T09:42
+lastRecall: 2026-10-26T14:07
 ---
 
 # Tier-restore follow-ups (fast-follow za 577d79c): 7 items, .tasks/tier-restore-followups/TASK.md

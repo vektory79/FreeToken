@@ -68,7 +68,6 @@
 - [ft-pytest-worktree-baseline-gotchas](ft-pytest-worktree-baseline-gotchas-5ce36c040947.md) — FreeToken pytest: uv worktree editable trap, import-mode baseline fails, pgrep census self-match, collection drift cause
 - [ft-serve-boot-shutdown-io-research](ft-serve-boot-shutdown-io-research-ab444aa50b22.md) — HW-verified boot/shutdown I/O: bank cap = multi-stream shape, born-pinned refuted; replay 22 s; flush QD1; shard restore
 - [ft-p13-tombstone-wave](ft-p13-tombstone-wave-1de30f6941d6.md) — P13 tombstone COMMITTED (12623ff code + 91e53ff kb); KeyError accepted; sub-floor gate refined; case P1-P13 all closed
-- [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-4af8a5b1be10.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
 - [ft-merge-round4-closed](ft-merge-round4-closed-acbf7277ce25.md) — Round 4 aa0e71c fully CLOSED: boot-smoke PASS, GPU 103/0, F1 fixed by 9ac8830 (guard in load_ftw_banks_to_device)
 - [ft-gguf-kernel-jit-toolchain](ft-gguf-kernel-jit-toolchain-ec9bd17c625b.md) — gguf CUDA kernel JIT needs clang++ host; nvcc 13.3; CC/CXX scoped; pybind optional<Tensor> for None args
 - [cuda-debug-tool-strategy](cuda-debug-tool-strategy-9f1351479310.md) — CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; kineto aborts ft serve scheduler
@@ -76,7 +75,6 @@
 - [ft-tier-restore-attempt-counter](ft-tier-restore-attempt-counter-dfcbfd7380a1.md) — Tier restore case closed P0-P3 (sim H2: aliasing healed by P1/P2, no grouping needed); follow-ups brief in .tasks
 - [hybrid-radix-lru-test-integrity](hybrid-radix-lru-test-integrity-0270361228f3.md) — HybridRadixCache test integrity: vacuous fails-before, single-revert probes, det-clock in both scheduler tier tests
 - [ft-tier-phase2-swave](ft-tier-phase2-swave-709c47569b69.md) — Tier phase-2: QSA/KpoolDSA codecs, offer-supersede no-op; L2 extent dedup DONE 23.8->8.2 GiB HW (26e98c2..f0115a6)
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-817c76e69b3a.md) — gguf-native-serving skill ledger: TRAPS T01-T79 all committed (T76-T77 5b64d6c, T78-T79 542ece4)
 - [ft-tier-restore-followups](ft-tier-restore-followups-c41b934cdd4d.md) — Tier-restore follow-ups W1-W5 ledger; residual case tier-staging-admission-trigger closed NO-GO, docs 5623625
 - [call-agent-payload-truncation](call-agent-payload-truncation-7b696292cbe0.md) — Oversized call_code_agent payload fails 'Field task required'; write spec to .tasks file, delegate compact call
 - [hybrid-moe-pair-split-mechanics](hybrid-moe-pair-split-mechanics-82a7ba957be8.md) — Hybrid MoE split per (layer,expert) pair via -1 marker not per layer; LRU pool ~3 steps; CPU GEMV reads RAM weights
@@ -93,5 +91,8 @@
 - [ru-style-no-calques](ru-style-no-calques-6598bec9e18b.md) — User style rule: no Russified calques like робастный in Russian texts; codified in AGENTS.md ## Language (e596bba)
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-77e5b594b1d8.md) — Git index keeps stale staged versions from parallel sessions; re-stage explicit paths before every commit
 - [merge-main-into-vektory79-skill](merge-main-into-vektory79-skill-1152a9d2a5e0.md) — Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3
-- [ft-merge-round6-pending-handoff](ft-merge-round6-pending-handoff-58002cb4f5d1.md) — Round 6 merge CLOSED: d66f6e3 green, boot-smoke 22.21 tok/s; port debt D2/D4/D5 kb/cases/round6-deferred-ports
 - [no-dual-logic-directive](no-dual-logic-directive-7142f401aa6e.md) — No dual logic main vs vektory79: branch work is delta on main primitives; semantic test dedup, not name-based
+- [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-9294bfcf30d2.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
+- [ft-merge-round6-pending-handoff](ft-merge-round6-pending-handoff-fa9e5cd83af6.md) — Round-6 merge closed at d66f6e3, boot-smoke PASS; CUDA kernel-splice trap; port debt in round6-deferred-ports-execution
+- [round6-deferred-ports-execution](round6-deferred-ports-execution-0be57ce77a4a.md) — round6-deferred-ports: CPU+GPU port-debt closed; D3 verdict NO-GO; decode-gap and Fix-3 split into follow-up cases
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-1e3dc850d380.md) — gguf-native-serving skill ledger: TRAPS T01-T95 committed (73cceb0); run-garbage rule added uncommitted to sec.11

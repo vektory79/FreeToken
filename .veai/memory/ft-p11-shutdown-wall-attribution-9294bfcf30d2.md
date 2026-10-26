@@ -2,8 +2,8 @@
 name: "ft-p11-shutdown-wall-attribution"
 description: "P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed"
 type: project
-lastUpdated: 2026-10-05T15:34
-lastRecall: 2026-10-07T11:55
+lastUpdated: 2026-10-26T02:25
+lastRecall: 2026-10-26T02:22
 ---
 
 # P11 shutdown-wall attribution (boot-shutdown-io, 2026-10-02, no code @ b99e967)
@@ -39,23 +39,9 @@ Durable-tombstone запись в журнале (новый тип, задев�
 - Темп >= 2.5 вне teardown: НЕ ВЗЯТ стабильно (2.02-2.94) и НЕ достижим вариантами
   брифа (причина не конкурентная). Время шатдауна: ВЗЯТ базой HEAD. W1-W14: PASS.
 - kb: P9-NOTES "Стена темпа" помечена ОПРОВЕРГНУТО + коррекция; TASK.md P11 выполнена;
-  README; session-cache-tiering.md. Некоммичено (4 kb-файла).
+  README; session-cache-tiering.md. Закоммичено в 2d57b78 (2026-10-03) вместе с P13-брифом.
 
-## P13 бриф зафиксирован + P11-фиксация закоммичена (2026-10-03)
-- **2d57b78** docs(kb): attribute p11 shutdown wall, fixate p13 tombstone brief
-  (4 kb-файла: P9-NOTES коррекция стены, TASK.md + P13-бриф, README, session-cache-tiering).
-- P13: durable-tombstone записи в журнале L2 — discard долговечен немедленно, шатдаун-компакт
-  опционален (быстрый шатдаун на большом live). OPEN, отдельная сессия, старт по явному
-  запросу. Якоря: replay_journal :1632, _write_journal_new :1968, двухфазный W1-W14.
-- Статус "некоммичено (4 kb-файла)" в этой записи устарел — всё в 2d57b78.
-
-## Обновление 2026-10-05: P13 РЕАЛИЗОВАНА И ЗАКОММИЧЕНА, кейс P1-P13 закрыт
-Пункты "P13 бриф зафиксирован (OPEN)" выше устарели: волна 2026-10-04 реализовала
-durable-tombstone (session_tier.py +130, cache.py +9, tests +277), tier 122 passed,
-батарея 2492, ревью x2 NOT BLOCKING + fix-TP (2 комментария, fsync-ассерт, ledger-тест).
-HW A/B (кап 32 GiB, прод-тир-копия): стоп 16.3 с vs BASE 55.7 с (-71%), компакт-фаза
-отсутствует (была 37.8 с), воскрешений нет (35/35 cached=0), 159/159 md5 сурвиворов,
-resume HIT fast-path "honored 80 tombstones", филл +1.3% (fsync в шуме), второй
-skip-стоп 18 с. ЗАКРЫТО: код закоммичен 12623ff, kb 91e53ff; KeyError-даунгрейд принят
-как известное ограничение; sub-floor гейтиг уточнён; кейс boot-shutdown-io P1-P13 все
-закрыты. Детали: ft-p13-tombstone-wave.
+## Итог 2026-10-05: кандидат durable-tombstone реализован и закоммичен (P13)
+Волна 2026-10-04 реализовала durable-tombstone, HW стоп 16.3 с vs 55.7 с (-71%);
+код 12623ff, kb 91e53ff; KeyError-даунгрейд принят как ограничение. Кейс
+boot-shutdown-io P1-P13 полностью закрыт. Детали и HW-числа: ft-p13-tombstone-wave.
