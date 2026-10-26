@@ -362,6 +362,16 @@ protocol or hygiene refinements, corrections to now-stale facts.
 - Execution: delegate the integration to a Code subagent with the
   session-fact payload; for non-trivial integrations run a review pass
   (blocking_status) and apply cheap polish for non-blocking notes.
+- Run-garbage assessment: at campaign end, inventory the campaign's run
+  artifacts (`du -sh` over the task folder) and classify regenerable run
+  outputs (converted carriers / checkpoints, profiling reports, scratch
+  blobs, oversized logs) vs session knowledge (.md/.py/.sh/.json reports,
+  harnesses, runners - always keep). If heavy regenerable garbage is
+  present (rule of thumb: total > 1 GiB or any single artifact > 100 MiB),
+  present the user an itemized cleanup proposal (item + size + how to
+  regenerate) and delete ONLY after explicit confirmation - never delete
+  silently, never delete .md/.py/.sh/.json evidence; record what was freed
+  in the handoff / progress note.
 - Boundaries: the pass NEVER commits or pushes by itself - commits remain an
   explicit user decision (section 8); the SKILL.md YAML preamble is never
   touched; no README creation.

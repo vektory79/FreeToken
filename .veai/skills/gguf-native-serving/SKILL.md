@@ -26,7 +26,10 @@ phase is a wave: Test -> Review -> Triage -> STOP GATE -> commit. Режимы
 коммит-идами, замеренные классы ожиданий, новые ловушки, правки протокола)
 интегрируются в TRAPS.md / брифы / ORCHESTRATION.md (см. раздел
 "Session-end self-update" в [ORCHESTRATION.md](ORCHESTRATION.md)); проход
-никогда не коммитит сам - коммит остаётся решением пользователя.
+никогда не коммитит сам - коммит остаётся решением пользователя. Тот же
+проход включает оценку run-мусора кампании (тяжёлые регенерируемые артефакты
+прогонов) с itemized-предложением уборки; удаление только после явного
+подтверждения пользователя (раздел 11 ORCHESTRATION.md).
 
 - [tasks/task-00-discovery.md](tasks/task-00-discovery.md)
 - [tasks/task-01-config-shim.md](tasks/task-01-config-shim.md)
