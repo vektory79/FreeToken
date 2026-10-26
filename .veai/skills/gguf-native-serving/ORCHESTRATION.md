@@ -292,6 +292,9 @@ concurrent microbenches both leaked and invalidated their own numbers).
 Evidence rules:
 - Anchor claims on file:line, diffs, commits, measurement artifacts or the
   reference implementation; do not invent APIs, test patterns or constraints.
+- Skip-marker claims are re-measured, not recalled: run the marked tests
+  with `pytest -p no:skipping` and classify each survivor per the
+  semantic-dedup rule (T94) - never take grep counts of markers from memory.
 - Every projection is anchored on a working reference A/B, never on paper math
   (T35, D08): a projection without a reference anchor produces false NO-GO.
 - Measured end-to-end numbers beat verdict strings: a benchbw verdict string
@@ -320,7 +323,7 @@ Escalation points - go to the user with options, never silently rounded up:
 
 - [SKILL.md](SKILL.md) - discovery + the 7-phase domain pipeline, mandatory
   inputs, the static-fusion-validation rule, debug tool priority.
-- [TRAPS.md](TRAPS.md) - T01-T91 + recipes D01-D11; the pre-close checklist
+- [TRAPS.md](TRAPS.md) - T01-T95 + recipes D01-D11; the pre-close checklist
   for every phase.
 - Per-phase briefs: [task-00-discovery](tasks/task-00-discovery.md),
   [task-01-config-shim](tasks/task-01-config-shim.md),
