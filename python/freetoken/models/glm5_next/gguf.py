@@ -298,6 +298,11 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
 # ----------------------------------------------------------------------------------------------
 
 _PROJECTOR = "glm5v"
+# llama.cpp writes the GLM-5.3-Flash tower as PROJECTOR_TYPE_GLM5NEXT (clip_graph_glm5next),
+# so the on-disk mmproj artifacts carry "glm5next"; it maps tensor-exact onto the HF tower
+# (round-5 verify: 347/347 params, max_abs_diff 0), so both names gate in and anything
+# else fails fast
+_PROJECTOR_ALIASES = (_PROJECTOR, "glm5next")
 _IMAGE_TOKEN = "<|image|>"
 _PATCH = ("v.patch_embd.weight", "v.patch_embd.weight.1")
 
@@ -361,7 +366,7 @@ def _mm_config(
     """Shared core of the mmproj-file and carrier paths: ``source`` names the tower
     origin for error messages, ``index`` is the tensor table or None on a carrier."""
     projector = md.get("clip.vision.projector_type") or md.get("clip.projector_type")
-    if projector != _PROJECTOR:
+    if projector not in _PROJECTOR_ALIASES:
         raise ValueError(f"{source} is a {projector!r} tower; GLM-5.3-Flash needs {_PROJECTOR!r}")
     # the converter writes use_silu=True only for the silu tower; a gelu tower carries
     # use_gelu or neither key, and the model has no gelu epilogue

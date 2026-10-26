@@ -2056,6 +2056,18 @@ def test_mmproj_tower_facts_mismatch_fails_fast(glm5next_gguf, tmp_path, field, 
         build_gguf_shim(glm5next_gguf, mmproj_path=p)
 
 
+def test_mmproj_glm5next_projector_alias_gates_in(glm5next_gguf, tmp_path):
+    """The on-disk unsloth artifact carries llama.cpp's PROJECTOR_TYPE_GLM5NEXT name,
+    not upstream's "glm5v"; the same tower wiring must gate in under both spellings
+    (revert the alias in _PROJECTOR_ALIASES and this fails with "'glm5next' tower")."""
+    from freetoken.models.gguf.config import build_gguf_shim
+
+    meta = dict(_CLIP_METADATA, **{"clip.projector_type": "glm5next"})
+    p = _write_mmproj_gguf(tmp_path / "glm5next.gguf", metadata=meta)
+    vc = build_gguf_shim(glm5next_gguf, mmproj_path=p).hf_fields["vision_config"]
+    assert vc["hidden_size"]
+
+
 @pytest.mark.parametrize("field", ["clip.has_vision_encoder", "clip.projector_type"])
 def test_mmproj_missing_tower_fact_fails_fast(glm5next_gguf, tmp_path, field):
     from freetoken.models.gguf.config import build_gguf_shim
