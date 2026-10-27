@@ -2236,7 +2236,10 @@ class SessionTierStore:
                     # span's block padding is the extent's exclusive share
                     seg.extents = [(rec["off"], rec["n"], rec.get("crc"),
                                     rec.get("crc_alg"), -rec["n"] % _BLK)]
-                seg.last_validation = rec["ts"]
+                # monotonic_ns is not comparable across boots: a replayed segment comes
+                # back as never-validated, so it loses the L2 eviction order to any
+                # fresh probe validation (the never-evicted graveyard of old probes).
+                seg.last_validation = 0
                 self._segments[seg.seg_id] = seg
                 self._touch_index(seg)
             # Extent refcounts are DERIVED, never journaled: rebuilt from the surviving

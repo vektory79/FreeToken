@@ -481,6 +481,54 @@ def test_note_match_reorders_lru(tmp_path):
     assert store._by_path(b"path-b").in_l2
 
 
+def test_l2_overflow_evicts_least_recently_validated_first(tmp_path):
+    """L2 cap victims follow last_validation, not insertion order: the older segment
+    re-validated by note_match survives the reserve eviction; the newer never-validated
+    one is discarded. Guards the probe currency against a regression to oldest-insert."""
+    store = SessionTierStore(_cfg(ram=2048, ssd=2 * 4096, d=str(tmp_path)))
+    keys_a, pages_a = _chain([(1, 0), (1, 1), (1, 2)])
+    _, pages_b = _chain([(2, 0), (2, 1), (2, 2)])
+    _, pages_c = _chain([(3, 0), (3, 1), (3, 2)])
+    _, pages_d = _chain([(4, 0), (4, 1), (4, 2)])
+    _, pages_e = _chain([(5, 0), (5, 1), (5, 2)])
+    assert store.offer(b"path-a", 3, pages_a, _snap("a"))
+    assert store.offer(b"path-b", 3, pages_b, _snap("b"))
+    assert store.offer(b"path-c", 3, pages_c, _snap("c"))   # L1 overflow demotes a
+    assert store.offer(b"path-d", 3, pages_d, _snap("d"))   # then b; L2 now at cap
+    assert store._by_path(b"path-a").in_l2 and store._by_path(b"path-b").in_l2
+    store.note_match(b"path-a", 3)   # a validated now, b keeps its insert stamp
+    assert store.offer(b"path-e", 3, pages_e, _snap("e"))   # demotes c: reserve evicts
+    assert store.probe(keys_a) is not None      # the re-validated older segment lives
+    assert store._by_path(b"path-b") is None    # never-validated b was the victim
+
+
+@pytest.mark.parametrize("graceful", [False, True],
+                         ids=["crash-replay", "marker-fast-path"])
+def test_replay_restamps_last_validation_before_l2_overflow(tmp_path, graceful):
+    """monotonic_ns stamps are not comparable across boots: a replayed segment must
+    come back as never-validated, else its stale journal stamp outlives every fresh
+    record at the L2 cap (the never-evicted graveyard of pre-reboot probes)."""
+    d = str(tmp_path / "tier")
+    time.monotonic_ns = itertools.count(9_000_000_000_000).__next__   # old boot
+    store = SessionTierStore(_cfg(ram=2048, ssd=2 * 4096, d=d))
+    keys_old, pages_old = _chain([(1, 0), (1, 1), (1, 2)])
+    assert store.offer(b"path-old", 3, pages_old, _snap("o"))
+    store.note_match(b"path-old", 3)   # validated late in the old boot
+    assert store.flush_live() == 1      # journal carries the stale huge stamp
+    if graceful:
+        _graceful_stop(store)           # marker fast path; crash boots off the journal
+    time.monotonic_ns = itertools.count(1_000_000_001).__next__       # fresh boot
+    boot = SessionTierStore(_cfg(ram=0, ssd=2 * 4096, d=d))
+    assert boot.replay_journal() == 1
+    assert boot._by_path(b"path-old").last_validation == 0
+    _, pages_new = _chain([(2, 0), (2, 1), (2, 2)])
+    assert boot.offer(b"path-new", 3, pages_new, _snap("n"))   # fills the cap
+    _, pages_fresh = _chain([(3, 0), (3, 1), (3, 2)])
+    assert boot.offer(b"path-fresh", 3, pages_fresh, _snap("f"))   # reserve overflows
+    assert boot.probe(keys_old) is None         # journaled seg evicted first
+    assert boot._by_path(b"path-new").in_l2     # not the fresh-validated one
+
+
 def test_l2_true_eviction_and_refcount_guard(tmp_path):
     store = SessionTierStore(_cfg(d=str(tmp_path)))
     chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in range(10, 19)]
