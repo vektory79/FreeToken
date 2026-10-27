@@ -2486,11 +2486,12 @@ def test_bug1_restored_decode_page_crossing_no_leak():
     assert owned == 16                           # the tree owns the adopted span
 
 
-def test_bug3_refused_restore_leaves_tree_ledger_and_store_intact():
-    """BUG-3 fails-before probe: resume-1-A restores fine; resume-1-B probe-HITs the store
-    (shared system prefix) but its restore is REFUSED (fresh > free). The refusal must not
-    disturb A's tree span, the ledger, or the store; B's subsequent admission may wash A
-    under pressure, but only through the offer seam (A stays recoverable)."""
+def test_bug3_self_evict_restore_keeps_ledger_and_store_intact():
+    """BUG-3 probe, amended by restore self-evict: resume-1-A restores fine; resume-1-B
+    probe-HITs the store (shared system prefix) and its restore no longer refuses on
+    fresh > free - the budget gate self-evicts the deficit through the _allocate seam.
+    A's evicted tail demotes via the offer seam (A stays recoverable) and the ledger
+    stays consistent through the whole switch."""
     from freetoken.kvcache.hybrid_radix_cache import VictimPath
     from freetoken.scheduler.cache import SessionTierCfg
 
@@ -2541,24 +2542,156 @@ def test_bug3_refused_restore_leaves_tree_ledger_and_store_intact():
     cm.cache_req(req2, finished=True)            # A finishes: span adopted, unlocked
     assert cm.prefix_cache.full_evictable == 8
 
-    # resume-1-B: probe HIT at depth 16, owned 4, fresh 12 > free 8 -> the free-page refusal
-    free_before = len(cm.free_slots)
-    mr_b = cm.match_req(_pend(B + [51]))         # the refusal under test
+    # resume-1-B: probe HIT at depth 16, owned 4, fresh 12 > free 8 -> the budget gate
+    # self-evicts the deficit: A's tail leaf demotes to the store and the restore serves
+    mr_b = cm.match_req(_pend(B + [51]))         # the restore under test
     hit = cm.tier_store.probe(chain_b)
     assert hit is not None and hit[0] == 16      # the probe DID hit (precondition)
-    assert mr_b.cuda_handle.cached_len == 0      # refused: the normal path took over
-    assert cm.prefix_cache.match_prefix(torch.tensor(A, dtype=torch.int32)).cached_len == 8
-    cm.check_integrity()                         # ledger untouched by the refusal
-    assert len(cm.free_slots) == free_before
-    assert cm._tier_pending_restore == {}
+    assert mr_b.cuda_handle.cached_len == 16 and mr_b.mamba_value is not None
+    # hybrid matches truncate at live snapshots: the head node is KV-only after the
+    # split, so the protected-head check goes through owned_prefix, not match_prefix
+    _, owned_len, _ = cm.prefix_cache.owned_prefix(
+        torch.tensor(A, dtype=torch.int32), stamp=False)
+    assert owned_len == 4                        # the protected head survives
 
-    # B's admission washes A under pressure - only via the offer seam: A stays recoverable
-    cm.ensure_mamba_slots(pool.num_slots)        # the arm's admission pressure
-    cm.check_integrity()
+    # the evicted tail went through the offer seam: A stays recoverable from the store
+    cm.abandon_restore(mr_b.cuda_handle)         # release the match like a refused admission
+    assert cm._tier_pending_restore == {}
+    cm.check_integrity()                         # ledger consistent through the self-evict
     hit_a = cm.tier_store.probe(chain_a)
     assert hit_a is not None and hit_a[0] == 8   # A recoverable from the store
     got, snaps = cm.tier_store.restore(hit_a[1])
     assert len(got) == 8 and len(snaps) == 1     # A's span + snapshot intact in the store
+
+
+# ----------------------------------------- CacheDrop: restore self-evict (make room)
+
+
+def _two_sessions_other_holds_pool():
+    """CacheDrop arm2 shape at unit scale: session A is washed into the store, session B
+    holds the pool (12 of 16 pages + a live snapshot slot at its boundary)."""
+    from freetoken.scheduler.cache import SessionTierCfg
+
+    pool, kvpool = _pool(num_slots=8), _FakeKVPool(pages=32)
+    pt = torch.zeros(4, 16, dtype=torch.int32)
+    cm = CacheManager(16, 1, pt, "hybrid_radix", linear_state_pool=pool, swa_pool=kvpool,
+                      session_tier_cfg=SessionTierCfg(ram_bytes=1 << 22))
+    A = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]          # 12 pages
+    B = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]  # 12 pages, other first page
+
+    # A's tip donated + washed into the store (snapshot bound 12)
+    mr = cm.match_req(_pend(A + [50]))
+    pages_a = cm._allocate(12)
+    pt[0, :12] = pages_a
+    req_a = Req(input_ids=torch.tensor(A + [50], dtype=torch.int32), table_idx=0,
+                cached_len=12, output_len=1, uid=0, sampling_params=SamplingParams(),
+                cache_handle=mr.cuda_handle)
+    req_a.linear_slot_idx, req_a.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req_a.mamba_next_track_idx = 1
+    req_a.mamba_last_track_seqlen = 12
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req_a, finished=False)
+    cm.cache_req(req_a, finished=True)
+    cm.ensure_mamba_slots(pool.num_slots)        # wash A: offered with its snapshot
+    chain_a = cm._chain_keys(torch.tensor(A, dtype=torch.int32))
+    assert cm.tier_store.probe(chain_a) is not None
+    assert cm.prefix_cache.full_evictable == 0   # tree empty
+
+    # B fills the tree and holds the pool: 12 pages + a live snapshot at its boundary
+    mr = cm.match_req(_pend(B + [51]))
+    pages_b = cm._allocate(12)
+    pt[1, :12] = pages_b
+    req_b = Req(input_ids=torch.tensor(B + [51], dtype=torch.int32), table_idx=1,
+                cached_len=12, output_len=1, uid=1, sampling_params=SamplingParams(),
+                cache_handle=mr.cuda_handle)
+    req_b.linear_slot_idx, req_b.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req_b.mamba_next_track_idx = 1
+    req_b.mamba_last_track_seqlen = 12
+    cm.lock(mr.cuda_handle)
+    cm.cache_req(req_b, finished=False)
+    cm.cache_req(req_b, finished=True)
+    return cm, pool, kvpool, pt, A, B, chain_a
+
+
+def _commit_restored(cm, pool, pt, ids, handle, uid, table_idx):
+    """Admission consumed a restored match: lock it, point the row at the restored pages
+    and let the normal insert path adopt the span (the arm's post-restore commit)."""
+    restored = handle.get_matched_indices().clone()
+    req = Req(input_ids=torch.tensor(ids, dtype=torch.int32), table_idx=table_idx,
+              cached_len=len(ids) - 1, output_len=1, uid=uid,
+              sampling_params=SamplingParams(), cache_handle=handle)
+    req.linear_slot_idx = pool.alloc(1)[0]
+    req.mamba_ping_pong = tuple(pool.alloc(2))
+    cm.lock(handle)
+    pt[table_idx, :len(ids) - 1] = restored
+    cm.cache_req(req, finished=True)
+
+
+def test_restore_self_evict_serves_probe_hit_when_the_other_session_holds_the_pool():
+    """CacheDrop fails-before: with session B holding the pool, session A's probe-hit
+    restore was refused reason=resources and fell through to a full re-prefill. The
+    budget gate now self-evicts the deficit through the _allocate seam - B demotes to
+    the store via the offer seam - and the restore serves."""
+    cm, pool, kvpool, pt, A, B, chain_a = _two_sessions_other_holds_pool()
+    chain_b = cm._chain_keys(torch.tensor(B, dtype=torch.int32))
+
+    mr_a = cm.match_req(_pend(A + [50]))         # probe-hit A while B holds the pool
+    assert mr_a.cuda_handle.cached_len == 12     # fails-before: 0 (resources refusal)
+    assert mr_a.mamba_value is not None          # a live GDN slot rode the restore
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
+    # the deficit pages came from B: its boundary demoted through the offer seam
+    hit_b = cm.tier_store.probe(chain_b)
+    assert hit_b is not None and hit_b[0] == 12
+    assert cm._tier_snap_bound[hit_b[1].path_key] == 12
+
+    # the normal path takes over: A's restored span adopts into the tree
+    _commit_restored(cm, pool, pt, A + [50], mr_a.cuda_handle, uid=2, table_idx=0)
+    cm.check_integrity()
+    assert cm.prefix_cache.match_prefix(
+        torch.tensor(A, dtype=torch.int32)).cached_len == 12
+
+
+def test_reverse_switch_restores_from_tier_after_self_evict():
+    """CacheDrop arm2, the return leg: after A re-took the pool via a self-evict restore,
+    switching back to B restores B's boundary from the tier (restore_ok grows) instead
+    of falling to a full re-prefill."""
+    cm, pool, kvpool, pt, A, B, chain_a = _two_sessions_other_holds_pool()
+
+    mr_a = cm.match_req(_pend(A + [50]))
+    assert mr_a.cuda_handle.cached_len == 12
+    _commit_restored(cm, pool, pt, A + [50], mr_a.cuda_handle, uid=2, table_idx=0)
+    assert cm.tier_store.snapshot()["restore_ok"] == 1
+
+    mr_b = cm.match_req(_pend(B + [51]))         # the reverse switch
+    assert mr_b.cuda_handle.cached_len == 12     # fails-before: 0 (full re-prefill)
+    assert mr_b.mamba_value is not None
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_ok"] == 2 and snap["restore_refused"] == 0
+    assert snap["restore_l1"] == 2               # both switches went through the tier
+    _commit_restored(cm, pool, pt, B + [51], mr_b.cuda_handle, uid=3, table_idx=1)
+    cm.check_integrity()                         # the ledger closed over both switches
+
+
+def test_self_evict_degrades_to_resources_refusal_when_nothing_is_evictable():
+    """Degradation regressor (green before AND after the self-evict change): when every
+    tree page is locked there is nothing to evict, so the deficit cannot be closed and
+    the restore refuses reason=resources exactly as before."""
+    cm, pool, kvpool, pt, A, B, chain_a = _two_sessions_other_holds_pool()
+
+    held = cm.match_req(_pend(B + [51]))         # tree hit: B's own span
+    assert held.cuda_handle.cached_len == 12
+    cm.lock(held.cuda_handle)                    # lock B: nothing evictable remains
+
+    hit = cm.tier_store.probe(chain_a)
+    assert hit is not None and hit[0] == 12      # the probe still hits (precondition)
+    free_before, slots_before = len(cm.free_slots), pool.num_free_slots
+    mr_a = cm.match_req(_pend(A + [50]))
+    assert mr_a.cuda_handle.cached_len == 0 and mr_a.mamba_value is None
+    assert len(cm.free_slots) == free_before and pool.num_free_slots == slots_before
+    snap = cm.tier_store.snapshot()
+    assert snap["restore_refused"] == 1 and snap["restore_l1"] == 0   # refused pre-read
+    cm.check_integrity()
 
 
 # ------------------------------------------------- P0 telemetry: restore_ok / restore_refused

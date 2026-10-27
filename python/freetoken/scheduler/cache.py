@@ -1111,8 +1111,10 @@ class CacheManager:
         restore just hands the continuation paged KV, no state to revive). Budget rule: the
         restore consumes the free pages + one slot (hybrid) the replaced re-prefill would
         (no extra over-admit; the padding sink is never touched - slots come from the pool's
-        own free list). Anything missing (free pages, slot, snapshot at the matched depth)
-        falls back to the normal path. When an idle prefetch has STAGED this session's
+        own free list). A free-page or slot deficit is closed first by self-evicting
+        evictable tree pages through the _allocate seam (victims demote to the store
+        before the free); what stays missing after it (locked pages, no slot, snapshot
+        at the matched depth) falls back to the normal path. When an idle prefetch has STAGED this session's
         segment, the admission adopts the staged bytes through the same tail instead of
         reading the store synchronously (the reservation made at prefetch START replaces
         the free-list gate); every refusal releases it and falls through unchanged."""
@@ -1157,25 +1159,72 @@ class CacheManager:
                                                       cached_len, chain[0])
             if res is not None:
                 return res
+        # An adopt fall-through already refused a tail gate at this depth/bound: the sync
+        # re-run refuses identically, so self-evicting another session's boundary would
+        # be pure waste - skip straight to the gates.
+        self_evicted, deficit = 0, 0
+        if prior_refusal is None:
+            # Budget gate: a page/slot deficit is closed first by self-evicting through
+            # the same _evict seam _allocate uses (the replaced re-prefill would evict
+            # the same pages lazily); what stays short after that refuses as before.
+            deficit = max(fresh - len(self.free_slots), 0)
+            if (deficit == 0 and self.is_hybrid
+                    and self.linear_state_pool.num_free_slots < 1):
+                deficit = 1               # a page-sized evict may return the victim's GDN slot
+        if deficit:
+            # Cap the request at what the tree can actually serve: the KV-only seam
+            # asserts past its evictable size, and locked pages must degrade to the
+            # resources refusal, not raise.
+            if self.is_hybrid or self.is_swa:
+                evictable = self.prefix_cache.full_evictable_size
+            else:
+                evictable = max(self.prefix_cache.size_info.evictable_size - owned, 0)
+            if evictable:
+                # Our own evict must not take the walked prefix the handle references
+                # (the walk stamped it MRU; a root lock is a no-op). _evict demotes via
+                # disk IO and may raise: the unlock must survive it.
+                if self.is_hybrid:
+                    self.prefix_cache.inc_lock(owned_node)
+                    try:
+                        evicted = self._evict(min(deficit * self.page_size, evictable))
+                    finally:
+                        self.prefix_cache.dec_lock(owned_node)
+                else:
+                    from freetoken.kvcache.radix_cache import RadixCacheHandle
+
+                    locked = RadixCacheHandle(owned, owned_node)
+                    self.prefix_cache.lock_handle(locked)
+                    try:
+                        evicted = self._evict(min(deficit * self.page_size, evictable))
+                    finally:
+                        self.prefix_cache.lock_handle(locked, unlock=True)
+                self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
+                self_evicted = evicted.numel()
         if (fresh > len(self.free_slots)
                 or (self.is_hybrid and self.linear_state_pool.num_free_slots < 1)):
+            if self_evicted:
+                self._log_wasted_self_evict(depth, self_evicted, "resources")
             self._log_restore_refusal("resources", depth, cached_len, owned_pg,
                                       handle, chain[0], prior=prior_refusal)
             return None
         res = self.tier_store.restore(handle)
         if res is None:
+            if self_evicted:
+                self._log_wasted_self_evict(depth, self_evicted, "read")
             return None
         pages, snaps = res
         allocated = self.free_slots[:fresh]
         self.free_slots = self.free_slots[fresh:]
         slot = self.linear_state_pool.alloc(1)[0] if self.is_hybrid else None
-        out, _ = self._restore_tail(depth, handle, pages, snaps, owned_node, owned_pg,
-                                    owned_pages, allocated, slot, cached_len, chain[0],
-                                    prior=prior_refusal)
+        out, reason = self._restore_tail(depth, handle, pages, snaps, owned_node,
+                                         owned_pg, owned_pages, allocated, slot,
+                                         cached_len, chain[0], prior=prior_refusal)
         if out is None:
             if slot is not None:
                 self.linear_state_pool.free(slot)
             self.free_slots = torch.cat([allocated, self.free_slots])
+            if self_evicted:
+                self._log_wasted_self_evict(depth, self_evicted, reason)
             return None
         return out
 
@@ -1201,6 +1250,14 @@ class CacheManager:
             reason, "hybrid" if self.is_hybrid else "kv", depth, cached_len, owned_pg,
             "-" if bound is None else bound,
             chain0[:4].hex() if chain0 is not None else "-")
+
+    def _log_wasted_self_evict(self, depth: int, evicted_tokens: int, gate: str) -> None:
+        """The self-evict made room but a late gate (the store read or a _restore_tail
+        check) refused: the eviction was wasted. The freed pages stay free, the
+        fall-through re-prefill reuses them without data loss."""
+        logger.info(
+            "session tier wasted-self-evict: gate=%s depth_pg=%d evicted_pg=%d",
+            gate, depth, evicted_tokens // self.page_size)
 
     def _restore_tail(self, depth, handle, pages, snaps, owned_node, owned_pg,
                       owned_pages, allocated, slot, cached_len=0, chain0=None,
