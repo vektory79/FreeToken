@@ -264,6 +264,9 @@ class CacheManager:
         # is unique while present): a second restore must never overwrite the first's
         # refusal record, else its pages + GDN slot leak (mr>1).
         self._tier_pending_restore: dict[int, tuple] = {}
+        # Last restore-refusal reason (P0 seam): the divergence log renders it without
+        # re-parsing the refusal line.
+        self._tier_last_refusal: str | None = None
         # Idle restore prefetch (phase 2): staged tickets per session key + the last seen
         # stripped ids the idle hook re-probes; _tier_reserved_pages counts pages held
         # outside free_slots by live reservations (the exact idle ledger carries it).
@@ -352,8 +355,11 @@ class CacheManager:
         # returns its own HybridMatch (cached_len/node fields); the plain caches return
         # MatchResult (fields on the handle).
         cached_len = m.cached_len if self.is_hybrid else m.cuda_handle.cached_len
-        self._tier_admission(ids, cached_len)
+        diverge = self._tier_admission(ids, cached_len)
+        pre = self.tier_store.snapshot() if diverge is not None else None
         restored = self.try_restore(ids, cached_len)
+        if diverge is not None:
+            self._log_cache_divergence(diverge, restored is not None, pre)
         if restored is not None:
             return restored
         if self.is_hybrid:
@@ -990,7 +996,7 @@ class CacheManager:
             chain.append(prev)
         return chain
 
-    def _tier_admission(self, ids, cached_len: int) -> None:
+    def _tier_admission(self, ids, cached_len: int) -> tuple | None:
         """note_match wiring: a shallow/cold match vs the session's stored tip is a divergence
         -- refresh the store's LRU currency at the matched path key and record the
         under-divergence boundary for the adaptive keep set. All boundary bookkeeping here is
@@ -1000,17 +1006,22 @@ class CacheManager:
         snapshots, but the tree may own pages past it (P2) - and cached_len itself for
         KV-only ones. Sessions group by their FIRST-page
         chain key (a common system prefix groups coarser: documented phase-1 approximation).
-        A full match (the whole stripped prompt cached) still promotes the tip."""
+        A full match (the whole stripped prompt cached) still promotes the tip.
+        Returns the (chain0, cached_len, tip, depth) context of a divergence admission for
+        the cache-divergence log, or None (the caller emits it once the tier attempt that
+        follows resolves probe/restore)."""
         if not self._tier_on:
-            return
+            return None
         chain = self._chain_keys(ids)
         if not chain:          # prompt shorter than page_size: nothing to index or probe
-            return
+            return None
         st = self._tier_sessions.setdefault(chain[0], [0, 0, 0, None])
+        diverge = None
         if cached_len < st[0]:
             # owned frontier (P2), not the snapshot-truncated match: a mid-history rewrite
             # truncates the hybrid match to 0 while the tree still owns the shared pages
             st[1] = self._tier_divergence_depth(ids, cached_len)
+            diverge = (chain[0], cached_len, st[0], st[1])
         elif cached_len > st[0]:
             st[2], st[0] = st[0], cached_len        # the old tip becomes the newest non-tip
         if cached_len > 0:                          # a cold match only tracks the session
@@ -1024,6 +1035,7 @@ class CacheManager:
             if oldest != chain[0]:
                 del self._tier_seen_ids[oldest]
                 self._tier_prefetch_drop(oldest)    # no ids left to re-evaluate: release it
+        return diverge
 
     def _tier_divergence_depth(self, ids, cached_len: int) -> int:
         """The session's true divergence depth in TOKENS: the frontier of tree-owned KV along
@@ -1242,6 +1254,7 @@ class CacheManager:
         different reason always is."""
         if reason == prior:
             return
+        self._tier_last_refusal = reason
         bound = self._tier_snap_bound.get(handle.path_key)
         self.tier_store.count_restore_outcome(ok=False)
         logger.info(
@@ -1250,6 +1263,24 @@ class CacheManager:
             reason, "hybrid" if self.is_hybrid else "kv", depth, cached_len, owned_pg,
             "-" if bound is None else bound,
             chain0[:4].hex() if chain0 is not None else "-")
+
+    def _log_cache_divergence(self, ctx, ok: bool, pre: dict) -> None:
+        """One INFO line per divergence admission (cached_len below the session tip): a
+        rewritten history or a cold chat against a stored tip. Future "lost cache"
+        complaints resolve with one grep. probe/restore render THIS admission's tier
+        attempt as counter deltas against the pre-admission snapshot pre."""
+        chain0, cached, tip, depth = ctx
+        snap = self.tier_store.snapshot()
+        probe = "hit" if snap["probe_hit"] > pre["probe_hit"] else "miss"
+        if ok:
+            restore = "ok"
+        elif snap["restore_refused"] > pre["restore_refused"]:
+            restore = f"refused:{self._tier_last_refusal or 'unknown'}"
+        else:
+            restore = "none"
+        logger.info(
+            "cache divergence: session=%s cached=%d tip=%d divergence=%d probe=%s restore=%s",
+            chain0[:4].hex(), cached, tip, depth, probe, restore)
 
     def _log_wasted_self_evict(self, depth: int, evicted_tokens: int, gate: str) -> None:
         """The self-evict made room but a late gate (the store read or a _restore_tail

@@ -1247,6 +1247,42 @@ def test_tier_admission_bookkeeping_divergence_tip_promotion_cold():
     assert len(cm._tier_sessions) == 2
 
 
+def test_cache_divergence_logged_once_per_divergence_admission(tier_log_capture):
+    """The divergence admission (cached_len below the session's stored tip) logs exactly
+    one 'cache divergence' line; a full match logs none. Observation seam for client-side
+    history rewrites: future 'lost cache' complaints resolve with one grep."""
+    pool, kvpool = _pool(), _FakeKVPool()
+    pt = torch.zeros(8, 64, dtype=torch.int32)
+    cm = _tiered_cm(pool, kvpool, pt)
+    cm.match_req(_pend([1, 2, 3, 4]))            # cold: tracks the session, zeros
+    _donate_one_snapshot(cm, pool, kvpool, pt, ids=(1, 2, 3, 4, 5))     # boundary 4
+
+    mr2 = cm.match_req(_pend(list(range(1, 10))))   # stripped 8: truncated to boundary 4
+    live2, pp2 = pool.alloc(1)[0], tuple(pool.alloc(2))
+    pt[1, :4] = torch.tensor([100, 101, 102, 103], dtype=torch.int32)
+    pt[1, 4:8] = torch.tensor([104, 105, 106, 107], dtype=torch.int32)
+    req2 = Req(input_ids=torch.tensor(list(range(1, 10)), dtype=torch.int32), table_idx=1,
+               cached_len=8, output_len=1, uid=1, sampling_params=SamplingParams(),
+               cache_handle=mr2.cuda_handle)
+    req2.linear_slot_idx, req2.mamba_ping_pong = live2, pp2
+    req2.mamba_next_track_idx = 1
+    req2.mamba_last_track_seqlen = 8
+    cm.lock(mr2.cuda_handle)
+    cm.cache_req(req2, finished=True)            # donate at the boundary-8 node
+
+    with tier_log_capture() as cap:
+        cm.match_req(_pend(list(range(1, 10))))      # full match: tip 8, no divergence
+    assert not [m for m in cap.messages if "cache divergence" in m]
+
+    with tier_log_capture() as cap:
+        cm.match_req(_pend([1, 2, 3, 4, 9]))         # shallow: cached 4 < tip 8
+    div = [m for m in cap.messages if "cache divergence" in m]
+    assert len(div) == 1
+    assert div[0].startswith("cache divergence: session=")
+    assert "cached=4" in div[0] and "tip=8" in div[0] and "divergence=4" in div[0]
+    assert "probe=" in div[0] and "restore=" in div[0]
+
+
 def test_session_tier_boot_replay_restores_snapshot_segment(tmp_path):
     """Arm-3 boot restore: after a graceful shutdown (flush_live + compact) a FRESH
     CacheManager over the same tier dir must restore the journal-replayed segment on the
@@ -2780,9 +2816,10 @@ def test_restore_refusal_log_line_carries_divergence_fields(tier_log_capture):
         cm._tier_snap_bound.pop(chain4[3])       # failed-re-offer pop: state changed
         cm.match_req(_pend([1, 2, 3, 4, 9]))     # snap-gate refusal: bound gone, depth 4
 
-    assert len(cap.messages) == 2
-    gate = next(m for m in cap.messages if "reason=snap_gate" in m)
-    res = next(m for m in cap.messages if "reason=resources" in m)
+    refusals = [m for m in cap.messages if "restore refused" in m]
+    assert len(refusals) == 2                   # one line per refusal (divergence lines aside)
+    gate = next(m for m in refusals if "reason=snap_gate" in m)
+    res = next(m for m in refusals if "reason=resources" in m)
     for msg in (gate, res):
         assert "mgr=hybrid" in msg and "cached_tok=0" in msg and "owned_pg=0" in msg
         assert f"chain0={chain4[0][:4].hex()}" in msg
@@ -2998,7 +3035,7 @@ def test_hybrid_probe_serves_boundary_exact_below_divergence_m2c(tier_log_captur
     snap = cm.tier_store.snapshot()
     assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
     assert snap["probe_hit"] == 1 and snap["probe_miss"] == 0
-    assert cap.messages == []                    # no fictional refusal
+    assert not [m for m in cap.messages if "restore refused" in m]   # no fictional refusal
 
 
 def test_hybrid_probe_no_boundary_exact_is_an_honest_miss(tier_log_capture):
@@ -3021,7 +3058,7 @@ def test_hybrid_probe_no_boundary_exact_is_an_honest_miss(tier_log_capture):
     assert snap["probe_miss"] == pre.get("probe_miss", 0) + 1 and snap["probe_hit"] == 0
     assert snap["restore_ok"] == 0 and snap["restore_refused"] == 0
     assert snap["restore_l1"] == 0               # no store read for an unservable match
-    assert cap.messages == []                    # fails-before: the snap_gate line
+    assert not [m for m in cap.messages if "restore refused" in m]   # fails-before: the snap_gate line
 
 
 def test_kvonly_midspan_restore_still_truncates():
@@ -3108,7 +3145,7 @@ def test_hybrid_midhistory_divergence_owned_frontier_under_slot_restore(tier_log
     snap = cm.tier_store.snapshot()
     assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
     assert snap["probe_hit"] == 1
-    assert cap.messages == []
+    assert not [m for m in cap.messages if "restore refused" in m]
 
 
 def test_hybrid_under_slot_skips_snapshot_free_victim():
@@ -3300,7 +3337,7 @@ def test_multi_turn_poke_control_revert_restores_at_boundaries(tier_log_capture)
     snap = cm.tier_store.snapshot()
     assert snap["restore_ok"] == 1 and snap["restore_refused"] == 0
     assert snap["probe_snapfree_skip"] == 2     # manual probe + the admission probe
-    assert cap.messages == []
+    assert not [m for m in cap.messages if "restore refused" in m]
 
     # M3 revert control: the insertion is undone; the store still holds the ORIGINAL
     # boundary -> HIT at KEY chain4[3], again with zero refusals
@@ -3312,7 +3349,7 @@ def test_multi_turn_poke_control_revert_restores_at_boundaries(tier_log_capture)
     assert snap["restore_ok"] == 2 and snap["restore_refused"] == 0
     assert snap["restore_l1"] == 2
     assert cm._tier_sessions[chain2[0]][3] == 2  # the keep set was never disturbed
-    assert cap.messages == []                    # no full miss, no leftover refusal
+    assert not [m for m in cap.messages if "restore refused" in m]   # no refusal line
 
 
 def test_divergence_frontier_stays_above_the_floor_across_the_keep_set():
