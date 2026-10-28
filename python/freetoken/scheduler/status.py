@@ -40,7 +40,9 @@ class SchedulerStatusReporter:
         tier_fn: Callable[[], str] | None = None,
         forward_ms: float | None = None,
         warmup: bool = False,
+        generated: int | None = None,
     ) -> None:
+        """``generated``: tokens a decode step committed; None means one per request."""
         if batch.is_prefill:
             self._report_prefill(
                 batch,
@@ -54,7 +56,7 @@ class SchedulerStatusReporter:
                 forward_ms=forward_ms,
                 warmup=warmup,
             )
-        elif batch.is_decode:
+        else:
             self._report_decode(
                 batch,
                 running_reqs=running_reqs,
@@ -66,6 +68,7 @@ class SchedulerStatusReporter:
                 swa_tokens=swa_tokens,
                 tier_fn=tier_fn,
                 forward_ms=forward_ms,
+                generated=generated,
             )
 
     def _report_prefill(
@@ -127,9 +130,10 @@ class SchedulerStatusReporter:
         swa_tokens: tuple[int, int] | None = None,
         tier_fn: Callable[[], str] | None = None,
         forward_ms: float | None = None,
+        generated: int | None = None,
     ) -> None:
         self._decode_forward_count += 1
-        self._decode_generated_tokens += len(batch.reqs)
+        self._decode_generated_tokens += len(batch.reqs) if generated is None else generated
         if forward_ms is not None and forward_ms > 0:
             self._decode_window_seconds += forward_ms / 1000.0
         if self._decode_forward_count % self.decode_log_interval != 0:

@@ -20,6 +20,7 @@ from .reader import gguf_architecture, load_gguf_metadata, gguf_tensor_names
 # GGUF ``general.architecture`` -> FreeToken registry key (a GGUF-specific spec that
 # reuses the model classes but a GGUF parse_config / iter_weights).
 GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
+    "flint": "FlintGGUFForCausalLM",
     "deepseek4": "DeepseekV4GGUFForCausalLM",
     "gemma4": "Gemma4GGUFForCausalLM",
     "glm4moe": "Glm4MoeGGUFForCausalLM",
@@ -95,7 +96,9 @@ def _vocab_size(model_path: str) -> int:
 
 @functools.cache
 def _mm_fields(module: str, model_path: str, mmproj: Mmproj, vocab_size: int) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    return importlib.import_module(module).gguf_mm_config(load_gguf_metadata(model_path), mmproj, vocab_size)
+    return importlib.import_module(module).gguf_mm_config(
+        load_gguf_metadata(model_path), mmproj, vocab_size, model_path=model_path
+    )
 
 
 def mm_fields(model_path: str, mmproj: Mmproj) -> tuple[dict[str, Any], dict[str, Any] | None]:
