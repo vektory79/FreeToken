@@ -1,9 +1,9 @@
 ---
 name: "ft-serve-gguf-glm5next-campaign"
-description: "GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)"
+description: "GGUF glm5next Path A: offload chain to 78115df, hybrid verdict RECOMMENDED (16.67 tok/s), Round-5 invalidation lifted"
 type: project
-lastUpdated: 2026-10-17T18:07
-lastRecall: 2026-10-24T21:15
+lastUpdated: 2026-10-26T23:45
+lastRecall: 2026-10-26T23:42
 ---
 
 # GGUF glm5next (Path A): campaign record - see PLAN.md for the full record
@@ -39,3 +39,5 @@ Commits: 5a04423 (CPU GEMV iq3_xxs/iq4_xs/q6_k, per-projection tables) -> bd0223
 - FINAL (see gguf-hybrid-reacceptance-final): re-acceptance PASSED, hybrid 16.67 tok/s @64k vs offload 12.97 = 1.28x, 1.43 ms/layer all-in, battery 24/24. Plan artifacts: .tasks/gguf-glm5next-hybrid/.
 
 **Round 5 (2026-10-17):** merge f0eed55 пере-платформил GGUF; glm5next GGUF loader отсутствует в main (порт D4) - кампании/рецепты этой памяти невоспроизводимы на слитом дереве до D4. Исторические измерения остаются валидными. Карта: ft-merge-round5-deferred-ports, kb round5-ggml-replatform-deferred-ports.
+
+UPDATE 2026-10-26: invalidation lifted. D4 landed (round5 9314c9b boot-smoke offload UD-Q3_K_XL decode 21.00 tok/s, cross-validation 38/38) and was hardened in round6 (2276069); D-ports case closed fully 2026-10-26 (round6-deferred-ports-execution, kb 1a4c8d1). glm5next GGUF boots on the merged tree again. Hybrid slot pools re-landed via round5 D3 393b682 with FRESH numbers on the new stack (hybrid 27.71 vs offload 21.00 tok/s); the campaign/re-acceptance numbers above stay historical - re-verify the tuned recipes (explicit --num-tokens / memory-ratio) before reuse on the post-f0eed55 stack.

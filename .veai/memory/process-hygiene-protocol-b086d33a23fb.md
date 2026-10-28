@@ -1,9 +1,9 @@
 ---
 name: "process-hygiene-protocol"
-description: "Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment"
-type: feedback
-lastUpdated: 2026-09-22T20:42
-lastRecall: 2026-10-26T12:37
+description: "Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)"
+type: project
+lastUpdated: 2026-10-27T01:42
+lastRecall: 2026-10-27T01:41
 ---
 
 # Process-hygiene protocol for agent test waves
@@ -25,3 +25,8 @@ A CPU-path pytest wave ran while a concurrent hardware wave (ft serve deep-fill 
 - Stale prior-campaign wrapper BLOCKS a gated census: a fix3-session zombie (PID 2404281, alive 1d02h, infinite `while true` nvidia-smi sampler -> /tmp/fix3_logs/grow_r8_vram.csv, only child `sleep 2`) had the literal text 'ft serve' inside its own pgrep invocation, so any `pgrep '[f]t serve'` matched it and refused the GPU launch. Discriminate before killing: etime >> wave duration, no nvidia-smi compute apps, campaign logs stale >24h. It was killed (SIGTERM then SIGKILL) and the wave reran.
 - pkill -9 -f SELF-KILL: `pkill -9 -f 'fix3_logs/grow_r8_vram'` inside a chained command matched the invoking wrapper's OWN cmdline (the pattern string appears in it) -> the whole background chain was SIGKILLed instantly: empty output, zero artifacts, arms never started. Rule: never put an unbracketed literal in a pkill/pgrep pattern if that same literal appears anywhere in your own command line; bracket-escape ([f]ix3_logs) or separate the verify step from the kill step.
 - Escalation of the "harmless self-match" nuance: it is harmless only for REPORT-ONLY census. When census GATES a launch (refuse-if-live), a false positive BLOCKS the wave - gate census must match the real invocation shape (`[f]t serve --port`), not bare 'ft serve'.
+
+## Orphaned-watchdog pipe holder = zombie background wrapper (2026-10-27, CacheDrop arms)
+A `bash runner.sh 2>&1 | tee out` background wrapper NEVER completed although the runner had printed its final VERDICT ~40 min earlier: every boot() started a watchdog subshell `( for _ in $(seq 1 N); do sleep 2; grep FAILPAT log; done ) &` with a 66-133 min lifetime, and start_watchdog never killed the PREVIOUS watchdog across re-boots. The orphaned subshell inherits the pipe write-end, so tee never sees EOF, the wrapper stays alive, and the agent's background-completion event never fires - the agent waited 40+ minutes on an already-finished run and only a user nudge resolved it.
+- Fix: start_watchdog kills the previous WATCH_PID before spawning a new one (applied to .tasks/CahceDrop/run_cachehit_arm.sh and run_twosession_arm.sh); cleanup still kills the last one.
+- Diagnosis signature: the runner's output file already contains the final verdict; pgrep shows wrapper bash + tee + runner script alive; the orphans are children of the runner script (`pgrep -P <script-pid>`). Kill by EXACT pids (wrapper, tee, script, its children) - never a pkill pattern (self-kill trap above). Once the pipe holders die, the background session immediately reports finished.

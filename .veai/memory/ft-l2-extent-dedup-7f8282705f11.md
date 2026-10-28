@@ -3,7 +3,7 @@ name: "ft-l2-extent-dedup"
 description: "L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79"
 type: project
 lastUpdated: 2026-10-11T20:22
-lastRecall: 2026-10-26T02:22
+lastRecall: 2026-10-26T23:40
 ---
 
 # L2 extent dedup (session tier) - executed 2026-10-07/08, HW verdict 23.81 -> 8.17 GiB (-65.7%, 2.91x)

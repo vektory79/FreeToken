@@ -3,7 +3,7 @@ name: "ft-w1narrow-ngram-wave"
 description: "W1-narrow CLOSED: A/B NO-GO on target profile (ngram acceptance 0); stage0 method flaw; scaffold uncommitted"
 type: project
 lastUpdated: 2026-10-12T14:04
-lastRecall: 2026-10-12T17:11
+lastRecall: 2026-10-26T23:40
 ---
 
 # Волна W1-narrow: ЗАВЕРШЕНА - A/B NO-GO на целевом профиле (2026-10-10), каркас остаётся

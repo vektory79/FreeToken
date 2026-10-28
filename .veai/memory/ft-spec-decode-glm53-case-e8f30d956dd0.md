@@ -3,7 +3,7 @@ name: "ft-spec-decode-glm53-case"
 description: "Spec-decode GLM-5.3-Flash case CLOSED NO-GO: W0 R4 3.76, W0.5 cW 0.50, W1 ngram acceptance=0 (stage0 method flaw)"
 type: project
 lastUpdated: 2026-10-17T12:00
-lastRecall: 2026-10-24T02:09
+lastRecall: 2026-10-26T23:40
 ---
 
 # Спек-декод GLM-5.3-Flash: кейс ЗАКРЫТ NO-GO окончательно (W0+W0.5+W1, 2026-10-10)

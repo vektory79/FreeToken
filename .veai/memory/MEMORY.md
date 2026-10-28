@@ -30,7 +30,6 @@
 - [fix3-hybrid-cache-loss-donation](fix3-hybrid-cache-loss-donation-09364e19044a.md) — Fix-3 campaign LANDED+VALIDATED: donation fixes user's periodic full loss (5/5 -> 0/5 misses, 4.3x turns 2-6); 5 commits
 - [kb-authoring-user-requirements](kb-authoring-user-requirements-d5e5128874ab.md) — User requirements for kb/: git self-sufficiency, RU indexes, human-readable, markdown links, wiki granularity
 - [ft-kb-knowledge-base](ft-kb-knowledge-base-df57ecd43389.md) — kb/ self-sufficient wiki on vektory79 (rework through a0a6064); kb-distill skill; index kb/README.md
-- [process-hygiene-protocol](process-hygiene-protocol-74ae16a3c293.md) — Test-wave hygiene: census traps, trap+watchdog, SIGTERM->SIGKILL, serialized runs; pkill self-kill; OOM=Environment
 - [sandbox-path-absence-trap](sandbox-path-absence-trap-3f7778c9bdfc.md) — Delegated agents' list_dir is sandboxed to project root; outside paths falsely reported absent - verify via IDE terminal
 - [lean-subagent-context](lean-subagent-context-32151731dde8.md) — Cloud LLM: do not resume big-context subagents (costly); prefer fresh narrow agents; resume only for tiny deltas
 - [ft-serve-600s-abort-client-timeout](ft-serve-600s-abort-client-timeout-f75316b3a28f.md) — ft serve ~600s decode abort = client SDK default timeout; 'Aborting request' log + 0-token ring row discriminate
@@ -81,8 +80,6 @@
 - [ft-l2-extent-dedup](ft-l2-extent-dedup-7f8282705f11.md) — L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79
 - [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-75d61a728aa1.md) — mmproj GGUF vision case CLOSED phases 1-5 (e35577d..f67449b), 347/347 tensors exact, HW PASS, TRAPS T68-T75
 - [ft-w1narrow-ngram-wave](ft-w1narrow-ngram-wave-60722281b1c8.md) — W1-narrow CLOSED: A/B NO-GO on target profile (ngram acceptance 0); stage0 method flaw; scaffold uncommitted
-- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-fbb3d9b43663.md) — GGUF glm5next hybrid FINAL verdict: re-acceptance gates pass, 16.67 tok/s vs offload 12.97, hybrid RECOMMENDED @63b9bff
-- [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-ea3cd19f711b.md) — GGUF glm5next Path A campaign: offload chain to 78115df, hybrid campaign, final verdict hybrid RECOMMENDED (16.67 tok/s)
 - [ft-merge-round5-deferred-ports](ft-merge-round5-deferred-ports-94670d11c055.md) — Merge round5 f0eed55: D1-D5 DONE; residuals fixed; kb links repaired (8bba8e5); only fa/fi/trtllm open
 - [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-e8f30d956dd0.md) — Spec-decode GLM-5.3-Flash case CLOSED NO-GO: W0 R4 3.76, W0.5 cW 0.50, W1 ngram acceptance=0 (stage0 method flaw)
 - [ftw-legacy-fold-ram-peak](ftw-legacy-fold-ram-peak-88e4077322c2.md) — FTW legacy fold 198 GiB OOM fixed: zero-scratch VERIFIED f12e554 (~143 GiB); old carrier delete + push = user decisions
@@ -97,3 +94,7 @@
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-1e3dc850d380.md) — gguf-native-serving skill ledger: TRAPS T01-T95 committed (73cceb0); run-garbage rule added uncommitted to sec.11
 - [ftw-sources-second-disk](ftw-sources-second-disk-30fe4b345dc7.md) — Missing FTW/HF sources: search /media/data/ai/models/; 3 legacy NVFP4 carriers reconverted to -FTW-new, GPU boot pending
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a1b7ac45a507.md) — Git stale index/parallel sessions: 6 case lessons; verify HEAD by branch+churn, not exact hash (amend-orphan case)
+- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-1f807466bb13.md) — GGUF glm5next hybrid re-acceptance FINAL: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; Round-5 caveat lifted
+- [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-fb6e465ca275.md) — GGUF glm5next Path A: offload chain to 78115df, hybrid verdict RECOMMENDED (16.67 tok/s), Round-5 invalidation lifted
+- [process-hygiene-protocol](process-hygiene-protocol-b086d33a23fb.md) — Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)
+- [ft-cachedrop-l2-restore-zero](ft-cachedrop-l2-restore-zero-d3868e381348.md) — CacheDrop case: L2 restores + landed commits da7b84e/9281151/fd22003, HW control pending
