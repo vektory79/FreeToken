@@ -661,8 +661,10 @@ class CacheManager:
                 # behavior is unchanged.
                 if (self._tier_on and old_handle.tier_restored and insert_len > 0
                         and old_handle.cached_len <= insert_len):
+                    # radix_lookahead keys the tree as token pairs (see _keys); raw ids here
+                    # would desync the keyspace vs every other insert path.
                     prefix_len, _mamba_exist = self.prefix_cache.insert(
-                        req.input_ids[:insert_len], page_indices[:insert_len], None)
+                        self._keys(req.input_ids, insert_len), page_indices[:insert_len], None)
                     self._free(page_indices[free_upto:max(free_upto, prefix_len)])
                     # BUG-1: the insert just made [free_upto, insert_len) tree-owned; the
                     # trailing free below starts at the OLD restored boundary and would
