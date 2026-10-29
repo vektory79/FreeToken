@@ -75,7 +75,7 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--embed-weights` | gpu | Where the input token embedding table lives. `host` keeps it in pinned host RAM and each lookup reads its rows over PCIe, so its VRAM goes to the expert cache and KV. Refused when the table is tied to the LM head |
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
-| `--kv-cache-dtype` | bf16 | `bf16`, `fp8`, or `nvfp4` (see [NVFP4 KV cache](#nvfp4-kv-cache)): FP8 stores the KV cache as e4m3 codes plus one fp32 scale per (token, kv head), roughly doubling the tokens that fit in the same VRAM; see [FP8 KV cache](#fp8-kv-cache) |
+| `--kv-cache-dtype` | bf16 | `auto`, `bf16`, `fp8`, or `nvfp4` (see [NVFP4 KV cache](#nvfp4-kv-cache)): FP8 stores the KV cache as e4m3 codes plus one fp32 scale per (token, kv head), roughly doubling the tokens that fit in the same VRAM; see [FP8 KV cache](#fp8-kv-cache) |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU |
 
 ### FP8 KV cache
