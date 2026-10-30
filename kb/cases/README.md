@@ -171,6 +171,16 @@ Specification / Acceptance / Checklist.
   main-wins #803/#810), D4 loader contract, D5 nvfp4-KV. Вход:
   [TASK.md](merge-round6-upstream-main/TASK.md). Статус: CPU-зелёный
   (0 failed); boot-smoke и GPU-порции отложены в cloud-окно.
+- [merge-round7-upstream-main/](merge-round7-upstream-main/) — кейс round-7
+  merge upstream/main a2ce636 (12 коммитов, 84 файла, 7 конфликтов;
+  SPLIT-ROUND CPU-only): минимальный зелёный merge d8803e0 + бриф
+  cloud-окна W1-W3 - boot-smoke gguf-786k, GPU-порции тестов,
+  followup-кандидаты (raw-insert tier-restore в cache.py без radix_lookahead
+  в проде, 'auto' в доке --kv-cache-dtype). UNION-резолвы разнесённых
+  флагов BackendInfo/Batch/status; триаж латентных композиций замером
+  достижимости. Вход: [TASK.md](merge-round7-upstream-main/TASK.md).
+  Статус: CPU-зелёный (970 passed / 43 skipped / 0 failed, ревью
+  0 blockers); boot-smoke и GPU-порции отложены в cloud-окно.
 - [mmq-prefill-kernel/](mmq-prefill-kernel/) — бриф v0->v2: как нулевой
   эксперимент (сортировка пар) уточнил цель следующей итерации. Вход:
   [TASK.md](mmq-prefill-kernel/TASK.md).

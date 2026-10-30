@@ -194,6 +194,47 @@ NVFP4-квант-механику (#732/#739 BREAKING, #737 w4a4 на sm_120), h
 skipped, test_cache_budget 51/2, test_glm5_next_gguf 35/91, консолидированный
 прогон 155/16); boot-smoke и GPU-порции отложены в cloud-окно.
 
+## Раунд 7 (2026-10-26): split-round CPU-only, UNION-резолвы и триаж латентных композиций
+
+upstream/main a2ce636 (12 коммитов, 84 файла) принёс rows_per_req graph
+capture (#833/#837), radix_lookahead seam (#834) и волну flint/minimax/muse
+(#816/#797/#829/#830); 7 конфликтных файлов, все резолвы UNION. Режим -
+минимальный зелёный merge в варианте SPLIT-ROUND: CPU-часть локально при
+резидентном LLM, boot-smoke + GPU-порции - cloud-окно. Merge d8803e0
+(родители 67754c9 + a2ce636), CPU 970 passed / 43 skipped / 0 failed,
+ревью 0 blockers, без амендов. Кейс волны с брифом cloud-окна -
+[../cases/merge-round7-upstream-main/TASK.md](../cases/merge-round7-upstream-main/TASK.md).
+Процедурные уроки:
+
+- **UNION-резолв корректен при disjoint-функциональности, но после него
+  сверять слитые call-sites и default-значения против main-поведения**:
+  union может ввести семантику, которой нет ни у одной из сторон. Пример:
+  status.py `_report_decode` получил main-параметр generated, но main сам
+  не передаёт его из scheduler.py - слитый call-site остался без generated
+  (идентично main-поведению); при этом веточный счётчик `+= len(batch.reqs)`
+  заменён main-вариантом с generated, осмысленным при multi-row decode.
+- **Триаж латентной merge-композиции - замером достижимости, а не
+  фикс-в-мердж**: «код некорректен в недостижимой комбинации флагов»
+  проверяется тремя grep-ами: единственный production-конструктор класса
+  (grep по python/ вне самого файла; здесь CacheManager - scheduler.py:88-104),
+  какие аргументы он передаёт, и call-sites включающего флага
+  (radix_lookahead - 0 в проде). Итог: tier-restored insert с raw input_ids
+  в cache.py - deferred-followup, не регресс на достижимом пути; фикс -
+  отдельным коммитом по явной просьбе пользователя.
+- **Расхождение доки-vs-кода - не автоматически merge-регрессия**: датировать
+  обе строки (git log -S) и проверить, менял ли merge зону (git diff
+  <pre-merge-parent>..HEAD по файлам). Здесь обе строки веточные (03fb043
+  добавила строку дока, 2f554c9 - 'auto'-choice позже), в main файла-зоны
+  нет вовсе - FP как merge-регрессия, deferred-followup.
+- **Осиротелый import в конфликтной зоне import-блока**: union imports
+  может притащить уже не используемый импорт (glob в expert_banks.py после
+  main-замены glob-логики на iter_weight_files). Замерять по слитому
+  дереву до фиксации: import без call-sites - отбрасывать (вариант урока
+  раунда 6 про осиротелый хелпер, на более лёгкой форме).
+
+Статус раунда: CPU-зелёный (970/43/0 на d8803e0); boot-smoke и GPU-порции
+отложены в cloud-окно.
+
 ## Правила разрешения конфликтов
 
 - **Дубликат функциональности -> main выигрывает.** Если main пере-реализовал
