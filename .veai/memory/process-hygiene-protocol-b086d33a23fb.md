@@ -3,7 +3,7 @@ name: "process-hygiene-protocol"
 description: "Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)"
 type: project
 lastUpdated: 2026-10-27T01:42
-lastRecall: 2026-10-27T01:41
+lastRecall: 2026-10-29T17:41
 ---
 
 # Process-hygiene protocol for agent test waves

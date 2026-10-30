@@ -3,7 +3,7 @@ name: "round6-deferred-ports-execution"
 description: "round6-deferred-ports: CPU+GPU port-debt closed; D3 verdict NO-GO; decode-gap and Fix-3 split into follow-up cases"
 type: project
 lastUpdated: 2026-10-26T13:36
-lastRecall: 2026-10-26T23:42
+lastRecall: 2026-10-29T00:59
 ---
 
 # round6-deferred-ports: исполнение порт-долга (сессия 2026-10-25)

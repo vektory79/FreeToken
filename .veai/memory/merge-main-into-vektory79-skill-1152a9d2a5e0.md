@@ -3,7 +3,7 @@ name: "merge-main-into-vektory79-skill"
 description: "Skill merge-main-into-vektory79: waves, split-round, all-remote discovery, GPU-preclass; 230 lines, commit 1a3bbe3"
 type: project
 lastUpdated: 2026-10-25T00:52
-lastRecall: 2026-10-24T23:01
+lastRecall: 2026-10-29T18:08
 ---
 
 # Skill merge-main-into-vektory79 (оркестрирующий)

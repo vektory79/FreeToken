@@ -98,3 +98,4 @@
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-fb6e465ca275.md) — GGUF glm5next Path A: offload chain to 78115df, hybrid verdict RECOMMENDED (16.67 tok/s), Round-5 invalidation lifted
 - [process-hygiene-protocol](process-hygiene-protocol-b086d33a23fb.md) — Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)
 - [ft-cachedrop-l2-restore-zero](ft-cachedrop-l2-restore-zero-d3868e381348.md) — CacheDrop case: L2 restores + landed commits da7b84e/9281151/fd22003, HW control pending
+- [ft-merge-round7-pending-handoff](ft-merge-round7-pending-handoff-ac033a46c0ff.md) — Round 7 merge d8803e0 CLOSED: boot-smoke PASS 21.73 tok/s, GPU 205/5/9 all Environment/baseline, 0 merge regressions

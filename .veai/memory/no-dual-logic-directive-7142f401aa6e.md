@@ -3,7 +3,7 @@ name: "no-dual-logic-directive"
 description: "No dual logic main vs vektory79: branch work is delta on main primitives; semantic test dedup, not name-based"
 type: feedback
 lastUpdated: 2026-10-25T13:37
-lastRecall: 2026-10-26T00:07
+lastRecall: 2026-10-29T01:34
 ---
 
 # Директива: запрет двойных логик main vs vektory79 (2026-10-25)

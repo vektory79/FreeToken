@@ -3,7 +3,7 @@ name: "ft-merge-round6-pending-handoff"
 description: "Round-6 merge closed at d66f6e3, boot-smoke PASS; CUDA kernel-splice trap; port debt in round6-deferred-ports-execution"
 type: project
 lastUpdated: 2026-10-26T02:27
-lastRecall: 2026-10-26T12:37
+lastRecall: 2026-10-29T17:41
 ---
 
 # Round 6 merge (2026-10-24/25): CLOSED - HEAD d66f6e3
