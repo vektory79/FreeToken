@@ -19,6 +19,12 @@ class SchedulerStatusReporter:
     _decode_forward_count: int = field(default=0, init=False)
     _decode_generated_tokens: int = field(default=0, init=False)
     _decode_window_seconds: float = field(default=0.0, init=False)
+    # speculative steps since the last decode log: requests stepped and tokens they committed
+    _spec_req_steps: int = field(default=0, init=False)
+    _spec_tokens: int = field(default=0, init=False)
+    # the same since the last take_spec_counts(), which the decode log leaves alone
+    _spec_counts: tuple[int, int] = field(default=(0, 0), init=False)
+
 
     def __post_init__(self) -> None:
         now = self.clock()
@@ -70,6 +76,11 @@ class SchedulerStatusReporter:
                 forward_ms=forward_ms,
                 generated=generated,
             )
+
+    def take_spec_counts(self) -> tuple[int, int]:
+        """Requests stepped and tokens they committed over the speculative decode steps since the last call."""
+        counts, self._spec_counts = self._spec_counts, (0, 0)
+        return counts
 
     def _report_prefill(
         self,
@@ -136,6 +147,12 @@ class SchedulerStatusReporter:
         self._decode_generated_tokens += len(batch.reqs) if generated is None else generated
         if forward_ms is not None and forward_ms > 0:
             self._decode_window_seconds += forward_ms / 1000.0
+        if generated is not None:
+            self._spec_req_steps += len(batch.reqs)
+            self._spec_tokens += generated
+            steps, tokens = self._spec_counts
+            self._spec_counts = (steps + len(batch.reqs), tokens + generated)
+
         if self._decode_forward_count % self.decode_log_interval != 0:
             return   # tier_fn stays unevaluated for the discarded 39/40 batches
 
@@ -150,6 +167,9 @@ class SchedulerStatusReporter:
         gen_throughput = self._decode_generated_tokens / window if window > 0 else 0.0
         self._decode_generated_tokens = 0
         self._decode_window_seconds = 0.0
+        accept = f"accept len: {self._spec_tokens / self._spec_req_steps:.2f}, " if self._spec_req_steps else ""
+        self._spec_req_steps = self._spec_tokens = 0
+
         self.log(
             f"Decode batch, "
             f"#running-req: {running_reqs}, "
@@ -159,6 +179,7 @@ class SchedulerStatusReporter:
             f"{_mamba_msg(mamba_slots)}"
             f"{tier_fn() if tier_fn else ''}"
             f"gen throughput (token/s): {gen_throughput:.2f}, "
+            f"{accept}"
             f"#queue-req: {queue_reqs}"
         )
         if self.moe_stats is not None and (line := self.moe_stats()):

@@ -62,6 +62,7 @@ def _setup():
         finished_reqs=set(),
         eos_token_ids=set(),
         toolcall_anchor_id=None,
+        spec=None,
         config=SimpleNamespace(page_size=1),
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
         # frozen clock: drains measure a 0 ms forward, so the reporter receives no timing
@@ -276,9 +277,10 @@ def test_post_terminal_overlap_step_is_dropped():
 
 
 def test_drain_attributes_forward_time_to_the_terminal_reply():
-    """The final chunk's forward time lands in the terminal reply's timings: the tracker
-    is fed BEFORE the terminal pop, so even a single-chunk prompt reports prefill_ms
-    (pre-fix ordering popped first and the only chunk's time was lost)."""
+    """The final chunk's forward time is attributed before the terminal pop: even a
+    single-chunk prompt reports prefill time in the tracker's terminal release (pre-fix
+    ordering popped first and the only chunk's time was lost). Upstream ReqStats timings
+    replaced the reply's forward sums, so the values are read off the tracker pop."""
     pool, cm, tm, dm, _pm, sent, stub = _setup()
     stub.timing_tracker = RequestTimingTracker(clock=lambda: 2.0)  # t_launch 0.0 -> 2000 ms
     # burn the engine-start warmup slot so the drained batch is a regular one
@@ -290,14 +292,16 @@ def test_drain_attributes_forward_time_to_the_terminal_reply():
     batch.log_req_new_tokens = {UID: 12}
     dm.filter_reqs(batch.reqs)
     stub.eos_token_ids = {42}  # the drained token (42) finishes the request by EOS
+    captured: dict[int, tuple[float, float, bool]] = {}
+    orig_pop = stub.timing_tracker.pop
+    stub.timing_tracker.pop = lambda uid: captured.setdefault(uid, orig_pop(uid))
 
     Scheduler._process_last_data(stub, _as_last_data(batch))
 
     terminal = [m for m in sent if isinstance(m, DetokenizeMsg) and m.finished]
     assert len(terminal) == 1
-    assert terminal[0].prefill_ms == pytest.approx(2000.0)
-    assert terminal[0].prompt_warmup is False
-    assert stub.timing_tracker.pop(UID) == (0.0, 0.0, False)  # entry released
+    assert captured[UID] == (pytest.approx(2000.0), 0.0, False)
+    assert orig_pop(UID) == (0.0, 0.0, False)  # entry released
 
 
 def test_abort_drain_purges_tracker_entry_without_resurrection():
@@ -332,6 +336,9 @@ def test_chunked_prefill_accumulates_ms_across_chunks_into_terminal_reply():
     # burn the engine-start warmup slot so both chunks carry regular (non-warmup) time
     stub.timing_tracker.on_prefill_drained(
         SimpleNamespace(log_new_tokens=1, log_req_new_tokens={999: 1}), 0.0)
+    captured: dict[int, tuple[float, float, bool]] = {}
+    orig_pop = stub.timing_tracker.pop
+    stub.timing_tracker.pop = lambda uid: captured.setdefault(uid, orig_pop(uid))
 
     prompt = torch.arange(1, 13, dtype=torch.int32)
     chunk = _launch_req(pool, cm, tm, prompt[:8], cls=ChunkedReq)
@@ -353,9 +360,10 @@ def test_chunked_prefill_accumulates_ms_across_chunks_into_terminal_reply():
 
     terminal = [m for m in sent if isinstance(m, DetokenizeMsg) and m.finished]
     assert len(terminal) == 1
-    assert terminal[0].prefill_ms == pytest.approx(3000.0)  # 1000 + 2000 across chunks
-    assert terminal[0].prompt_warmup is False
-    assert stub.timing_tracker.pop(UID) == (0.0, 0.0, False)  # entry released
+    # upstream ReqStats timings replaced the reply's forward sums; the per-chunk
+    # accumulation is read off the tracker's terminal pop instead
+    assert captured[UID] == (pytest.approx(3000.0), 0.0, False)  # 1000 + 2000 across chunks
+    assert orig_pop(UID) == (0.0, 0.0, False)  # entry released
 
 
 if __name__ == "__main__":

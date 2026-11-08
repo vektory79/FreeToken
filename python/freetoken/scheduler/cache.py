@@ -721,6 +721,11 @@ class CacheManager:
         page_indices = self.page_table[req.table_idx, : req.cached_len]
 
         insert_len = align_down(req.cached_len, self.page_size)
+        if not finished and self.prefix_cache.has_locked_tombstone(
+                req.input_ids[:insert_len], old_handle.cached_len):
+            # insert would free our copy of a tombstone another request still locks, and the
+            # windowed re-match may stop before it (#204). Keep the pages; commit at finish.
+            return
         freed = page_indices[:0]
         if insert_len > 0:
             # insert reconciles tombstones (revives the in-window ones by ADOPTING the request's
@@ -952,11 +957,9 @@ class CacheManager:
         """
         start = div_ceil(keep_len, self.page_size) * self.page_size
         end = div_ceil(drop_len, self.page_size) * self.page_size
+        assert not self.swa_paged, "rollback_tail frees no SWA slots; speculative decoding rejects SWA targets"
         if end > start:
-            tail = self.page_table[req.table_idx, start:end]
-            if self.swa_paged:
-                self._free_swa(tail)
-            self._free(tail)
+            self._free(self.page_table[req.table_idx, start:end])
 
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:

@@ -57,7 +57,8 @@ def _parse(monkeypatch, extra):
 def test_deprecated_nvfp4_backend_hints_at_the_cpu_capable_kernel(monkeypatch, prefix):
     args, hints = _parse(monkeypatch, [*prefix, "--nvfp4-backend", "flashinfer"])
     assert args.quant_backend == "moe.nvfp4=b12x"
-    assert any("'b12x' cannot run with --moe-strategy" in m and "moe.nvfp4=triton" in m for m in hints), hints
+    # main #851/#866 put the W4A8 w4a4 kernel first in the CPU-capable candidate order
+    assert any("'b12x' cannot run with --moe-strategy" in m and "moe.nvfp4=w4a4" in m for m in hints), hints
 
 
 def test_explicit_quant_backend_gets_no_hint(monkeypatch):
