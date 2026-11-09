@@ -124,6 +124,12 @@ boot-числа из памяти (если есть). Шаги агента:
 5. Разрешение конфликтов (если есть): union для дизъюнктных регионов; main-wins для
    дубликатов; СЕМАНТИЧЕСКАЯ проверка общих файлов - не отключил ли main пути ветки
    (пример: переписанный keep-filter load_weight vs наш load_gguf_moe_expert_sources).
+   - РЕЗОЛВ ПО ХАНКАМ - дефолт с ПЕРВОГО хода: `git checkout -m -- <file>` (воссоздаёт
+     3-way конфликт) и ручной union. `git checkout --theirs` как первый ход ЗАПРЕЩЁН:
+     молча сносит авто-слитую веточную сторону файла (дважды снёс авто-слитые фичи:
+     rounds 6 и 8; в round 8 - 8 файлов, восстановлено checkout -m + повторный
+     ханк-резолв). Допустим только после `git diff <цель> <ветка-tip> -- <file>` с
+     пустой веточной дельтой.
    - main-wins на файле с недавними точечными фиксами ветки МОЛЧА теряет эти фиксы
      (round 6: register.py потерял фикс _gguf_tensor_types из 48915b4 - регрессия
      вернулась, поймал только тест). Grep-и веточные фиксы по списку недавних коммитов
@@ -154,7 +160,10 @@ boot-числа из памяти (если есть). Шаги агента:
       пиновые тесты ветки (gguf-banks, glm5_next,
       qwen3_vl, qsa-набор, tests/engine), новые тесты из main-коммитов, import-smoke.
       Запуск строго `uv run --extra dev python -m pytest` (не консольный pytest - import-режим
-      глотает repo-root из sys.path и даёт ложные ModuleNotFoundError).
+      глотает repo-root из sys.path и даёт ложные ModuleNotFoundError). .venv в чекауте
+      может отсутствовать - `uv venv --python 3.14` + `uv pip install -e ".[accel,dev]"`
+      (дефолт uv тянет cp315, у torchvision нет wheel); интерпретатор проверить по
+      `freetoken.__file__`.
       Перед прогоном предклассифицируй список: файлы 100% GPU-only (skip/needs-a-GPU маркеры
       в коде) в CPU-окне не запускать вовсе (round 4: qsa_backend, qsa_pool_fp8 - 0
       CPU-ранnable, 11 skips впустую). Список выводи динамически: git log --name-only
