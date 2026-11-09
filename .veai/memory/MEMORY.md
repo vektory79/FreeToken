@@ -96,6 +96,11 @@
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a1b7ac45a507.md) — Git stale index/parallel sessions: 6 case lessons; verify HEAD by branch+churn, not exact hash (amend-orphan case)
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-1f807466bb13.md) — GGUF glm5next hybrid re-acceptance FINAL: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; Round-5 caveat lifted
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-fb6e465ca275.md) — GGUF glm5next Path A: offload chain to 78115df, hybrid verdict RECOMMENDED (16.67 tok/s), Round-5 invalidation lifted
-- [process-hygiene-protocol](process-hygiene-protocol-b086d33a23fb.md) — Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)
 - [ft-cachedrop-l2-restore-zero](ft-cachedrop-l2-restore-zero-d3868e381348.md) — CacheDrop case: L2 restores + landed commits da7b84e/9281151/fd22003, HW control pending
 - [ft-merge-round7-pending-handoff](ft-merge-round7-pending-handoff-ac033a46c0ff.md) — Round 7 merge d8803e0 CLOSED: boot-smoke PASS 21.73 tok/s, GPU 205/5/9 all Environment/baseline, 0 merge regressions
+- [long-context-eval-api-benchmarks](long-context-eval-api-benchmarks-d441a99c1cd2.md) — Long-context eval via OpenAI API: RULER/NIAH/BABILong usable; PPL and lm-eval loglikelihood blocked (no logprobs)
+- [dual-track-ab-design-preference](dual-track-ab-design-preference-d77edf3b9df6.md) — User wants A/B matrices in both modes: equalized fair A/B AND as-configured auto hardware-capability numbers
+- [process-hygiene-protocol](process-hygiene-protocol-a8f60d715b29.md) — Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)
+- [ft-kv-quant-ab-campaign](ft-kv-quant-ab-campaign-2dbce2181ab4.md) — kv-quant-ab campaign complete: speed flat, NIAH 60/60 all modes, walls 653k/1.04M/1.03M; fp8 sweet spot
+- [ft-merge-round8-lessons](ft-merge-round8-lessons-7ac65988e75d.md) — Round-8 merge lessons: checkout --theirs trap again, uv venv 3.14, constexpr splice, timings main-wins pattern
+- [ft-merge-round8-pending-handoff](ft-merge-round8-pending-handoff-25a623da542d.md) — Merge round 8 fe975da CLOSED: CPU 1653 passed, boot-smoke 22.97 tok/s, GPU 954/4 baseline, review clean
