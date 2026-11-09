@@ -192,14 +192,10 @@ def _usage_ratio(used: int, total: int) -> float:
 
 @dataclass
 class RequestTimingTracker:
-    """Per-request forward-time accumulation feeding the llama.cpp-style timings block.
+    """Per-request forward-window bookkeeping for the scheduler's own logs.
 
-    The scheduler measures each batch's forward duration (launch -> drain, after
-    copy_done.synchronize) and hands the batch in here: prefill time is attributed by each
-    request's token share, decode time by equal share. Two exclusions keep the rates
-    honest: the engine-start warmup prefill batch (JIT/autotune cost, marked in the log)
-    is excluded from prompt time, and each request's first decode step (TTFT-class CUDA
-    graph/sync overhead) from predicted time. Token counts are unaffected.
+    Wire timings ride ReqStats.timings (upstream); this tracker only feeds the scheduler's
+    own log lines (own-window forward_ms, warmup marker) and releases entries via pop().
     """
 
     clock: Callable[[], float] = time.perf_counter
