@@ -3,7 +3,7 @@ name: "git-stale-index-parallel-sessions"
 description: "Git stale index/parallel sessions: 6 case lessons; verify HEAD by branch+churn, not exact hash (amend-orphan case)"
 type: project
 lastUpdated: 2026-10-26T22:09
-lastRecall: 2026-10-26T22:06
+lastRecall: 2026-11-08T01:38
 ---
 
 # Stale git index + параллельные пользовательские коммиты

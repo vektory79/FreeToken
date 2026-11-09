@@ -3,7 +3,7 @@ name: "cuda-debug-tool-strategy"
 description: "CUDA debug/profiling: CUDA_LAUNCH_BLOCKING, compute-sanitizer, nsys live; ncu blocked; kineto aborts ft serve scheduler"
 type: project
 lastUpdated: 2026-10-07T11:58
-lastRecall: 2026-10-07T11:55
+lastRecall: 2026-10-30T18:50
 ---
 
 # CUDA debugging tool strategy: CUDA_LAUNCH_BLOCKING -> compute-sanitizer -> python instrumentation

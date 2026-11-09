@@ -3,7 +3,7 @@ name: "ft-merge-round7-pending-handoff"
 description: "Round 7 merge d8803e0 CLOSED: boot-smoke PASS 21.73 tok/s, GPU 205/5/9 all Environment/baseline, 0 merge regressions"
 type: project
 lastUpdated: 2026-10-29T19:38
-lastRecall: 2026-10-29T19:32
+lastRecall: 2026-11-09T10:56
 ---
 
 # Round 7 merge (2026-10-26/27): CLOSED - HEAD d8803e0

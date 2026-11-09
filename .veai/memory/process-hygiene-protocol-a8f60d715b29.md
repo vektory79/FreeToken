@@ -2,8 +2,8 @@
 name: "process-hygiene-protocol"
 description: "Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)"
 type: project
-lastUpdated: 2026-10-27T01:42
-lastRecall: 2026-10-29T17:41
+lastUpdated: 2026-10-30T21:02
+lastRecall: 2026-11-09T10:56
 ---
 
 # Process-hygiene protocol for agent test waves
@@ -30,3 +30,8 @@ A CPU-path pytest wave ran while a concurrent hardware wave (ft serve deep-fill 
 A `bash runner.sh 2>&1 | tee out` background wrapper NEVER completed although the runner had printed its final VERDICT ~40 min earlier: every boot() started a watchdog subshell `( for _ in $(seq 1 N); do sleep 2; grep FAILPAT log; done ) &` with a 66-133 min lifetime, and start_watchdog never killed the PREVIOUS watchdog across re-boots. The orphaned subshell inherits the pipe write-end, so tee never sees EOF, the wrapper stays alive, and the agent's background-completion event never fires - the agent waited 40+ minutes on an already-finished run and only a user nudge resolved it.
 - Fix: start_watchdog kills the previous WATCH_PID before spawning a new one (applied to .tasks/CahceDrop/run_cachehit_arm.sh and run_twosession_arm.sh); cleanup still kills the last one.
 - Diagnosis signature: the runner's output file already contains the final verdict; pgrep shows wrapper bash + tee + runner script alive; the orphans are children of the runner script (`pgrep -P <script-pid>`). Kill by EXACT pids (wrapper, tee, script, its children) - never a pkill pattern (self-kill trap above). Once the pipe holders die, the background session immediately reports finished.
+
+## kv-quant-ab W3 incidents (2026-10-30)
+- readlink -f KILL-PATTERN FAILURE: the kb kill snippet (readlink -f /proc/PID/exe + case '*/.venv/bin/python*') matched NOTHING on this rig - .venv/bin/python3 is a symlink to the linuxbrew base interpreter, readlink -f resolves it to /home/linuxbrew/.linuxbrew/Cellar/python@3.14/..., so the .venv pattern never matches and the orphan survives. Kill by the VERIFIED pid instead (cross-check /proc/PID/cmdline and ps -o etime first), then confirm the nvidia-smi floor returns (~1100 MiB desktop).
+- DRIVER CRASH ORPHANS THE SERVER: a harness-level NameError (missing `import time` in .tasks/kv-quant-ab/deepfill.py, raised AFTER start_server) left a mid-boot ft serve holding 26.9 GiB until a manual pid kill. Rule: any driver that boots a server must wrap ALL post-boot work in try/except with teardown(proc) in the handler.
+- TEARDOWN RACE between sequential serve boots: the next leg's torch distributed init died with TCPStore EADDRINUSE port 18802 while the previous leg's backend workers were still reaping (the 'ft serve' census was already clean). Fix: settle sleep 20 s before each boot when a wave chains live servers (run_w3.sh deep phase).

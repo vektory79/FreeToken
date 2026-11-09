@@ -103,4 +103,4 @@
 - [process-hygiene-protocol](process-hygiene-protocol-a8f60d715b29.md) — Test-wave hygiene: census traps, watchdog, serialized runs; pkill self-kill; orphaned watchdog holds tee pipe (hang)
 - [ft-kv-quant-ab-campaign](ft-kv-quant-ab-campaign-2dbce2181ab4.md) — kv-quant-ab campaign complete: speed flat, NIAH 60/60 all modes, walls 653k/1.04M/1.03M; fp8 sweet spot
 - [ft-merge-round8-lessons](ft-merge-round8-lessons-7ac65988e75d.md) — Round-8 merge lessons: checkout --theirs trap again, uv venv 3.14, constexpr splice, timings main-wins pattern
-- [ft-merge-round8-pending-handoff](ft-merge-round8-pending-handoff-25a623da542d.md) — Merge round 8 fe975da CLOSED: CPU 1653 passed, boot-smoke 22.97 tok/s, GPU 954/4 baseline, review clean
+- [ft-merge-round8-pending-handoff](ft-merge-round8-pending-handoff-afc936cd3734.md) — Merge round 8 fe975da CLOSED + followups to e9bc7a0: CPU 1653, boot-smoke 22.97 tok/s, GPU 954/4 baseline

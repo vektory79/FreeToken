@@ -1,8 +1,8 @@
 ---
 name: "ft-merge-round8-pending-handoff"
-description: "Merge round 8 fe975da CLOSED: CPU 1653 passed, boot-smoke 22.97 tok/s, GPU 954/4 baseline, review clean"
+description: "Merge round 8 fe975da CLOSED + followups to e9bc7a0: CPU 1653, boot-smoke 22.97 tok/s, GPU 954/4 baseline"
 type: project
-lastUpdated: 2026-11-09T11:29
+lastUpdated: 2026-11-09T12:44
 lastRecall: 2026-11-09T12:33
 ---
 
@@ -25,3 +25,6 @@ Merge upstream/main 8215a94 -> vektory79: fe975da (parents 5a170e8 + 8215a94), r
 - Чужой ft serve FreeTokenProd pid 464693 в census - не тронут.
 - GPU-бриф из CPU-хэндоффа тащил ведущий CUDA_VISIBLE_DEVICES= (копипаст CPU-окна) - снять при переносе в cloud-окно.
 - Upstream-введённый тест, ни разу не гонявшийся на риге = отдельный baseline-класс; дискриминатор - A/B против MAIN-родителя, не веточного.
+
+## Followups (2026-10-27, по явной просьбе пользователя) - HEAD теперь e9bc7a0
+4 коммита поверх fe975da (НЕ amend): 51fb2f6 fix(scheduler) docstring RequestTimingTracker -> log-only назначение; e3f6927 docs(kb) round-8 кейс+procedure; d3976dc chore(skills) фолд round 8 (316->325); e9bc7a0 chore(memory) round-8 память. Finding 2 (tracker.pop() release-only) = WONTFIX с обоснованием: 9 assert-ов в tests/scheduler/test_scheduler_status.py + test_abort_inflight_prefill.py:183,326 потребляют возвращаемый tuple (0.0,0.0,False) - pop() единственное окно наблюдаемости аккумуляции; 3 прод-сайта уже отбрасывают значение. Верификация: tests/scheduler + tests/server 1099 passed / 0 failed (CPU). origin/vektory79 отстаёт на 33; push не делался.
