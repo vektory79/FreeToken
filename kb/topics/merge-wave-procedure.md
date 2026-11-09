@@ -235,6 +235,50 @@ capture (#833/#837), radix_lookahead seam (#834) и волну flint/minimax/mus
 Статус раунда: CPU-зелёный (970/43/0 на d8803e0); boot-smoke и GPU-порции
 отложены в cloud-окно.
 
+## Раунд 8 (2026-11-05/09): split-round, повтор ловушки checkout --theirs, CPU-окно без .venv
+
+upstream/main 8215a94 (28 коммитов от базы round 7), 16 конфликтных файлов;
+merge fe975da (родители 5a170e8 + 8215a94), таймингс-цепочка ветки выведена
+main-механикой ReqStats.timings (wire = main, веточные внутренности живы как
+потребители). Кейс волны -
+[../cases/merge-round8-upstream-main/TASK.md](../cases/merge-round8-upstream-main/TASK.md).
+Процедурные уроки:
+
+- **Ханк-резолв - дефолт с ПЕРВОГО хода; `git checkout --theirs` как первый
+  ход запрещён.** Ловушка round 6 воспроизвелась второй раз: --theirs на 8
+  файлах молча снёс авто-слитую веточную сторону (kv-quant валидация engine.py,
+  mmproj plumbing tokenizer/server.py, flint-парсер generation.py). Поймано
+  постфактум диффом `git diff upstream/main <ветка-tip> -- <file>`, восстановлено
+  `git checkout -m --` (воссоздаёт 3-way конфликт) с повторным ханк-резолвом.
+  Правило: каждый конфликтный файл резолвить по ханкам с самого начала;
+  --theirs допустим только после проверки, что веточная сторона файла пуста.
+- **CPU-окно может остаться без .venv.** `uv run` молча создаёт окружение на
+  дефолтном CPython (cp315), у torchvision нет wheel - прогон падает до тестов.
+  Явно: `uv venv --python 3.14` + `uv pip install -e ".[accel,dev]"`,
+  интерпретатор проверять по `freetoken.__file__`.
+- **Constexpr-сплайс тройки по правилу "сигнатура-прелюдия-call-sites как
+  единое целое" прошёл чисто**: HAS_KV_SCALE/KV_NVFP4 (ветка) + KV_OFFSET_DTYPE
+  (main #854) на 4 сигнатурах и 4 launch-сайтах; boot-smoke сплайс-ловушку
+  round 6 не воспроизвёл. Правило round 6 - применять всегда, без исключений.
+- **Upstream-введённый тест, ни разу не гонявшийся на этом риге, - отдельный
+  baseline-класс: не веточный и не merge-регрессия.** 2 падения dflash
+  test_draft (bitwise restore assert) триажированы A/B на detached worktree
+  чистого main-родителя 8215a94 - те же параметры падают идентично (файл
+  введён main 08cee44, #857, на веточном родителе отсутствует). Дискриминатор:
+  веточный родитель не содержит файла - сравнивать с MAIN-родителем, а не с
+  веткой.
+- **GPU-бриф, скопированный из CPU-хэндоффа, тащит ведущий
+  `CUDA_VISIBLE_DEVICES=`** (пустое значение скрывает GPU и маскирует
+  baseline-классы - fa-гвард sm_120, OutOfResources). Снимать перед GPU-прогоном,
+  путь и флаги брифа сохранять.
+
+Статус раунда: ЗАКРЫТ (CPU 1653 passed / 67 skipped / 1 baseline-flake на
+CUDA_VISIBLE_DEVICES="" и python 3.14; ревью 0 blockers, 3 deferred minor;
+boot-smoke PASS - READY 224 s, decode 22.97 tok/s против референса round 7
+21.73 на том же конфиге gguf-786k nvfp4, внутри шума ~1.5 tok/s; GPU
+954 passed / 4 failed / 167 skipped, все 4 падения baseline; amend не
+потребовался).
+
 ## Правила разрешения конфликтов
 
 - **Дубликат функциональности -> main выигрывает.** Если main пере-реализовал

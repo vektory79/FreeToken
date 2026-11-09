@@ -181,6 +181,18 @@ Specification / Acceptance / Checklist.
   достижимости. Вход: [TASK.md](merge-round7-upstream-main/TASK.md).
   Статус: CPU-зелёный (970 passed / 43 skipped / 0 failed, ревью
   0 blockers); boot-smoke и GPU-порции отложены в cloud-окно.
+- [merge-round8-upstream-main/](merge-round8-upstream-main/) - кейс round-8
+  merge upstream/main 8215a94 (28 коммитов, 16 конфликтов; SPLIT-ROUND
+  CPU-only): минимальный зелёный merge fe975da без амендов. Повтор ловушки
+  checkout --theirs (8 файлов снесённых авто-слитых фич, восстановлено
+  checkout -m) - ханк-резолв закреплён дефолтом; таймингс-цепочка выведена
+  main ReqStats.timings (no-dual-logic, веточные внутренности живы как
+  потребители); constexpr-сплайс тройки HAS_KV_SCALE/KV_NVFP4/KV_OFFSET_DTYPE
+  по правилу сигнатура-прелюдия-call-sites прошёл чисто. Вход:
+  [TASK.md](merge-round8-upstream-main/TASK.md). Статус: ЗАКРЫТ (CPU
+  1653 passed / 67 skipped / 1 baseline-flake, ревью 0 blockers / 3 deferred
+  minor; boot-smoke PASS READY 224 s, decode 22.97 tok/s; GPU 954/4/167,
+  все падения baseline - dflash подтверждён A/B на main-родителе 8215a94).
 - [mmq-prefill-kernel/](mmq-prefill-kernel/) — бриф v0->v2: как нулевой
   эксперимент (сортировка пар) уточнил цель следующей итерации. Вход:
   [TASK.md](mmq-prefill-kernel/TASK.md).
