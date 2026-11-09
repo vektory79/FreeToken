@@ -1,9 +1,9 @@
 ---
 name: "gguf-hybrid-reacceptance-final"
-description: "GGUF glm5next hybrid re-acceptance FINAL: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; Round-5 caveat lifted"
+description: "GGUF glm5next hybrid re-acceptance: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; historical since round-5 f0eed55"
 type: project
-lastUpdated: 2026-10-26T23:45
-lastRecall: 2026-10-30T18:49
+lastUpdated: 2026-11-09T18:47
+lastRecall: 2026-11-09T18:41
 ---
 
 # GGUF glm5next hybrid: FINAL re-acceptance - hybrid RECOMMENDED
@@ -26,6 +26,5 @@ Full chain (11 hybrid commits + 1635ecd, incl. 11f1a80 ggml AVX2 W4A8-K tier and
 - Vendored kernel/csrc/gguf/*.cuh lack MIT attribution headers (gap noted by the kernel study).
 - benchbw profile has no kernel-tier fingerprint (pre-port profile silently consumed; doc note only) - expanded in benchbw-profile-clobber-trap.
 
-**Round 5 (2026-10-17) инвалидировал применимость:** merge f0eed55 пере-платформил GGUF, glm5next GGUF loader в main отсутствует (порт D4) - hybrid на glm5next GGUF НЕ БУТИТСЯ на слитом дереве до лендинга D4. Вердикт выше исторический (домерджные измерения). Карта портов: memory ft-merge-round5-deferred-ports, kb/topics/round5-ggml-replatform-deferred-ports.md.
-
-UPDATE 2026-10-26: the "не бутится до лендинга D4" caveat no longer applies. D4 landed (round5 9314c9b, hardened round6 2276069, boot raw GGUF READY 138s, cross-validation 38/38) and the D-ports case closed 2026-10-26 (round6-deferred-ports-execution). Hybrid slot pools re-landed (round5 393b682, hybrid 27.71 vs offload 21.00 tok/s on the new stack). The 16.67 vs 12.97 verdict above remains historical (pre-f0eed55 measurements).
+## Round-5 status (authoritative copy in ft-serve-gguf-glm5next-campaign)
+Round 5 (2026-10-17, merge f0eed55) made this verdict inapplicable on the merged tree until D4 landed; the caveat was lifted 2026-10-26: D4 landed (9314c9b, hardened 2276069, cross-validation 38/38) and hybrid slot pools re-landed (393b682) with FRESH numbers on the new stack (hybrid 27.71 vs offload 21.00 tok/s). The 16.67 vs 12.97 verdict above stays historical (pre-f0eed55 measurements).

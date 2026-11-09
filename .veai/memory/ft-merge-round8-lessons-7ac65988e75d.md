@@ -3,7 +3,7 @@ name: "ft-merge-round8-lessons"
 description: "Round-8 merge lessons: checkout --theirs trap again, uv venv 3.14, constexpr splice, timings main-wins pattern"
 type: project
 lastUpdated: 2026-11-09T11:29
-lastRecall: 2026-11-09T12:33
+lastRecall: 2026-11-09T17:29
 ---
 
 # Merge round 8 lessons (fe975da, split-round)

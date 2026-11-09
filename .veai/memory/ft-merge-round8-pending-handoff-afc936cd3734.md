@@ -3,7 +3,7 @@ name: "ft-merge-round8-pending-handoff"
 description: "Merge round 8 fe975da CLOSED + followups to e9bc7a0: CPU 1653, boot-smoke 22.97 tok/s, GPU 954/4 baseline"
 type: project
 lastUpdated: 2026-11-09T12:44
-lastRecall: 2026-11-09T12:33
+lastRecall: 2026-11-09T17:00
 ---
 
 # Merge round 8 (2026-10-27): CLOSED - HEAD fe975da

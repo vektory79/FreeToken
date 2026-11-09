@@ -94,7 +94,6 @@
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-1e3dc850d380.md) — gguf-native-serving skill ledger: TRAPS T01-T95 committed (73cceb0); run-garbage rule added uncommitted to sec.11
 - [ftw-sources-second-disk](ftw-sources-second-disk-30fe4b345dc7.md) — Missing FTW/HF sources: search /media/data/ai/models/; 3 legacy NVFP4 carriers reconverted to -FTW-new, GPU boot pending
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a1b7ac45a507.md) — Git stale index/parallel sessions: 6 case lessons; verify HEAD by branch+churn, not exact hash (amend-orphan case)
-- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-1f807466bb13.md) — GGUF glm5next hybrid re-acceptance FINAL: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; Round-5 caveat lifted
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-fb6e465ca275.md) — GGUF glm5next Path A: offload chain to 78115df, hybrid verdict RECOMMENDED (16.67 tok/s), Round-5 invalidation lifted
 - [ft-cachedrop-l2-restore-zero](ft-cachedrop-l2-restore-zero-d3868e381348.md) — CacheDrop case: L2 restores + landed commits da7b84e/9281151/fd22003, HW control pending
 - [ft-merge-round7-pending-handoff](ft-merge-round7-pending-handoff-ac033a46c0ff.md) — Round 7 merge d8803e0 CLOSED: boot-smoke PASS 21.73 tok/s, GPU 205/5/9 all Environment/baseline, 0 merge regressions
@@ -104,3 +103,5 @@
 - [ft-kv-quant-ab-campaign](ft-kv-quant-ab-campaign-2dbce2181ab4.md) — kv-quant-ab campaign complete: speed flat, NIAH 60/60 all modes, walls 653k/1.04M/1.03M; fp8 sweet spot
 - [ft-merge-round8-lessons](ft-merge-round8-lessons-7ac65988e75d.md) — Round-8 merge lessons: checkout --theirs trap again, uv venv 3.14, constexpr splice, timings main-wins pattern
 - [ft-merge-round8-pending-handoff](ft-merge-round8-pending-handoff-afc936cd3734.md) — Merge round 8 fe975da CLOSED + followups to e9bc7a0: CPU 1653, boot-smoke 22.97 tok/s, GPU 954/4 baseline
+- [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-749f32036b6f.md) — GGUF glm5next hybrid re-acceptance: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; historical since round-5 f0eed55
+- [ft-merge-round9-closed](ft-merge-round9-closed-e7c3b6c4701b.md) — Round 9 merge b79457e CLOSED: boot-smoke PASS attempt 1 (READY 229s), GPU 969 passed/4 baseline; STOP GATE closed
