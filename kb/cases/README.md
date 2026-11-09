@@ -193,6 +193,18 @@ Specification / Acceptance / Checklist.
   1653 passed / 67 skipped / 1 baseline-flake, ревью 0 blockers / 3 deferred
   minor; boot-smoke PASS READY 224 s, decode 22.97 tok/s; GPU 954/4/167,
   все падения baseline - dflash подтверждён A/B на main-родителе 8215a94).
+- [merge-round9-upstream-main/](merge-round9-upstream-main/) - кейс round-9
+  merge upstream/main 5a73685 (3 коммита, 0 конфликтов; SPLIT-ROUND
+  CPU-only): минимальный зелёный merge b79457e без амендов; merge-tree
+  --write-tree предчек discovery точно предсказал 0 конфликтов и
+  дизъюнктность регионов (закреплён дефолтом). Дельта: #877 graph-capture
+  dummy page, #878 cap shared memory mmid.cu, release 0.2.2; main-wins по
+  удалённому upstream-ом warm-capture тесту (замещён строгим надмножеством
+  в tests/engine/test_graph.py). Вход:
+  [TASK.md](merge-round9-upstream-main/TASK.md). Статус: ЗАКРЫТ (CPU
+  1553 passed / 51 skipped / 0 failed, ревью 0 blockers / 2 deferred minor;
+  boot-smoke PASS с попытки 1 - READY 229 s, decode 20.84 tok/s
+  информационная дельта; GPU 969/4/167, все падения baseline).
 - [mmq-prefill-kernel/](mmq-prefill-kernel/) — бриф v0->v2: как нулевой
   эксперимент (сортировка пар) уточнил цель следующей итерации. Вход:
   [TASK.md](mmq-prefill-kernel/TASK.md).

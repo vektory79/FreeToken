@@ -279,6 +279,36 @@ boot-smoke PASS - READY 224 s, decode 22.97 tok/s против референс�
 954 passed / 4 failed / 167 skipped, все 4 падения baseline; amend не
 потребовался).
 
+## Раунд 9 (2026-11-09): split-round, чистый автомердж, merge-tree предчек как дефолт discovery
+
+upstream/main 5a73685 (3 коммита от базы round 8: #877 graph-capture dummy
+page, #878 cap shared memory MoE route sort в mmid.cu, release 0.2.2), 0
+конфликтных файлов; merge b79457e (родители 7154bab + 5a73685). Кейс волны -
+[../cases/merge-round9-upstream-main/TASK.md](../cases/merge-round9-upstream-main/TASK.md).
+Процедурные уроки:
+
+- **Пробный `git merge-tree --write-tree HEAD <цель>` - дефолтный предчек
+  discovery.** Round 9: предсказал 0 конфликтов и дизъюнктность регионов
+  (пересечение ветки с дельтой - engine/graph.py и tests/moe/test_offload.py),
+  автомердж подтвердил 1:1 (rc=0, ханк-резолвы не понадобились). Предчек
+  калибрует объём merge-волны до её старта.
+- **Малая дельта не отменяет ни boot-smoke, ни семантическую проверку.**
+  3 коммита, но mmid.cu (ggml-кернел) + graph.py (CUDA graph capture) ->
+  boot-smoke обязателен по триггеру зон риска; оба файла пересечения
+  проверены чтением слитого дерева; main-wins по удалённому upstream-ом
+  warm-capture тесту - с проверкой, что замещающее покрытие живо и сильнее
+  (строгое надмножество семантики, no-dual-logic).
+- **Decode-медиана бут-смоука - информационная метрика, не гейт.** 20.84
+  против ref 22.97 tok/s (дельта 2.13 чуть выше шума ~1.5) при полном PASS
+  всех инвариантов записана как noise-adjacent без атрибуции: decode-only
+  число, дельта-коммиты не на decode hot-пути. Вердикт о регрессии - по
+  инвариантам бута и failure set GPU-прогона.
+
+Статус раунда: ЗАКРЫТ (CPU 1553 passed / 51 skipped / 0 failed на
+CUDA_VISIBLE_DEVICES=""; ревью 0 blockers, 2 deferred minor; boot-smoke
+PASS с попытки 1 - READY 229 s; GPU 969 passed / 4 failed / 167 skipped,
+все 4 падения baseline; amend не потребовался).
+
 ## Правила разрешения конфликтов
 
 - **Дубликат функциональности -> main выигрывает.** Если main пере-реализовал
