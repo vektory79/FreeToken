@@ -312,6 +312,7 @@ class _GroupEntry:
     deps: set = field(default_factory=set)
     pins: list = field(default_factory=list)
     extents: list | None = None
+    reused: bool = False   # the reserved span came from an exact-fit hole (reuse seam)
 
 
 class _Pool:
@@ -445,6 +446,19 @@ class SessionTierStore:
         # released in _discard; the table exists even when inert (same reason as the
         # counters) and is rebuilt from scratch by replay and post-compact.
         self._extents: dict[tuple[int, int], list] = {}
+        # L2 exact-fit hole reuse (briefs/l2-exact-fit-hole-reuse.md, W2): derived
+        # in-memory registries, never journaled - rebuilt by replay and post-compact,
+        # cleared by compact. _holes: padded span size -> reusable span starts;
+        # _spans/_span_of: span -> partitioning extent keys and the back map;
+        # _tombs: victim journal identities still in the journal (global guard arm).
+        self._holes: dict[int, set[int]] = {}
+        self._spans: dict[tuple[int, int], set] = {}
+        self._span_of: dict[tuple[int, int], tuple[int, int]] = {}
+        # victim journal identities (pk, off, n) still in the journal file - the reuse
+        # guard's GLOBAL arm: a sharer's journal identity lives at the SHARE's offset,
+        # so per-hole keying could miss the collision. Cleared by compact, rebuilt by
+        # replay (briefs/l2-exact-fit-hole-reuse.md, W2).
+        self._tombs: set[tuple] = set()
         # P8: record-reclaimable dead ledger - journal records a compact() would
         # actually drop, plus their padded bytes. Kept separate from _dead_bytes, whose
         # watermark seed carries physical holes no record-based compact can reclaim.
@@ -466,7 +480,9 @@ class SessionTierStore:
                                           prefetch_adopt=0,
                                           prefetch_abandon=0, prefetch_fail=0,
                                           prefetch_rej_cap=0, prefetch_probe_hit=0,
-                                          prefetch_probe_miss=0)
+                                          prefetch_probe_miss=0,
+                                          holes_reused=0, holes_reuse_miss=0,
+                                          holes_reused_bytes=0)
         # Lock exists even when inert: the offer() wrapper takes it around the rejection
         # counter before any early return.
         self._lock = threading.RLock()
@@ -866,6 +882,23 @@ class SessionTierStore:
             return n + ent[3]
         return 0
 
+    def _span_death(self, key: tuple[int, int]) -> None:
+        """Called under _account_lock when an extent's last reference died: drop it from
+        its span's partition set; a span whose set emptied is FULLY dead and becomes a
+        reusable exact-fit hole (the reuse guard checks the global victim-identity set,
+        briefs/l2-exact-fit-hole-reuse.md). Partially-dead spans keep falling to
+        compact reclaim (v1)."""
+        span = self._span_of.pop(key, None)
+        if span is None:
+            return
+        keys = self._spans.get(span)
+        if keys is None:
+            return
+        keys.discard(key)
+        if not keys:
+            del self._spans[span]
+            self._holes.setdefault(span[1], set()).add(span[0])
+
     def _plan_share(self, seg: _Segment) -> tuple[list, int, int | None]:
         """Deepest prefix-proven same-chain in_l2 ancestor whose page region is extent
         aligned: its page extents are byte-identical to this segment's pages [0:M) (an
@@ -978,13 +1011,21 @@ class SessionTierStore:
             pos += ext[1]
         return bytes(buf)
 
-    def _reserve_blob_span(self, need: int, pending: int = 0) -> tuple[int, int] | None:
-        """Cap-check (evicting oldest L2 first), then reserve the record's padded span at
-        the blob tail. Returns (off, padded), or None when the cap cannot be met.
+    def _reserve_blob_span(self, need: int, pending: int = 0,
+                           identity: tuple | None = None) -> tuple[int, int, bool] | None:
+        """Cap-check (evicting oldest L2 first), then reserve the record's padded span:
+        an EXACT-FIT fully-dead hole when one is reusable, else the blob tail.
+        Returns (off, padded, reused), or None when the cap cannot be met.
         pending is the volume reserved earlier in the same flush group but not yet
         journaled (_ssd_used lags until the group's records land in _journal_and_account):
         counting it keeps the HEAD strict cap at reserve granularity, so a group can
-        never reserve past the ssd cap by up to a group volume."""
+never reserve past the ssd cap by up to a group volume. identity is the
+        would-be JOURNAL identity (path_key, off-or-None, n): off is the FIRST
+        SHARE's offset when the record shares (fixed regardless of which span gets
+        reserved), None meaning the reserved span's own start. A hole whose reuse
+        would journal an identity still present as a journal victim is SKIPPED -
+        replay's tomb filter and compact's identity-keyed keep-set would otherwise
+        see two records on one identity (briefs/l2-exact-fit-hole-reuse.md, W2)."""
         padded = (need + _BLK - 1) // _BLK * _BLK
         # No _account_lock on this snapshot: it can only be stale HIGH. A concurrent
         # journal moves a span from pending into _ssd_used while pending still counts
@@ -998,9 +1039,39 @@ class SessionTierStore:
             self._evict_oldest_l2(padded, pending)
             if self.ssd_bytes and self._ssd_used + pending + padded > self.ssd_bytes:
                 return None
+        if padded and self._holes and padded in self._holes:
+            # atomic against concurrent reserves AND concurrent _discard hole births;
+            # the lock covers ONLY the pop - the evictor above stayed outside it
+            with self._account_lock:
+                offs = self._holes.get(padded)
+                if offs:
+                    pick = None
+                    for o in offs:
+                        if identity is not None:
+                            # tomb-collision guard against journal victims: the
+                            # identity's off is the SHARE's offset when the record
+                            # shares (fixed), else this hole's own start
+                            joff = identity[1] if identity[1] is not None else o
+                            if (identity[0], joff, identity[2]) in self._tombs:
+                                if identity[1] is not None:
+                                    break   # fixed identity: no hole of this size works
+                                continue    # this hole collides: try the next one
+                        pick = o
+                        break
+                    if pick is not None:
+                        offs.discard(pick)
+                        if not offs:
+                            del self._holes[padded]
+                        self._counters["holes_reused"] += 1
+                        self._counters["holes_reused_bytes"] += padded
+                        # _blob_eof does NOT move on reuse; the _ssd_used increment and
+                        # the dead-ledger decrements land at journal time
+                        return pick, padded, True
+        if padded:
+            self._counters["holes_reuse_miss"] += 1
         off = self._blob_eof
         self._blob_eof += padded
-        return off, padded
+        return off, padded, False
 
     def _pwrite_span(self, off: int, view: memoryview) -> None:
         """Full-write loop at an explicit offset (pwrite may short-write). A failed or
@@ -1017,14 +1088,19 @@ class SessionTierStore:
     def _journal_and_account(self, seg: _Segment,
                              extents: list[tuple[int, int, int, str]], padded: int,
                              crc: int, crc_alg: str = _CRC32C_ALG,
-                             off: int | None = None) -> bool:
+                             off: int | None = None,
+                             span_off: int | None = None,
+                             reused: bool = False) -> bool:
         """Journal one durable record and take the capacity accounting. `extents` is the
         record's ordered extent list; the journal's off/n are its PRIMARY (first)
         extent - the identity compact keep-sets and P13 tombstones match on. `padded`
         counts only the freshly appended span (shared extents add no bytes - capacity
-        truthfulness under dedup). False = the blob bytes are durable but unrecoverable
-        across a boot: abort cleanly (the segment keeps its L1 residency; no journal
-        entry, no accounting, no extent refs)."""
+        truthfulness under dedup). span_off is the freshly appended span's start (the
+        primary extent may start earlier when the record shares); the span registry
+        the hole-reuse seam consumes is born here. reused marks a span popped from
+        the exact-fit hole map at reserve time. False = the blob bytes are durable but
+        unrecoverable across a boot: abort cleanly (the segment keeps its L1 residency;
+        no journal entry, no accounting, no extent refs)."""
         seg.blob = _BLOB_NAME
         seg.extents = list(extents)
         if seg.extents:
@@ -1038,7 +1114,28 @@ class SessionTierStore:
             for ext in seg.extents:
                 if self._extent_acquire(ext[0], ext[1], ext[2], ext[3], ext[4]):
                     self._counters["extents_shared"] += 1
+            if reused and padded:
+                # exact-fit reuse: the span's bytes are live again, so the next compact
+                # must not reclaim them (phantom dead = premature full rewrite). ONE
+                # legitimate decrement site for both dead ledgers (ledger-drift hazard);
+                # _dead_records stays: the victim's journal record is still dropped.
+                self._dead_bytes -= padded
+                self._dead_record_bytes -= padded
             self._ssd_used += padded
+            if span_off is not None and padded:
+                # span birth: the record's freshly appended extents are exactly the
+                # ones inside the reserved span (shares reference other spans)
+                keys = {(e[0], e[1]) for e in seg.extents
+                        if span_off <= e[0] < span_off + padded}
+                if keys:
+                    span = (span_off, padded)
+                    self._spans[span] = keys
+                    for k in keys:
+                        self._span_of[k] = span
+        if reused:
+            # a reuse journal append invalidates the marker like a discard does: the
+            # marker's size checks cannot cover this mutation on their own
+            self.invalidate_shutdown_marker()
         return True
 
     def _write_blob(self, seg: _Segment, payload: bytes | None) -> bool:
@@ -1060,10 +1157,19 @@ class SessionTierStore:
         try:
             private = payload[sum(seg.page_lens[:skip]):]
             need = len(private)
-            r = self._reserve_blob_span(need)
+            tail = sum(seg.page_lens[skip:])
+            # would-be JOURNAL identity for the tomb-collision guard: off/n are the
+            # PRIMARY (first) extent - the first SHARE when the record shares (its
+            # offset is fixed regardless of the reserved span), else the reserved
+            # span's own start with n = tail pages or snaps
+            if shares:
+                ident = (seg.path_key, shares[0][0], shares[0][1])
+            else:
+                ident = (seg.path_key, None, tail if tail else sum(seg.snap_lens))
+            r = self._reserve_blob_span(need, identity=ident)
             if r is None:
                 return False
-            off, padded = r
+            off, padded, reused = r
             view = memoryview(private + b"\0" * (padded - need))
             try:
                 self._pwrite_span(off, view)
@@ -1081,7 +1187,7 @@ class SessionTierStore:
                                  ent[2] if ent else None, ent[3] if ent else 0))
             return self._journal_and_account(seg, resolved + extents, padded,
                                              _calc_payload_crc(payload, _CRC32C_ALG),
-                                             off=off)
+                                             off=off, span_off=off, reused=reused)
         finally:
             self._drop_share_pins(pins)
 
@@ -1247,7 +1353,17 @@ class SessionTierStore:
                 # journal on the writer thread re-creates their released extents.
                 cur_pins = self._pin_share_sources(deps)
                 private_need = cur_need - sum(seg.page_lens[:skip])
-                r = self._reserve_blob_span(private_need, pending.value())
+                tail_pages = cur_need - sum(seg.page_lens[:skip]) - sum(seg.snap_lens)
+                # would-be JOURNAL identity for the tomb-collision guard: off/n are
+                # the PRIMARY (first) extent - the first SHARE when the record
+                # shares, else the reserved span's own start with n = tail or snaps
+                if shares:
+                    ident = (seg.path_key, shares[0][0], shares[0][1])
+                else:
+                    ident = (seg.path_key, None,
+                             tail_pages if tail_pages else sum(seg.snap_lens))
+                r = self._reserve_blob_span(private_need, pending.value(),
+                                            identity=ident)
                 if r is None and not stage and pending.value():
                     # P3 sacrifice semantics across the pipeline: the refusal may be
                     # caused by the previous group's still-unjournaled volume alone.
@@ -1262,16 +1378,18 @@ class SessionTierStore:
                             "session tier: flush group #%d waited 60 s for the previous "
                             "group to settle, %d bytes still unjournaled; retrying the "
                             "cap check with pending=0", index, pending.value())
-                    r = self._reserve_blob_span(private_need, 0)
+                    r = self._reserve_blob_span(private_need, 0, identity=ident)
                 if r is None:
                     logger.warning("session tier: L2 cap reached, cannot demote seg %d",
                                    seg.seg_id)
                     self._drop_share_pins(cur_pins)
                     cur_pins = []
                     continue
-                pending.add(r[1])
+                off_r, padded_r, reused_r = r
+                pending.add(padded_r)
                 seg.refs += 1                     # evictor guard, released in _write_group
-                en = _GroupEntry(seg, r[0], cur_need, r[1])
+                en = _GroupEntry(seg, off_r, cur_need, padded_r)
+                en.reused = reused_r
                 en.skip, en.shares, en.deps = skip, shares, deps
                 en.pins, cur_pins = cur_pins, []
                 stage.append(en)
@@ -1279,14 +1397,13 @@ class SessionTierStore:
                 # The extent (off, n) list is final here (offsets are reserved); crc
                 # slots are patched with real values in the crc loop below. The pad
                 # share (last extent of the appended span) is fixed here too.
-                tail_pages = cur_need - sum(seg.page_lens[:skip]) - sum(seg.snap_lens)
                 snaps_n = sum(seg.snap_lens)
                 span_pad = -(tail_pages + snaps_n) % _BLK
                 slots = [(off, n, None, None, 0) for off, n, _ in shares]
                 if tail_pages:
-                    slots.append((r[0], tail_pages, None, None, 0))
+                    slots.append((off_r, tail_pages, None, None, 0))
                 if snaps_n:
-                    slots.append((r[0] + tail_pages, snaps_n, None, None, 0))
+                    slots.append((off_r + tail_pages, snaps_n, None, None, 0))
                 if slots:
                     last = slots[-1]
                     slots[-1] = last[:4] + (span_pad,)
@@ -1413,7 +1530,8 @@ class SessionTierStore:
                     failed_sids.add(en.seg.seg_id)
                     skipped += 1
                     continue
-                if self._journal_and_account(en.seg, en.extents, en.padded, en.crc):
+                if self._journal_and_account(en.seg, en.extents, en.padded, en.crc,
+                                             span_off=en.off, reused=en.reused):
                     self._release_l1(en.seg)
                     self._counters["demotions"] += 1
                     count += 1
@@ -1544,16 +1662,27 @@ class SessionTierStore:
         _ssd_used) - capacity truthfulness under dedup. Returns the padded bytes freed
         from the capacity accounting."""
         with self._account_lock:      # racing the writer thread's journal accounting
+            if seg.in_l2:
+                # the victim's JOURNAL identity stays armed until the next compact
+                # rewrites the journal (tombstone landed or not - both leave the
+                # identity in it); the reuse guard checks it globally: a sharer's
+                # identity lives at the SHARE's offset, not its own span's
+                self._tombs.add((seg.path_key, seg.l2_off, seg.l2_n))
             freed = 0
             for ext in seg.extents:
-                freed += self._extent_release(ext[0], ext[1])
+                f = self._extent_release(ext[0], ext[1])
+                freed += f
+                if f:
+                    self._span_death((ext[0], ext[1]))
             self._ssd_used -= freed
             self._dead_bytes += freed
             if seg.in_l2:             # its journal record just became compact-droppable
                 self._dead_records += 1
                 self._dead_record_bytes += freed
                 # P13: durable NOW. Builder-thread evictions race the coordinator's
-                # appends lock-free: atomic O_APPEND write + order-independent tomb filter.
+                # appends lock-free: atomic O_APPEND write. The replay tomb filter is
+                # order-dependent, but a victim's record is always durable before its
+                # discard can run - the race cannot reorder them.
                 if self._append_tombstone(seg.path_key, seg.l2_off, seg.l2_n):
                     self._counters["tombstones"] += 1
                 else:
@@ -2100,29 +2229,46 @@ class SessionTierStore:
                 break
             records.append(json.loads(payload))
             pos += 8 + plen
+        # journal-order snapshot for the span registries: first-seen ownership - the
+        # owner record precedes every sharer in the append-only journal
+        ordered = list(records)
         torn = pos != len(journal)
         if torn:
             logger.warning("session tier: journal tail truncated/torn, "
                            "%d of %d bytes recovered", pos, len(journal))
-        # P13 durable tombstones: a {"t":1} record kills the earlier live record with
-        # the same (path_key, off, n) identity on BOTH boot paths - the marker fast
-        # path included, so a valid marker can never resurrect a tombstoned discard
-        # (the basis for the P13 marker/shutdown-compact optionality). Tombstones are
-        # appended after their victims (append-only journal), but the filter is
-        # order-independent anyway; the tombstone records themselves never become
-        # segments. Old journals carry no "t" records and replay bit-identically.
+        # P13 durable tombstones: a {"t":1} record kills EARLIER live records with the
+        # same (path_key, off, n) identity on BOTH boot paths - the marker fast path
+        # included, so a valid marker can never resurrect a tombstoned discard (the
+        # basis for the P13 marker/shutdown-compact optionality). The victim's record
+        # is always durable before the discard can run, so it always precedes its
+        # tombstone in the append-only journal; a LATER record with the same identity
+        # is a same-boundary re-offer - with extent sharing its journal identity IS
+        # its victim's (the shared ancestor's extent), and killing it would silently
+        # drop a LIVE record at reboot. The filter is therefore order-dependent:
+        # only records PRECEDING the tombstone die (the lock-free append race cannot
+        # reorder a victim before its own tombstone); tombstone records themselves
+        # never become segments. Old journals carry no "t" records and replay
+        # bit-identically.
         dropped, pdropped = 0, 0
         dropped_recs: list[dict] = []
-        tomb_keys = {(r["path_key"], r["off"], r["n"]) for r in records if r.get("t")}
-        if tomb_keys:
-            victims = [r for r in records if not r.get("t")
-                       and (r["path_key"], r["off"], r["n"]) in tomb_keys]
-            records = [r for r in records if not r.get("t")
-                       and (r["path_key"], r["off"], r["n"]) not in tomb_keys]
+        tomb_at: dict[tuple, int] = {}
+        for i, r in enumerate(records):
+            if r.get("t"):
+                tomb_at[(r["path_key"], r["off"], r["n"])] = i
+        if tomb_at:
+            kept, victims = [], []
+            for i, r in enumerate(records):
+                if r.get("t"):
+                    continue
+                if tomb_at.get((r["path_key"], r["off"], r["n"]), -1) > i:
+                    victims.append(r)
+                else:
+                    kept.append(r)
+            records = kept
             dropped = len(victims)
             dropped_recs.extend(victims)
             logger.info("session tier: replay honored %d tombstones, %d records stay "
-                        "dead (compact reclaims later)", len(tomb_keys), dropped)
+                        "dead (compact reclaims later)", len(tomb_at), dropped)
         # Clean-shutdown fast path: after a graceful shutdown every record followed the
         # durable blob-before-journal order, so the payload crc re-read below is pure
         # redundancy (~22 s on a 41 GiB L2). Marker sizes matching the on-disk files plus
@@ -2277,6 +2423,47 @@ class SessionTierStore:
             # a fast-path boot, so they alone block the marker and the shutdown-compact
             # skip. Tombstoned victims were filtered before this point on both paths.
             self._marker_blockers = pdropped
+            # L2 exact-fit hole reuse: rebuild the span registries from the replayed
+            # record set (O(journal), first-seen ownership, no per-byte scans)
+            # piggybacking the ledger above: a span whose every owned extent died is
+            # a reusable hole. The reuse guard is armed GLOBALLY with the victim
+            # journal identities still in the journal file - tombstoned victims and
+            # payload-dropped records alike: a sharer's identity lives at the SHARE's
+            # offset, so per-hole keying could miss the collision.
+            self._holes = {}
+            self._spans, self._span_of = {}, {}
+            self._tombs = {(bytes.fromhex(pk), toff, tn)
+                           for (pk, toff, tn) in tomb_at}
+            self._tombs.update((bytes.fromhex(rec["path_key"]), rec["off"], rec["n"])
+                               for rec in dropped_recs)
+            seen_sp: set = set()
+            for rec in ordered:
+                if rec.get("t"):
+                    continue
+                exts = rec.get("extents")
+                owned, span_padded = [], 0
+                if exts is not None:
+                    for e in exts:
+                        key = (e[0], e[1])
+                        if key not in seen_sp:
+                            seen_sp.add(key)
+                            owned.append(key)
+                            span_padded += e[1] + (e[4] if len(e) > 4
+                                                   else -e[1] % _BLK)
+                else:
+                    key = (rec["off"], rec["n"])
+                    if key not in seen_sp:
+                        seen_sp.add(key)
+                        owned.append(key)
+                        span_padded = rec["n"] + (-rec["n"] % _BLK)
+                if owned:
+                    span = (owned[0][0], span_padded)
+                    self._spans[span] = set(owned)
+                    for k in owned:
+                        self._span_of[k] = span
+            for span, keys in self._spans.items():
+                if all(k not in self._extents for k in keys):
+                    self._holes.setdefault(span[1], set()).add(span[0])
         # Moved here from __init__: before replay only the blob-size watermark exists,
         # after the reseed above _ssd_used is the live figure both paths must report.
         logger.info("session tier on: L1=%.2f GiB, L2 dir=%s cap=%.2f GiB used=%.2f GiB",
@@ -2351,6 +2538,30 @@ class SessionTierStore:
             # longer describes this state the moment the rewrite starts.
             self.invalidate_shutdown_marker()
             records = self._parse_journal()
+            # P13/W2: apply the SAME order-dependent tomb filter as replay BEFORE the
+            # identity-keyed keep-set: a tombstone kills only records PRECEDING it
+            # (its victim always precedes; a later same-identity record is a
+            # re-offer). The keep-set below matches (path_key, off, n) and cannot
+            # distinguish the dead tombstoned sharer victim from the live
+            # same-identity re-offer: unfiltered, compact keeps the victim (discard
+            # undone at boot, capacity double-counted) and, when the victim's own
+            # span was hole-reused, re-copies its extent from the reused region - a
+            # crc mismatch that aborts every later compact (W2 findings 1 + 2).
+            tomb_at: dict[tuple, int] = {}
+            for i, r in enumerate(records):
+                if r.get("t"):
+                    tomb_at[(r["path_key"], r["off"], r["n"])] = i
+            tomb_victims: list = []
+            if tomb_at:
+                kept, tomb_victims = [], []
+                for i, r in enumerate(records):
+                    if r.get("t"):
+                        continue              # applied-dropped: never carried
+                    if tomb_at.get((r["path_key"], r["off"], r["n"]), -1) > i:
+                        tomb_victims.append(r)
+                    else:
+                        kept.append(r)
+                records = kept
             # Survival keyed by EXACT record identity (path, offset, length), NOT last-wins
             # per path: a crashed discard + replay can leave TWO live segments on one
             # path_key, and last-wins survival would hole the older live segment's blob
@@ -2360,8 +2571,9 @@ class SessionTierStore:
             keep = [rec for rec in records
                     if not rec.get("t")   # P13 tombstone: applied, never carried
                     and (rec["path_key"], rec["off"], rec["n"]) in live]
-            if len(keep) == len(records):
-                return 0                      # nothing dead: no-op (also covers empty journal)
+            if len(keep) == len(records) and not tomb_at:
+                return 0                      # nothing dead: no-op (also covers empty journal);
+                                              # applied tombstones always mean dead records
             readers = [seg for seg in self._segments.values() if seg.refs]
             if readers:
                 # A shrinking swap moves the offsets a by-path reader may be mid-read
@@ -2450,11 +2662,37 @@ class SessionTierStore:
                 if seg.in_l2:
                     for ext in seg.extents:
                         self._extent_acquire(ext[0], ext[1], ext[2], ext[3], ext[4])
+            # dense layout: no holes, no tombstones, no journal victims - the reuse
+            # registries reset to the kept records' spans (first-seen ownership over
+            # the new journal order) so future discards still birth holes. Span sizes
+            # use each extent's own pad share: layout-consistent with the dense file
+            # (a cross-record run merge may have packed the next record into this
+            # span's old padding gap).
+            self._holes = {}
+            self._tombs = set()
+            self._spans, self._span_of = {}, {}
+            seen_sp: set = set()
+            for i, rec in enumerate(keep):
+                owned, span_padded = [], 0
+                for key in new_extents[i]:
+                    if key in seen_sp:
+                        continue
+                    seen_sp.add(key)
+                    dk = (layout[key][0], key[1])   # dense offset: the remapped key
+                    owned.append(dk)
+                    span_padded += dk[1] + layout[key][3]
+                if owned:
+                    span = (owned[0][0], span_padded)
+                    self._spans[span] = set(owned)
+                    for k in owned:
+                        self._span_of[k] = span
             logger.info("session tier: compact shrink: blob %.2f GiB -> %.2f GiB",
                         old_size / 2**30, total / 2**30)
-            # Tombstones are journal bookkeeping, not data records: the dropped-count
-            # stays ledger-aligned (victims + payload-dead only).
-            return len(records) - len(keep) - sum(1 for r in records if r.get("t"))
+            # Tombstones are journal bookkeeping, not data records: applied-dropped
+            # above (never carried, so the sum below is 0); the dropped-count stays
+            # ledger-aligned: their victims + payload-dead only.
+            return (len(records) - len(keep)
+                    + (len(tomb_victims) if tomb_at else 0))
 
     def shutdown_compact(self) -> int:
         """P13: the shutdown compact is optional once every dead record carries a
@@ -2924,8 +3162,8 @@ class SessionTierStore:
         final line ("session tier final: <this>"); "" when off. Stable field order:
         l1, l2, offers=ok/rej, dedup, ext (extents_shared), probes=hit/miss, midsn
         (probe_midspan_only), snapfree (probe_snapfree_skip), restore=l1/l2, ok,
-        refused, evict, demote, discard, tomb, dead, holes, pf=begin/adopt/abandon,
-        prej (prefetch_rej_cap)."""
+        refused, evict, demote, discard, tomb, reuse=used/miss/bytes, dead, holes,
+        pf=begin/adopt/abandon, prej (prefetch_rej_cap)."""
         snap = self.snapshot()
         if not snap:
             return ""
@@ -2940,6 +3178,8 @@ class SessionTierStore:
                 f"ok={snap['restore_ok']}, refused={snap['restore_refused']}, "
                         f"evict={snap['evictions']}, demote={snap['demotions']}, "
                         f"discard={snap['discards']}, tomb={snap['tombstones']}, "
+                        f"reuse={snap['holes_reused']}/{snap['holes_reuse_miss']}/"
+                        f"{snap['holes_reused_bytes'] / 2**20:.1f}MiB, "
                         f"dead={snap['dead_records']}rec/"
                         f"{snap['dead_record_bytes'] / 2**20:.1f}MiB, "
                         # display clamp: crash-window compact leaves dead spans above the truncated blob_eof

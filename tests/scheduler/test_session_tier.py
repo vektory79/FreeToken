@@ -308,8 +308,12 @@ def test_supersede_shallower_plain_segment_l2_accounting(tmp_path):
     assert len(store._segments) == 1
     seg2 = store._by_path(b"path")
     assert seg2.boundary_len == 2 and seg2.in_l2
-    assert store._dead_bytes == 4096                     # the padded 1-page span is dead
+    # L2 hole reuse: the superseded 1-page span (padded 4096) is exactly-fit reused by
+    # the new record (different primary extent n -> no tombstone identity collision)
+    assert store._dead_bytes == 0 and store._dead_record_bytes == 0
     assert store._ssd_used == 4096                       # only the new record counts
+    assert store._blob_eof == 4096
+    assert store.snapshot()["holes_reused"] == 1
     assert store._index[keys[0]] == [(seg2.seg_id, 1)]   # old entries removed
     assert store._index[keys[1]] == [(seg2.seg_id, 2)]
     hit = store.probe(keys)
@@ -400,7 +404,8 @@ def test_sigkill_replay_after_supersede_keeps_exactly_live_set(tmp_path):
     keys, pages = _chain([(7, 0), (7, 1)])
     assert store.offer(b"path", 1, pages[:1])
     assert store.offer(b"path", 2, pages)                # supersedes the boundary-1 record
-    assert store._dead_bytes == 4096
+    assert store._dead_bytes == 0        # the superseded span is exactly-fit reused
+    assert store.snapshot()["holes_reused"] == 1
     assert store.compact() == 1                          # dead record dropped
     assert store.compact() == 0                          # idempotent
     boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(d)))
@@ -2834,8 +2839,8 @@ def test_flush_drain_retry_admits_next_group_after_previous_settles(tmp_path, mo
     reserve_log: list[tuple[int, int, object]] = []
     refused = threading.Event()
 
-    def reserve(self, need, pending=0):
-        r = real_reserve(self, need, pending)
+    def reserve(self, need, pending=0, identity=None):
+        r = real_reserve(self, need, pending, identity=identity)
         with lock:
             reserve_log.append((need, pending, r))
         if r is None and pending > 0:
@@ -2896,8 +2901,8 @@ def test_flush_drain_timeout_warns_and_retries_with_pending_zero(tmp_path, monke
 
     real_reserve = SessionTierStore._reserve_blob_span
 
-    def reserve(self, need, pending=0):
-        r = real_reserve(self, need, pending)
+    def reserve(self, need, pending=0, identity=None):
+        r = real_reserve(self, need, pending, identity=identity)
         if r is None and pending > 0:
             refused.set()
         return r
@@ -2980,8 +2985,8 @@ def test_flush_overflow_counts_drain_retry_eviction(tmp_path, monkeypatch, tier_
     real_write = SessionTierStore._write_group
     refused = threading.Event()
 
-    def reserve(self, need, pending=0):
-        r = real_reserve(self, need, pending)
+    def reserve(self, need, pending=0, identity=None):
+        r = real_reserve(self, need, pending, identity=identity)
         if r is None and pending > 0:
             refused.set()
         return r
@@ -4097,3 +4102,300 @@ def test_extent_cap_overflow_falls_back_to_private_copy(tmp_path, monkeypatch):
     for seg in segs:                           # full payloads restore byte-exact
         hit = store.probe(seg[1])
         assert store.restore(hit[1]) == ([data for _, data in seg[2]], [seg[3]])
+
+
+# ------------------------------------------------- L2 exact-fit hole reuse
+
+def test_l2_hole_exact_fit_reuse(tmp_path):
+    """Fails-before: a discard's fully-dead span is reused by the next record of the
+    SAME padded size; on HEAD the reserve always appends at _blob_eof (offset differs).
+    The reused span must not move _blob_eof, must return _ssd_used to the pre-discard
+    value and must decrement both dead ledgers (no phantom dead for maybe_compact)."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"path", 2, pages, _snap("x"))
+    seg = next(iter(store._segments.values()))
+    assert seg.l2_off == 0 and store._blob_eof == 4096
+    store._discard(seg)
+    assert store._holes == {4096: {0}}
+    assert store._tombs == {(b"path", 0, 512)}   # victim journal identity armed
+    assert store._ssd_used == 0 and store._blob_eof == 4096
+    assert store._dead_bytes == 4096 and store._dead_record_bytes == 4096
+    keys2, pages2 = _chain([(8, 0), (8, 1)])
+    assert store.offer(b"path2", 2, pages2, _snap("y"))
+    seg2 = next(iter(store._segments.values()))
+    assert seg2.l2_off == 0                    # reused the hole (HEAD: appends at 4096)
+    assert store._blob_eof == 4096             # watermark did not move
+    assert store._ssd_used == 4096             # back to the pre-discard value
+    assert store._dead_bytes == 0 and store._dead_record_bytes == 0
+    snap_m = store.snapshot()
+    assert snap_m["holes_reused"] == 1 and snap_m["holes_reused_bytes"] == 4096
+    assert store.compact() == 1                # the victim's journal record is dropped
+    s = store.snapshot()
+    assert s["ssd_used"] == 4096 and s["dead_bytes"] == 0
+    assert s["dead_records"] == 0 and s["dead_record_bytes"] == 0
+    assert store._holes == {}
+    hit = store.probe(keys2)
+    assert hit is not None
+    assert store.restore(hit[1]) == ([data for _, data in pages2], [_snap("y")])
+
+
+def test_l2_hole_tombstone_collision_guard(tmp_path):
+    """THE fails-before: P13 tombstones are identity-keyed (path_key, off, n); reusing
+    a hole with a same-identity re-offer recreates the victim's triple and replay's
+    tomb filter would silently delete the LIVE reused record. With the guard the hole
+    is skipped (append) and replay keeps exactly the re-offer; without it the record
+    is lost (this test documents the loss it prevents)."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"path", 2, pages, _snap("x"))
+    store._discard(next(iter(store._segments.values())))
+    assert store._holes == {4096: {0}}
+    assert store.offer(b"path", 2, pages, _snap("x2"))   # same identity re-offer
+    seg2 = next(iter(store._segments.values()))
+    assert seg2.l2_off == 4096                 # guard skipped the hole: appended
+    assert store._blob_eof == 8192
+    assert store._holes == {4096: {0}}         # hole left for compact to reclaim
+    boot, n = _boot(d)
+    assert n == 1                              # exactly the re-offer survives replay
+    hit = boot.probe(keys)
+    assert hit is not None
+    assert boot.restore(hit[1]) == ([data for _, data in pages], [_snap("x2")])
+
+
+def test_l2_hole_sigkill_convergence(tmp_path):
+    """Fails-before: SIGKILL between pwrite-into-hole and journal leaves garbage in a
+    hole; replay re-derives the hole (armed from the journal victims), the next reuse
+    writes into it, and the payload crc never validates the garbage as a live record."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"path", 2, pages, _snap("x"))
+    store._discard(next(iter(store._segments.values())))
+    off, padded, reused = store._reserve_blob_span(640, identity=(b"path2", None, 512))
+    assert reused and off == 0 and padded == 4096
+    store._pwrite_span(off, memoryview(b"GARBAGEgarbage" * 300))   # no journal record
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    n = boot.replay_journal()
+    assert n == 0                              # garbage never validates as live
+    assert boot._holes == {4096: {0}}          # hole re-derived by replay
+    assert boot._tombs == {(b"path", 0, 512)}   # guard re-armed from the journal
+    keys2, pages2 = _chain([(8, 0), (8, 1)])
+    assert boot.offer(b"path2", 2, pages2, _snap("y"))
+    seg2 = next(iter(boot._segments.values()))
+    assert seg2.l2_off == 0                    # next reuse writes into the hole
+    hit = boot.probe(keys2)
+    assert hit is not None
+    assert boot.restore(hit[1]) == ([data for _, data in pages2], [_snap("y")])
+
+
+def test_l2_hole_replay_derived_idempotent(tmp_path):
+    """Fails-before: holes are DERIVED state - after a boot _holes is identical to the
+    pre-boot set, and an idempotent re-replay (replay_is_idempotent pattern) keeps it
+    identical (on HEAD there is no hole registry at all)."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    ka, pa = _chain([(1, 0), (1, 1)])
+    kb, pb = _chain([(2, 0), (2, 1)])
+    assert store.offer(b"pa", 2, pa, _snap("a"))
+    assert store.offer(b"pb", 2, pb, _snap("b"))
+    store._discard(next(iter(store._segments.values())))
+    assert store._holes == {4096: {0}}
+    boot, n = _boot(d)
+    assert n == 1
+    assert boot._holes == {4096: {0}}          # identical to the pre-boot set
+    assert boot._tombs == {(b"pa", 0, 512)}
+    assert boot.replay_journal() == n          # idempotent re-replay
+    assert boot._holes == {4096: {0}}
+    assert boot._tombs == {(b"pa", 0, 512)}
+    hit = boot.probe(kb)
+    assert hit is not None
+    assert boot.restore(hit[1]) == ([data for _, data in pb], [_snap("b")])
+
+
+def test_l2_hole_reuse_accounting_never_phantom(tmp_path):
+    """Extension: reuse pays the cap gate exactly like a fresh append (the reused bytes
+    were subtracted at discard), the dead ledgers never go phantom-negative and the
+    cap fills to exactly ssd_bytes with no over-cap."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=3 * 4096, d=d))
+    ka, pa = _chain([(1, 0), (1, 1)])
+    kb, pb = _chain([(2, 0), (2, 1)])
+    assert store.offer(b"pa", 2, pa, _snap("a"))
+    assert store.offer(b"pb", 2, pb, _snap("b"))
+    store._discard(next(iter(store._segments.values())))
+    assert store._ssd_used == 4096 and store._dead_bytes == 4096
+    kc, pc = _chain([(3, 0), (3, 1)])
+    assert store.offer(b"pc", 2, pc, _snap("c"))         # exact-fit reuse
+    assert store._ssd_used == 2 * 4096
+    assert store._dead_bytes == 0 and store._dead_record_bytes == 0
+    kd, pd = _chain([(4, 0), (4, 1)])
+    assert store.offer(b"pd", 2, pd, _snap("d"))          # fills the cap exactly
+    assert store._ssd_used == 3 * 4096 == store.ssd_bytes  # no over-cap, no phantom
+    s = store.snapshot()
+    assert s["dead_bytes"] >= 0 and s["dead_record_bytes"] >= 0
+    assert s["ssd_used"] <= store.ssd_bytes
+
+
+def test_l2_hole_compact_clears_and_rebuilds(tmp_path):
+    """Extension: compact() clears the hole registries (dense layout has no holes);
+    the span registries rebuild from the kept records, so a post-compact discard still
+    births a reusable hole and post-compact reuse works."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    ka, pa = _chain([(1, 0), (1, 1)])
+    kb, pb = _chain([(2, 0), (2, 1)])
+    assert store.offer(b"pa", 2, pa, _snap("a"))
+    assert store.offer(b"pb", 2, pb, _snap("b"))
+    store._discard(next(iter(store._segments.values())))
+    assert store._holes == {4096: {0}}
+    assert store.compact() == 1
+    assert store._holes == {} and store._tombs == set()
+    store._discard(next(iter(store._segments.values())))   # dense pb now at off 0
+    assert store._holes == {4096: {0}}
+    assert store._ssd_used == 0 and store._blob_eof == 4096
+    kc, pc = _chain([(3, 0), (3, 1)])
+    assert store.offer(b"pc", 2, pc, _snap("c"))
+    seg3 = next(iter(store._segments.values()))
+    assert seg3.l2_off == 0                    # post-compact reuse works
+    hit = store.probe(kc)
+    assert hit is not None
+    assert store.restore(hit[1]) == ([data for _, data in pc], [_snap("c")])
+
+
+def test_l2_hole_flush_group_seam(tmp_path):
+    """Extension: a flush-GROUP entry (builder thread, pending volume in flight)
+    reserves a reused span and settles the cap exactly like a fresh append - the hole
+    pop's _account_lock section and the pipeline's pending bookkeeping never
+    double-count the reused volume."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(d=d))        # ram 2048: two 3-page segments fit
+    chains = [_chain([(i, 0), (i, 1), (i, 2)]) for i in (1, 2, 3)]
+    for i, (_keys, pages) in enumerate(chains, start=1):
+        assert store.offer(f"p{i}".encode(), 3, pages, _snap(str(i)))
+    p1_seg = next(s for s in store._segments.values() if s.seg_id == 1)
+    assert p1_seg.in_l2                        # the 3rd offer demoted p1
+    store._discard(p1_seg)
+    assert store._holes == {4096: {0}}
+    assert store.flush_live() == 2             # p2, p3 demote via the GROUP path
+    snap = store.snapshot()
+    assert snap["holes_reused"] == 1           # a group entry took the hole
+    assert any(s.l2_off == 0 for s in store._segments.values())
+    assert snap["ssd_used"] == 2 * 4096 and snap["dead_bytes"] == 0
+    for i, (keys, pages) in enumerate(chains[1:], start=2):
+        hit = store.probe(keys)
+        assert hit is not None
+        assert store.restore(hit[1]) == ([data for _, data in pages], [_snap(str(i))])
+
+
+def test_l2_hole_metrics_preseeded_and_in_stats_line(tmp_path):
+    """Extension: holes_reused / holes_reuse_miss / holes_reused_bytes are pre-seeded
+    (offers_dedup metric pattern) and land in the stats_line fragment."""
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "t")))
+    snap = store.snapshot()
+    assert snap["holes_reused"] == 0 and snap["holes_reuse_miss"] == 0
+    assert snap["holes_reused_bytes"] == 0
+    assert "reuse=0/0/0.0MiB" in store.stats_line()
+    keys, pages = _chain([(9, 0), (9, 1)])
+    assert store.offer(b"path", 2, pages, _snap("x"))
+    assert store.snapshot()["holes_reuse_miss"] == 1   # no hole of that size yet
+    assert "reuse=0/1/0.0MiB" in store.stats_line()
+
+
+def test_l2_hole_tombstone_guard_shared_extent_victim(tmp_path):
+    """Fails-before (W2 fix): a SHARER's journal identity is its first SHARE
+    (pk, share_off, share_n) - on a same-boundary re-offer it is IDENTICAL to the
+    victim's. W1's guard missed it (per-hole arming keyed by the dying seg's span
+    never saw the share-off identity, and the triple plugged the hole offset in);
+    worse, PRE-EXISTING on HEAD: the order-independent tomb filter killed ANY
+    same-identity record, so even the plain-append re-offer was silently dropped at
+    replay (boot replay == 1, verified on HEAD). Fix: the guard checks the global
+    victim-identity set against the full would-be journal identity, and the tomb
+    filter kills only records PRECEDING the tombstone."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    p_keys, p_pages = _chain([(7, 0), (7, 1), (7, 2)])
+    q_keys, q_pages = _chain([(7, 0), (7, 1), (7, 2), (9, 3)])
+    assert store.offer(b"P", 3, p_pages, _snap("p"))
+    assert store.offer(b"Q", 4, q_pages, _snap("q"))    # shares P's page extent
+    qseg = next(s for s in store._segments.values() if s.path_key == b"Q")
+    assert qseg.extents[0][:2] == (0, 768)              # the share is the primary extent
+    store._discard(qseg)                                # tombstone (Q, 0, 768)
+    assert store._holes == {4096: {4096}}               # the sharer's OWN span is the hole
+    assert store._tombs == {(b"Q", 0, 768)}             # journal identity, armed globally
+    assert store.offer(b"Q", 4, q_pages, _snap("q2"))   # same-boundary re-offer
+    qseg2 = next(s for s in store._segments.values() if s.path_key == b"Q")
+    # guard matched the fixed identity (Q, 0, 768): hole skipped, appended past eof
+    assert store._blob_eof == 12288
+    assert qseg2.extents[0][:2] == (0, 768)             # still shares P's extent
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    assert boot.replay_journal() == 2       # P AND the re-offered Q survive replay
+    hit = boot.probe(q_keys)
+    assert hit is not None and hit[0] == 4
+    assert boot.restore(hit[1]) == ([data for _, data in q_pages], [_snap("q2")])
+
+
+def test_l2_hole_compact_no_sharer_victim_resurrection(tmp_path):
+    """Fails-before (W2 round 2, finding 1): compact()'s identity-keyed keep-set
+    matches the dead tombstoned sharer victim and the live same-identity re-offer -
+    the dead record is kept, the discard undone at boot (two live Q segments,
+    capacity double-counted). The compact-side order-dependent tomb filter drops the
+    victim before the keep-set: boot replay keeps ONLY the live record."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    p_keys, p_pages = _chain([(7, 0), (7, 1), (7, 2)])
+    q_keys, q_pages = _chain([(7, 0), (7, 1), (7, 2), (9, 3)])
+    assert store.offer(b"P", 3, p_pages, _snap("p"))
+    assert store.offer(b"Q", 4, q_pages, _snap("q"))
+    store._discard(next(s for s in store._segments.values() if s.path_key == b"Q"))
+    assert store.offer(b"Q", 4, q_pages, _snap("q2"))   # same identity, plain append
+    assert store._blob_eof == 12288
+    assert store.snapshot()["dead_records"] == 1        # the tombstoned victim
+    assert store.compact() == 1                          # the victim IS the dropped record
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    assert boot.replay_journal() == 2                    # P + Q2: no resurrection
+    assert len([s for s in boot._segments.values()
+                if s.path_key == b"Q"]) == 1
+    s = boot.snapshot()
+    assert s["ssd_used"] == 2 * 4096 and s["dead_bytes"] == 0
+    assert s["dead_records"] == 0 and s["dead_record_bytes"] == 0
+    hit = boot.probe(q_keys)
+    assert hit is not None and hit[0] == 4
+    assert boot.restore(hit[1]) == ([data for _, data in q_pages], [_snap("q2")])
+
+
+def test_l2_hole_compact_after_hole_reuse_no_brick(tmp_path):
+    """Fails-before (W2 round 2, finding 2): with the dead sharer's own span reused
+    by a different identity, the unfiltered keep-set also keeps the dead victim and
+    re-copies its tail extent from the REUSED region - crc mismatch, "aborted before
+    arm", every later compact bricks until reboot. With the filter the victim is
+    dropped before the copy: compact succeeds, the reuse survives, gauges honest."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    p_keys, p_pages = _chain([(7, 0), (7, 1), (7, 2)])
+    q_keys, q_pages = _chain([(7, 0), (7, 1), (7, 2), (9, 3)])
+    r_keys, r_pages = _chain([(5, 0), (5, 1)])           # different identity
+    assert store.offer(b"P", 3, p_pages, _snap("p"))
+    assert store.offer(b"Q", 4, q_pages, _snap("q"))
+    store._discard(next(s for s in store._segments.values() if s.path_key == b"Q"))
+    assert store._holes == {4096: {4096}}
+    # R legally reuses the sharer's dead own span (different identity: guard allows)
+    assert store.offer(b"R", 2, r_pages, _snap("r"))
+    rseg = next(s for s in store._segments.values() if s.path_key == b"R")
+    assert rseg.l2_off == 4096                           # reused
+    assert store.offer(b"Q", 4, q_pages, _snap("q2"))     # same identity: appended
+    assert store._blob_eof == 12288
+    assert store.compact() == 1              # victim dropped, reuse survives: no abort
+    boot = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    assert boot.replay_journal() == 3                    # P, R, Q2
+    hit = boot.probe(r_keys)
+    assert hit is not None
+    assert boot.restore(hit[1]) == ([data for _, data in r_pages], [_snap("r")])
+    hit = boot.probe(q_keys)
+    assert hit is not None and hit[0] == 4
+    assert boot.restore(hit[1]) == ([data for _, data in q_pages], [_snap("q2")])
+    s = boot.snapshot()
+    assert s["ssd_used"] == 3 * 4096 and s["dead_bytes"] == 0
+    assert s["dead_records"] == 0 and s["dead_record_bytes"] == 0
