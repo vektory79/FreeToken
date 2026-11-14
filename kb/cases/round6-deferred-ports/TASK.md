@@ -327,9 +327,9 @@ grep-ревью "нет файлов с двумя логиками".
 
 CPU-часть фазы закрыта одним коммитом: 2276069 "feat(models): harden the
 glm5next gguf loader contract guards" (2 файла, +299/-199: гварды в
-[models/glm5_next/gguf.py](../../python/freetoken/models/glm5_next/gguf.py),
+[models/glm5_next/gguf.py](../../../python/freetoken/models/glm5_next/gguf.py),
 переписанные тесты в
-[tests/models/test_glm5_next_gguf.py](../../tests/models/test_glm5_next_gguf.py)).
+[tests/models/test_glm5_next_gguf.py](../../../tests/models/test_glm5_next_gguf.py)).
 Статья фазы (карта маркеров, гварды, уроки) -
 [round6-d4-gguf-loader-contract](../../topics/round6-d4-gguf-loader-contract.md).
 
@@ -438,12 +438,12 @@ stale-pin теста зелёные с новой формулировкой; т
 
 CPU-часть фазы закрыта двумя коммитами: ee961f0 "feat(models): re-land the
 glm5next gguf loader gpu dequant branch"
-([models/glm5_next/gguf.py](../../python/freetoken/models/glm5_next/gguf.py),
+([models/glm5_next/gguf.py](../../../python/freetoken/models/glm5_next/gguf.py),
 +50/-21) и 1eb556d "test(quant): recalibrate nvfp4 quant config pins for
 w4a4" (un-skip маркера 1433 в
-[tests/models/test_glm5_next_gguf.py](../../tests/models/test_glm5_next_gguf.py)
+[tests/models/test_glm5_next_gguf.py](../../../tests/models/test_glm5_next_gguf.py)
 + перекалибровка пинов в
-[tests/models/test_quant_config.py](../../tests/models/test_quant_config.py)).
+[tests/models/test_quant_config.py](../../../tests/models/test_quant_config.py)).
 Статья фазы (премиса, _cast, пины, уроки) -
 [round6-d5-nvfp4-kv-dequant](../../topics/round6-d5-nvfp4-kv-dequant.md).
 

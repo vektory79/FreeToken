@@ -24,7 +24,7 @@ Review target: `.veai/skills/gguf-native-serving/` (12 files: SKILL.md 116 lines
 
 ### 2. [C/R1] SKILL.md не содержит ни одной markdown-ссылки на sibling-файлы
 - **Type/Severity:** Documentation / Error (blocking)
-- Поиск `]` по SKILL.md даёт 0 совпадений => markdown-ссылки формата `[text](path)` отсутствуют целиком. Все 10 sibling-файлов упомянуты только инлайн-текстом/глобами:
+- Поиск `]` по SKILL.md даёт 0 совпадений => markdown-ссылки (текст в квадратных скобках, путь в круглых) отсутствуют целиком. Все 10 sibling-файлов упомянуты только инлайн-текстом/глобами:
   - ORCHESTRATION.md — SKILL.md:11 ("Run via ORCHESTRATION.md"), SKILL.md:54 — plain text;
   - TRAPS.md — SKILL.md:116 ("См. TRAPS.md") — plain text;
   - tasks/task-00..07 — SKILL.md:14 ("tasks/task-00..07", диапазонная запись), SKILL.md:53 ("tasks/task-0N-*.md", глоб), SKILL.md:60 (только task-07 назван по имени) — plain text.
