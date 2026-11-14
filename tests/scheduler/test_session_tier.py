@@ -4399,3 +4399,196 @@ def test_l2_hole_compact_after_hole_reuse_no_brick(tmp_path):
     s = boot.snapshot()
     assert s["ssd_used"] == 3 * 4096 and s["dead_bytes"] == 0
     assert s["dead_records"] == 0 and s["dead_record_bytes"] == 0
+
+
+# ------------------------- legacy-poisoned extent crc restamp (logical crc arbiter)
+
+
+def _poison_record_crcs(d, rec_index, ext_index, logical=False):
+    """Rewrite one journal record with a deliberately wrong stored per-extent crc
+    (optionally also a wrong record-level logical crc) over untouched - good - blob
+    bytes: the production GLM-5.3 shape. Returns (stored_ext_crc, fresh_disk_crc);
+    the restamp rule must converge the journaled field to the second. Record layout
+    per _journal_append: <II plen, zlib-crc32> frame + JSON payload, extent =
+    [off, n, crc, crc_alg, pad_share]; the frame is re-encoded canonically."""
+    import crc32c
+
+    jpath = os.path.join(d, "journal.log")
+    recs, _ = _journal_records_raw(jpath)
+    ext = recs[rec_index]["extents"][ext_index]
+    stored = ext[2]
+    with open(os.path.join(d, "blob.bin"), "rb") as f:
+        f.seek(ext[0])
+        fresh = crc32c.crc32c(f.read(ext[1]))
+    assert stored == fresh          # the disk bytes are good: only the field lies
+    state = {"i": 0}
+
+    def poison(rec):
+        if state["i"] == rec_index:
+            rec["extents"][ext_index][2] = stored ^ 0x0badf00d
+            if logical:
+                rec["crc"] ^= 0x5eedfeed
+        state["i"] += 1
+
+    _rewrite_records(d, poison)
+    return stored, fresh
+
+
+def test_ext_crc_restamp_compact(tmp_path, tier_log_capture):
+    """Fails-before (production GLM-5.3 cache dir): one legacy-poisoned per-extent crc
+    over bit-exact payload bytes aborted every compact before arm. The record-level
+    LOGICAL payload crc is the arbiter: it certifies the bytes, the shrink proceeds
+    and the dense journal carries the restamped (fresh-from-disk) extent crc."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"victim", 2, pages, _snap("v"))
+    kkeys, kpages = _chain([(8, 0), (8, 1)])
+    assert store.offer(b"keep", 2, kpages, _snap("k"))
+    store._discard(next(iter(store._segments.values())))   # dead record: compact fires
+    stored, fresh = _poison_record_crcs(d, 1, 1)           # the keep record's snaps
+    with tier_log_capture() as cap:
+        assert store.compact() == 1                        # HEAD: 0 (aborted before arm)
+    assert any("re-stamped from disk" in m for m in cap.messages)
+    recs, whole = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert whole and len(recs) == 1                        # dense rewrite: victim gone
+    assert recs[0]["extents"][1][2] == fresh               # corrected crc on disk
+    assert _tier_files(d) == ["blob.bin", "journal.log"]    # commit completed cleanly
+    assert store.snapshot()["ext_crc_restamped"] == 1
+    assert "restamp=1" in store.stats_line()
+    boot, n = _boot(d)
+    assert n == 1                                          # replays with no restamp
+    hit = boot.probe(kkeys)
+    assert hit is not None
+    assert boot.restore(hit[1]) == ([data for _, data in kpages], [_snap("k")])
+
+
+def test_ext_crc_restamp_slow_path_replay(tmp_path, tier_log_capture):
+    """Fails-before: a slow-path boot (no clean-shutdown marker: crash or stale
+    marker) DROPS a record whose stored per-extent crc is poisoned even though its
+    bytes are certified by the record-level logical crc. The arbiter keeps the
+    record, restamps the in-memory extent crc, and that value is what the next
+    compact's journal rewrite persists - replay itself never rewrites the journal
+    (the file keeps the poisoned field until then; fast-path boots reload it, and
+    compact re-arbitrates)."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"path", 2, pages, _snap("x"))
+    stored, fresh = _poison_record_crcs(d, 0, 1)
+    with tier_log_capture() as cap:
+        boot, n = _boot(d)                                 # no marker: full payload pass
+    assert n == 1                                          # HEAD: 0 (dropped as dead)
+    assert any("re-stamped from disk" in m for m in cap.messages)
+    hit = boot.probe(keys)
+    assert hit is not None
+    assert boot.restore(hit[1]) == ([data for _, data in pages], [_snap("x")])
+    seg = boot._segments[hit[1]._seg_id]
+    assert seg.extents[1][2] == fresh                      # in-memory restamp
+    assert boot.snapshot()["ext_crc_restamped"] == 1
+    assert "restamp=1" in boot.stats_line()
+    recs, _ = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert recs[0]["extents"][1][2] == stored ^ 0x0badf00d  # journal NOT rewritten
+
+
+def test_ext_crc_poison_with_bad_logical_unchanged(tmp_path, tier_log_capture):
+    """Control: when the record-level logical crc ALSO fails, the bytes are not
+    certified - compact still aborts before arm with temps cleaned, slow-path replay
+    still drops the record, and no restamp is counted (genuine-corruption behavior
+    unchanged; the arbiter must not weaken the payload-crc convergence)."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"victim", 2, pages, _snap("v"))
+    kkeys, kpages = _chain([(8, 0), (8, 1)])
+    assert store.offer(b"keep", 2, kpages, _snap("k"))
+    store._discard(next(iter(store._segments.values())))
+    blob_size = os.path.getsize(os.path.join(d, "blob.bin"))
+    _poison_record_crcs(d, 1, 1, logical=True)             # both fields wrong
+    with tier_log_capture() as cap:
+        assert store.compact() == 0
+    assert any("aborted before arm" in m for m in cap.messages)
+    assert os.path.getsize(os.path.join(d, "blob.bin")) == blob_size  # blob untouched
+    assert _tier_files(d) == ["blob.bin", "journal.log"]               # temps cleaned
+    # replay phase on a fresh dir: logical also poisoned -> the record drops
+    d2 = str(tmp_path / "tier2")
+    store2 = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d2))
+    # .get default 0: the counter does not exist on the pre-fix binary - this control
+    # must pass BOTH before and after the restamp change
+    assert store2.snapshot().get("ext_crc_restamped", 0) == 0
+    keys2, pages2 = _chain([(9, 0), (9, 1)])
+    assert store2.offer(b"path", 2, pages2, _snap("x"))
+    _poison_record_crcs(d2, 0, 1, logical=True)
+    boot, n = _boot(d2)
+    assert n == 0                                          # dropped: unchanged
+    assert boot.probe(keys2) is None
+    assert boot.snapshot().get("ext_crc_restamped", 0) == 0
+
+
+def test_ext_crc_restamp_verify_pread_eio_drops_not_crashes(tmp_path, monkeypatch):
+    """MINOR fix: a span whose VERIFY pread raises OSError memoizes no fresh crc; if
+    the arbiter's re-read then succeeds, the restamp loop must not KeyError the whole
+    boot - without a memoized fresh value the record is uncertified and takes
+    today's drop path."""
+    import freetoken.scheduler.session_tier as st
+
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"path", 2, pages, _snap("x"))
+    stored, fresh = _poison_record_crcs(d, 0, 1)
+    recs, _ = _journal_records_raw(os.path.join(d, "journal.log"))
+    eio_off = recs[0]["extents"][1][0]                     # the poisoned span
+    real_pread = os.pread
+    state = {"armed": True}
+
+    def eio_once(fd, n, off):
+        if state["armed"] and off == eio_off:
+            state["armed"] = False
+            raise OSError(5, "simulated EIO on the verify pread")
+        return real_pread(fd, n, off)
+
+    monkeypatch.setattr(st.os, "pread", eio_once)
+    boot, n = _boot(d)               # HEAD-with-bug: KeyError -> boot crash
+    assert n == 0                               # uncertified: today's drop path
+    assert boot.probe(keys) is None
+    assert boot.snapshot()["ext_crc_restamped"] == 0
+
+
+def test_legacy_zlib_alg_extents_compact_no_false_abort(tmp_path):
+    """Fails-before (fresh-crc accumulator alg fix): an extents record whose crc_alg
+    AND per-extent alg fields are absent (pre-crc32c era) carries zlib crcs; the old
+    accumulator computed the fresh crc with crc32c regardless ("m[3] or
+    _CRC32C_ALG"), so every such record false-mismatched at compact - and the
+    restamp arbiter would then journal a crc32c value under a zlib alg field
+    (poison: the next slow-path boot drops the record). With the accumulator on the
+    journaled alg the shrink completes with NO restamp engaged."""
+    d = str(tmp_path / "tier")
+    store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=d))
+    keys, pages = _chain([(7, 0), (7, 1)])
+    assert store.offer(b"victim", 2, pages, _snap("v"))
+    kkeys, kpages = _chain([(8, 0), (8, 1)])
+    assert store.offer(b"keep", 2, kpages, _snap("k"))
+    store._discard(next(iter(store._segments.values())))
+
+    def to_legacy_zlib(rec):
+        rec.pop("crc_alg", None)
+        rec["crc"] = zlib.crc32(_blob_region(d, rec))
+        with open(os.path.join(d, "blob.bin"), "rb") as f:
+            for ext in rec.get("extents") or []:
+                f.seek(ext[0])
+                ext[2] = zlib.crc32(f.read(ext[1]))
+                ext[3] = None                       # absent alg: the legacy zlib mark
+
+    _rewrite_records(d, to_legacy_zlib)
+    assert store.compact() == 1            # HEAD: 0 - legacy records false-aborted
+    assert store.snapshot()["ext_crc_restamped"] == 0   # alg fix, not the restamp rule
+    recs, whole = _journal_records_raw(os.path.join(d, "journal.log"))
+    assert whole and len(recs) == 1
+    for ext in recs[0]["extents"]:
+        assert ext[3] is None              # the dense journal stays zlib-consistent
+    boot, n = _boot(d)
+    assert n == 1                          # fresh zlib crc verifies at slow replay
+    hit = boot.probe(kkeys)
+    assert hit is not None
+    assert boot.restore(hit[1]) == ([data for _, data in kpages], [_snap("k")])

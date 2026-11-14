@@ -185,6 +185,36 @@ def _match_payload_crc(data, alg: str | None, crc: int) -> bool:
     return False
 
 
+def _ext_crc_value(data, alg: str | None) -> int:
+    """Fresh crc over payload bytes by the journaled algorithm; absent alg = legacy
+    zlib (the same semantics _match_payload_crc applies to the stored value)."""
+    if alg == _CRC32C_ALG:
+        return crc32c.crc32c(data)
+    return zlib.crc32(data)
+
+
+def _record_logical_crc_ok(fd: int, rec: dict) -> bool:
+    """Arbiter for a per-extent crc mismatch: recompute the RECORD-level logical
+    payload crc (pages then snaps = the concatenated ordered extent bytes) from the
+    blob. A match certifies the bytes as the true flushed payload and the journaled
+    per-extent crc field as merely wrong - the field is re-stamped from disk instead
+    of dropping good data. Legacy single-span records have no separate extent field
+    to re-stamp, so they can never pass (mismatch stays genuine corruption)."""
+    exts = rec.get("extents")
+    if not exts or "crc" not in rec:
+        return False
+    parts = []
+    try:
+        for e in exts:
+            data = os.pread(fd, e[1], e[0])
+            if len(data) < e[1]:            # torn/short read: bytes are NOT certified
+                return False
+            parts.append(data)
+    except OSError:
+        return False
+    return _match_payload_crc(b"".join(parts), rec.get("crc_alg"), rec["crc"])
+
+
 class _PendingVolume:
     """Reserved-but-unjournaled blob volume shared by the flush pipeline threads: the
     builder adds each reserved span before the cap check of the next one, the writer
@@ -482,7 +512,7 @@ class SessionTierStore:
                                           prefetch_rej_cap=0, prefetch_probe_hit=0,
                                           prefetch_probe_miss=0,
                                           holes_reused=0, holes_reuse_miss=0,
-                                          holes_reused_bytes=0)
+                                          holes_reused_bytes=0, ext_crc_restamped=0)
         # Lock exists even when inert: the offer() wrapper takes it around the rejection
         # counter before any early return.
         self._lock = threading.RLock()
@@ -2298,7 +2328,11 @@ never reserve past the ssd cap by up to a group volume. identity is the
         if not fast:
             # Payload-crc validation: a record whose blob region no longer matches (holes
             # left by compaction, a torn append that advanced EOF) is dead - drop, never
-            # resurrect. Extent records validate each DISTINCT consumed span once (the
+            # resurrect. ONE exception, arbitrated per record: a per-extent crc mismatch
+            # whose RECORD-level logical crc still verifies is a legacy-poisoned field
+            # over good bytes (production GLM-5.3 case) - the field is re-stamped from
+            # disk and the record kept. Extent records validate each DISTINCT consumed
+            # span once (the
             # shared span is read one time no matter how many records reference it);
             # legacy records validate their single private region exactly as before.
             blob_fd = -1
@@ -2310,10 +2344,12 @@ never reserve past the ssd cap by up to a group volume. identity is the
             if blob_fd >= 0:
                 kept, pdropped_recs = [], []
                 ext_ok: dict[tuple[int, int], bool] = {}
+                ext_restamp: dict[tuple[int, int], int] = {}
                 for rec in records:
                     ok = True
                     exts = rec.get("extents")
                     if exts is not None:
+                        bad: list[tuple[int, int]] = []
                         for ext in exts:
                             key = (ext[0], ext[1])
                             good = ext_ok.get(key)
@@ -2323,15 +2359,41 @@ never reserve past the ssd cap by up to a group volume. identity is the
                                 good = True
                                 if ecrc is not None:
                                     try:
-                                        good = _match_payload_crc(
-                                            os.pread(blob_fd, ext[1], ext[0]),
-                                            ealg, ecrc)
+                                        data = os.pread(blob_fd, ext[1], ext[0])
+                                        good = _match_payload_crc(data, ealg, ecrc)
+                                        if not good:
+                                            # candidate restamp: fresh crc over the
+                                            # span bytes; the record-level logical
+                                            # crc arbitrates below (legacy-poisoned
+                                            # journaled field over good bytes)
+                                            ext_restamp[key] = _ext_crc_value(data,
+                                                                              ealg)
                                     except OSError:
                                         good = False
                                 ext_ok[key] = good
                             if not good:
-                                ok = False
-                                break
+                                bad.append(key)
+                        # a span whose VERIFY pread raised OSError memoized no
+                        # fresh crc: without a restamp value the record is
+                        # uncertified and takes today's drop path - a plain dict
+                        # hit here would KeyError the whole boot
+                        if bad and all(k in ext_restamp for k in bad) \
+                                and _record_logical_crc_ok(blob_fd, rec):
+                            for ext in exts:      # in-memory restamp: replay never
+                                key = (ext[0], ext[1])   # rewrites the journal; the
+                                if key not in bad:       # value lands on disk at the
+                                    continue             # next compact's rewrite
+                                self._counters["ext_crc_restamped"] += 1
+                                logger.warning("session tier: extent crc mismatch "
+                                               "re-stamped from disk (record off=%d "
+                                               "n=%d, extent off=%d n=%d, crc %#x -> "
+                                               "%#x; logical payload crc verified; "
+                                               "persists at the next compact)",
+                                               rec["off"], rec["n"], ext[0], ext[1],
+                                               ext[2], ext_restamp[key])
+                                ext[2] = ext_restamp[key]
+                        elif bad:
+                            ok = False
                     elif "crc" in rec:
                         try:
                             ok = _match_payload_crc(os.pread(blob_fd, rec["n"],
@@ -2732,7 +2794,9 @@ never reserve past the ssd cap by up to a group volume. identity is the
         span is split at the pages|snaps seam into two extents with copy-time crcs,
         making them shareable for future offers. Each worker crcs the payload bytes it
         copies (the first n of the run at the extent's own offset; split legacy parts
-        record their fresh crc); a mismatch fails the whole copy:
+        record their fresh crc); a mismatch defers to the record-level LOGICAL crc
+        arbiter - a wrong journaled extent crc over certified bytes is re-stamped
+        (logged) and the copy proceeds, a failed arbiter fails the whole copy:
         a live record whose bytes no longer verify must never be moved. The PADDED span
         is copied because the O_DIRECT reader reads block-aligned windows. Returns
         (layout, total, new_extents): layout maps source (off, n) -> [dst_off, crc,
@@ -2745,6 +2809,7 @@ never reserve past the ssd cap by up to a group volume. identity is the
         new_extents: list[list[tuple[int, int]]] = []
         units: list[tuple[int, int, object, object, bool]] = []
         seen: set[tuple[int, int]] = set()
+        mismatched: dict[tuple[int, int], tuple[int, int]] = {}
         for rec in keep:
             keys: list[tuple[int, int]] = []
             exts = rec.get("extents")
@@ -2832,14 +2897,18 @@ never reserve past the ssd cap by up to a group volume. identity is the
                     lo, hi = max(rel - done, 0), min(rel + need - done, n)
                     if hi > lo:
                         take = view[lo:hi]
-                        alg = m[3] or _CRC32C_ALG
-                        m[5] = (crc32c.crc32c(take, value=m[5]) if alg == _CRC32C_ALG
-                                else zlib.crc32(take, m[5]))
+                        # compute by the JOURNALED alg: a crc32c value stored under a
+                        # legacy zlib alg field (or vice versa) would poison the new
+                        # journal - absent alg means legacy zlib, as in replay
+                        if m[3] == _CRC32C_ALG:
+                            m[5] = crc32c.crc32c(take, value=m[5])
+                        else:
+                            m[5] = zlib.crc32(take, m[5])
                 done += n
             for m in acc:                             # whole-extent verification
                 layout[(m[0], m[1])][1] = m[5]        # fresh dense-layout crc
                 if not m[4] and m[2] is not None and m[5] != m[2]:
-                    raise OSError(f"payload crc mismatch moving record at {m[0]}")
+                    mismatched[(m[0], m[1])] = (m[2], m[5])
 
         try:
             workers = min(_compact_writers(_COMPACT_WRITERS), len(runs))
@@ -2849,6 +2918,16 @@ never reserve past the ssd cap by up to a group volume. identity is the
             else:
                 with ThreadPoolExecutor(max_workers=workers) as ex:
                     list(ex.map(_copy_one, range(len(runs))))
+            # Per-extent mismatches defer to the record-level logical crc arbiter: a
+            # wrong journaled extent crc over certified bytes must not abort the
+            # shrink - layout already carries the fresh crc, so the dense journal and
+            # the post-commit in-memory extents get the restamp for free. A failed
+            # arbiter (genuine corruption) aborts before arm exactly as before.
+            if mismatched:
+                offender = self._restamp_copy_mismatch(keep, new_extents,
+                                                       mismatched, src)
+                if offender is not None:
+                    raise OSError(f"payload crc mismatch moving record at {offender}")
             os.fdatasync(dst)
             # The copy is on disk: release its cache too.
             os.posix_fadvise(dst, 0, total, os.POSIX_FADV_DONTNEED)
@@ -2862,6 +2941,30 @@ never reserve past the ssd cap by up to a group volume. identity is the
             os.close(src)
             os.close(dst)
         return layout, total, new_extents
+
+    def _restamp_copy_mismatch(self, keep: list[dict], new_extents: list,
+                               mismatched: dict, src: int) -> int | None:
+        """Logical-crc arbiter for the copy pass's per-extent mismatches: every record
+        consuming a mismatching extent is certified by its own record-level logical
+        payload crc read back from the source blob. Certified records keep their copy
+        with the extent crc re-stamped (the fresh value sits in layout); a record the
+        arbiter cannot certify returns its first mismatching extent's SOURCE offset -
+        the caller raises the same "payload crc mismatch" OSError as before, the old
+        blob stays untouched."""
+        for i, rec in enumerate(keep):
+            bad = [k for k in new_extents[i] if k in mismatched]
+            if not bad:
+                continue
+            if not _record_logical_crc_ok(src, rec):
+                return bad[0][0]
+            for key in bad:
+                old, fresh = mismatched[key]
+                self._counters["ext_crc_restamped"] += 1
+                logger.warning("session tier: extent crc mismatch re-stamped from "
+                               "disk (record off=%d n=%d, extent off=%d n=%d, "
+                               "crc %#x -> %#x; logical payload crc verified)",
+                               rec["off"], rec["n"], key[0], key[1], old, fresh)
+        return None
 
     def _write_journal_new(self, keep: list[dict], layout: dict,
                            new_extents: list) -> bytes:
@@ -3162,8 +3265,8 @@ never reserve past the ssd cap by up to a group volume. identity is the
         final line ("session tier final: <this>"); "" when off. Stable field order:
         l1, l2, offers=ok/rej, dedup, ext (extents_shared), probes=hit/miss, midsn
         (probe_midspan_only), snapfree (probe_snapfree_skip), restore=l1/l2, ok,
-        refused, evict, demote, discard, tomb, reuse=used/miss/bytes, dead, holes,
-        pf=begin/adopt/abandon, prej (prefetch_rej_cap)."""
+        refused, evict, demote, discard, tomb, reuse=used/miss/bytes, restamp, dead,
+        holes, pf=begin/adopt/abandon, prej (prefetch_rej_cap)."""
         snap = self.snapshot()
         if not snap:
             return ""
@@ -3180,6 +3283,7 @@ never reserve past the ssd cap by up to a group volume. identity is the
                         f"discard={snap['discards']}, tomb={snap['tombstones']}, "
                         f"reuse={snap['holes_reused']}/{snap['holes_reuse_miss']}/"
                         f"{snap['holes_reused_bytes'] / 2**20:.1f}MiB, "
+                        f"restamp={snap['ext_crc_restamped']}, "
                         f"dead={snap['dead_records']}rec/"
                         f"{snap['dead_record_bytes'] / 2**20:.1f}MiB, "
                         # display clamp: crash-window compact leaves dead spans above the truncated blob_eof
