@@ -1,4 +1,4 @@
-# TRAPS.md - 95 ловушек для native GGUF serving (T01-T95, рецепты D01-D11)
+# TRAPS.md - 105 ловушек для native GGUF serving (T01-T105, рецепты D01-D11)
 
 Каждая ловушка стоила реального отладочного времени в GLM-5.3-Flash-UD-Q3_K_XL
 кампании. Проверяй КАЖДУЮ перед закрытием соответствующей фазы.
@@ -666,6 +666,60 @@ kb/topics/decode-chain-microfusion.md; все четыре env-ручки вал
   encoder-семейств на носителях, с документированным pinned-reference
   фолбэком (значения закреплены за прошлой tensor-exact верификацией);
   варианты падают громко при загрузке. Эвиденс: e1de1df.
+
+## L2 hole-reuse + prod crc forensics сессия 2026-11-14 (scheduler/session_tier) T96-T105
+
+- **T96** (harness, watchdog) Сиротские watchdog-подшеллаки держат write-end
+  `| tee` -> раннер висит десятки минут ПОСЛЕ вердикта: `start_watchdog` должен
+  убивать предыдущий WATCH_PID перед спавном нового И перенаправлять
+  stdout/stderr watchdog в /dev/null (pipe не держится даже при SIGKILL).\  Эвиденс: arm_l2_hole run-1 (3 сироты, 133 мин lifetime, exact-pid kill ladder).
+- **T97** (methodology, A/B arms) Hit-rate рука вакуусна без hole-birthing
+  нагрузки: детерминированный same-shape fill пере-продлевает ТЕ ЖЕ сессии,
+  каждый re-offer точно матчится в существующий extent (holes_reused=0,
+  supersede=0, compact не стреляет) - измерять нечего. Отверстия рождаются
+  только под cap-давлением (overflow evictions): FU-рука с ssd cap 8 GiB
+  родила 3065.7 MiB holes и дала честный hit 0.067. Эвиденс:
+  REPORT-hw-l2-hole-reuse.md D vs REPORT-hw-l2-hole-reuse-fu.md.
+- **T98** (sim, modeling) Sim private-span модель невалидна для гибридных
+  snapshot-bearing моделей: жертвы освобождают ТОЛЬКО приватные спаны (shared
+  GDN snaps остаются живыми) -> HW opportunity set << sim (sim stream-d hit
+  0.917 vs HW 0.067 на hole-байтинг нагрузке); вдобавок same-identity re-offer
+  tomb-guard-заблокированы by design - каждый хит это cross-identity exact fit.
+  Эвиденс: REPORT-sim-hitrate.md vs REPORT-hw-l2-hole-reuse-fu.md D.
+- **T99** (journal, crc, legacy) Per-extent crc может быть legacy-отравлен и
+  невидим до первого compact: fast-path boot (clean shutdown marker) скипает
+  payload-crc pass, restore вообще не верифицирует ext crc - отравленное поле
+  живёт месяцами. Арбитр - record-level ЛОГИЧЕСКИЙ crc, пересчитанный с диска:
+  если он верифицирует байты, ext crc просто перештамповывается (restamp,
+  abort/drop конвертируется в warning-строку). Эвиденс: cb55c02 + GLM-5.3
+  cache-dir инцидент (REPORT-prod-crc-forensics.md).
+- **T100** (journal, crc, alg) Свежий crc-аккумулятор обязан считать АЛГОРИТМОМ
+  ИЗ ЖУРНАЛА (absent = zlib legacy), а не безусловно crc32c: иначе legacy zlib
+  записи всегда false-abортят compact, а "починенный" verify заурналит crc32c
+  под zlib alg-поле - новый яд. Эвиденс: cb55c02 (fails-before тест).
+- **T101** (forensics, logging) "payload crc mismatch moving record at <off>"
+  печатает SOURCE-offset extent'а в старом blob, НЕ первичный span записи -
+  при форензике не мисидентифицируй запись по этому оффсету. Эвиденс:
+  REPORT-prod-crc-forensics.md (55119660800 = ext[8] of record #267).
+- **T102** (logs, harness) Движок логирует `flushed N live segments` ТОЛЬКО при
+  count>0: сатурированный-replay boot легитимно флашит ноль (контент c3 уже
+  флашен, l2 не растёт) - харнесс должен принимать zero-flush shutdown при
+  полной чистой сигнатуре (final line + shutdown.marker), иначе ложный FATAL.
+  Эвиденс: arm_l2_hole run-1 c4, session_tier.py `if count:`.
+- **T103** (harness, shell) Анти-паттерн `TL=$(fill_once)`: захватывает ВЕСЬ
+  stdout хелпера (probe + replay tee) -> в --lines уходит многострочный блок и
+  argparse падает. Результаты хелпера пишутся в файл, caller читает файл.
+  Эвиденс: arm_l2_hole_total_lines.txt (фикс до run-3).
+- **T104** (tools, journal) tier-классификаторы (tier_journal_classify.py /
+  tier_state.py) падают на P13 tombstone записях ({"t": 1}, нет blen):
+  TypeError NoneType.__format__ / KeyError 'blen' - tombstones появляются
+  только под cap-давлением, первый эвикт-несущий журнал это первая встреча.
+  Правило: tombstones разбираются отдельно (count + TOMBSTONE lines).
+  Эвиденс: arm_l2_hole_fu attempt-1 journal.
+- **T105** (metrics, accounting) ov.admitted в overflow-строке считает
+  ЛОГИЧЕСКИЙ payload, при extent dedup физический append намного меньше
+  (c1: 27.2 GiB logical vs 8.4 GiB physical) - не читай как физические байты.
+  Эвиденс: REPORT-hw-l2-hole-reuse-fu.md B.
 
 ## Debugging
 
