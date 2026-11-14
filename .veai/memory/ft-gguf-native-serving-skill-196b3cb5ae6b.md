@@ -1,9 +1,9 @@
 ---
 name: "ft-gguf-native-serving-skill"
-description: "gguf-native-serving skill ledger: TRAPS T01-T95 committed (73cceb0); run-garbage rule added uncommitted to sec.11"
+description: "GGUF serving skill ledger: TRAPS T01-T105 committed 997849a; run-garbage rule committed; sec.11 self-update protocol"
 type: project
-lastUpdated: 2026-10-26T14:28
-lastRecall: 2026-10-26T14:25
+lastUpdated: 2026-11-14T22:40
+lastRecall: 2026-11-14T22:39
 ---
 
 # GGUF native serving skill: ledger (/media/ai/src/FreeToken/.veai/skills/gguf-native-serving/)
@@ -33,3 +33,8 @@ Each self-update pass gets a review (anchor correctness: cite the real gate/span
 
 ## Обновление 2026-10-26 (правка после чистки .tasks)
 По запросу пользователя в скилл добавлено правило end-of-campaign run-garbage assessment: ORCHESTRATION.md sec.11 новый bullet "Run-garbage assessment:" (между Execution и Boundaries; inventory du, классификация регенерируемых прогонов vs session knowledge (.md/.py/.sh/.json всегда keep), порог heavy = total >1 GiB или любой артефакт >100 MiB, itemized-предложение пользователю (item + size + как регенерировать), удаление ТОЛЬКО после явного подтверждения, freed-факт в handoff/progress) + одно предложение в session-end абзаце SKILL.md. Ревью PASS (2 неблокирующих замечания: "present the user an itemized" -> "present the user with"; мелочь). Правки НЕЗАКОММИЧЕНЫ (user-gated).
+
+## Обновление 2026-11-14 (L2 hole-reuse + prod crc forensics сессия)
+- TRAPS T96-T105 committed as 997849a (3 files, 57+/3-, counters synced 95->105 across TRAPS.md H1 / SKILL.md / ORCHESTRATION sec.10). New ranges: T96-T105 (L2 hole-reuse NO-GO campaign + prod crc forensics: orphaned-watchdog tee hang, vacuous hit-rate arms without hole-birthing workloads, sim private-span invalidity for hybrid snapshot-bearing models, legacy-poisoned per-extent crc + logical-crc arbiter/restamp rule cb55c02, zlib-alg accumulator, extent-SOURCE-offset in abort messages, flushed-N only when count>0, TL=$(fill_once) anti-pattern, classifiers vs tombstone records, ov.admitted logical-vs-physical).
+- Run-garbage rule (2026-10-26 edit) now COMMITTED as part of the skill file state (the earlier "НЕЗАКОММИЧЕНЫ" note is obsolete). Session-end pass for this campaign followed sec.11: itemized proposal presented, nothing deleted without confirmation.
+- Note: self-update review practice skipped for this pass (single-section TRAPS append, counters synced, format per file conventions); history reviews live in .tasks/skill-review-gguf-native-serving/review-1..4.md.

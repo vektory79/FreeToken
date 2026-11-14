@@ -91,7 +91,6 @@
 - [ft-p11-shutdown-wall-attribution](ft-p11-shutdown-wall-attribution-9294bfcf30d2.md) — P11 shutdown-wall premise refuted (BASE2), docs 2d57b78; P13 tombstone committed 12623ff, case P1-P13 closed
 - [ft-merge-round6-pending-handoff](ft-merge-round6-pending-handoff-fa9e5cd83af6.md) — Round-6 merge closed at d66f6e3, boot-smoke PASS; CUDA kernel-splice trap; port debt in round6-deferred-ports-execution
 - [round6-deferred-ports-execution](round6-deferred-ports-execution-0be57ce77a4a.md) — round6-deferred-ports: CPU+GPU port-debt closed; D3 verdict NO-GO; decode-gap and Fix-3 split into follow-up cases
-- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-1e3dc850d380.md) — gguf-native-serving skill ledger: TRAPS T01-T95 committed (73cceb0); run-garbage rule added uncommitted to sec.11
 - [ftw-sources-second-disk](ftw-sources-second-disk-30fe4b345dc7.md) — Missing FTW/HF sources: search /media/data/ai/models/; 3 legacy NVFP4 carriers reconverted to -FTW-new, GPU boot pending
 - [git-stale-index-parallel-sessions](git-stale-index-parallel-sessions-a1b7ac45a507.md) — Git stale index/parallel sessions: 6 case lessons; verify HEAD by branch+churn, not exact hash (amend-orphan case)
 - [ft-serve-gguf-glm5next-campaign](ft-serve-gguf-glm5next-campaign-fb6e465ca275.md) — GGUF glm5next Path A: offload chain to 78115df, hybrid verdict RECOMMENDED (16.67 tok/s), Round-5 invalidation lifted
@@ -105,3 +104,5 @@
 - [ft-merge-round8-pending-handoff](ft-merge-round8-pending-handoff-afc936cd3734.md) — Merge round 8 fe975da CLOSED + followups to e9bc7a0: CPU 1653, boot-smoke 22.97 tok/s, GPU 954/4 baseline
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-749f32036b6f.md) — GGUF glm5next hybrid re-acceptance: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; historical since round-5 f0eed55
 - [ft-merge-round9-closed](ft-merge-round9-closed-e7c3b6c4701b.md) — Round 9 merge b79457e CLOSED: boot-smoke PASS attempt 1 (READY 229s), GPU 969 passed/4 baseline; STOP GATE closed
+- [ft-l2-hole-reuse-nogo](ft-l2-hole-reuse-nogo-fdbbef4576e1.md) — L2 hole reuse NO-GO hit 0.067 (afa5efd); P13/compact bugfixes; prod crc forensics + restamp hardening cb55c02
+- [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-196b3cb5ae6b.md) — GGUF serving skill ledger: TRAPS T01-T105 committed 997849a; run-garbage rule committed; sec.11 self-update protocol

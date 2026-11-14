@@ -3,7 +3,7 @@ name: "ft-cachedrop-l2-restore-zero"
 description: "CacheDrop case: L2 restores + landed commits da7b84e/9281151/fd22003, HW control pending"
 type: project
 lastUpdated: 2026-10-28T01:56
-lastRecall: 2026-10-28T01:47
+lastRecall: 2026-11-14T12:50
 ---
 
 # CacheDrop case: session-tier L2 restores; self-evict + restamp + divergence log landed
