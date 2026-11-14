@@ -958,12 +958,12 @@ def test_stats_line_dead_is_record_honest_and_holes_separate(tmp_path):
     store.replay_journal()                # fast path, zero dead records
     line = store.stats_line()
     assert "dead=0rec/0.0MiB" in line
-    assert f"holes={garbage / 2**20:.1f}MiB" in line
+    assert f"unaccounted={garbage / 2**20:.1f}MiB" in line
     assert f"dead={garbage / 2**20:.1f}MiB" not in line   # the misleading figure is gone
     assert store.evict_store(1) == 1
     line = store.stats_line()
     assert "dead=1rec/" in line           # the discarded record is the real dead
-    assert f"holes={garbage / 2**20:.1f}MiB" in line      # holes unchanged by the discard
+    assert f"unaccounted={garbage / 2**20:.1f}MiB" in line  # unchanged by the discard
 
 
 def test_full_path_boot_counts_payload_dropped_records(tmp_path, monkeypatch):
@@ -1012,7 +1012,7 @@ def test_stats_line_holes_never_negative(tmp_path):
     assert boot.replay_journal() == 2     # dead records above eof: payload-crc drops
     assert boot._dead_bytes == 0 and boot._dead_record_bytes == 2 * 4096
     line = boot.stats_line()
-    assert "holes=0.0MiB" in line
+    assert "unaccounted=0.0MiB" in line
     assert "=-" not in line               # no negative gauge anywhere in the line
 
 
@@ -1258,7 +1258,7 @@ def test_compact_resets_p8_ledger_and_stats(tmp_path):
     assert snap["dead_records"] == 0 and snap["dead_record_bytes"] == 0
     assert snap["dead_bytes"] == 0 and snap["blob_eof"] == 2 * 4096
     line = store.stats_line()
-    assert "dead=0rec/0.0MiB" in line and "holes=0.0MiB" in line
+    assert "dead=0rec/0.0MiB" in line and "unaccounted=0.0MiB" in line
 
 
 def test_graceful_stop_after_shrink_marker_fast_path(tmp_path, monkeypatch, tier_log_capture):
@@ -4291,17 +4291,45 @@ def test_l2_hole_flush_group_seam(tmp_path):
 
 
 def test_l2_hole_metrics_preseeded_and_in_stats_line(tmp_path):
-    """Extension: holes_reused / holes_reuse_miss / holes_reused_bytes are pre-seeded
-    (offers_dedup metric pattern) and land in the stats_line fragment."""
+    """Extension: holes_reused / holes_reuse_miss / holes_absent / holes_reused_bytes
+    are pre-seeded (offers_dedup metric pattern) and land in the stats_line fragment.
+    Fails-before (metrics split): an EMPTY pool was counted as holes_reuse_miss, so
+    the reuse hit rate conflated "no holes existed" with "holes existed but none
+    fit"; the miss counter now only covers reserves while the pool was NON-empty,
+    an empty pool bumps holes_absent, a tomb-guard skip of an available same-size
+    hole counts as a miss, the ledger gauge renders as unaccounted= (was holes=)
+    and the live pool renders as holes_live=count/bytes."""
     store = SessionTierStore(_cfg(ram=0, ssd=1 << 20, d=str(tmp_path / "t")))
     snap = store.snapshot()
     assert snap["holes_reused"] == 0 and snap["holes_reuse_miss"] == 0
-    assert snap["holes_reused_bytes"] == 0
-    assert "reuse=0/0/0.0MiB" in store.stats_line()
+    assert snap["holes_absent"] == 0 and snap["holes_reused_bytes"] == 0
+    line = store.stats_line()
+    assert "reuse=0/0/0.0MiB" in line and "absent=0," in line
+    assert "holes_live=0/0.0MiB" in line
+    assert "unaccounted=0.0MiB" in line and "holes=" not in line
+    # (a) EMPTY pool: holes_absent moves, holes_reuse_miss does NOT
     keys, pages = _chain([(9, 0), (9, 1)])
     assert store.offer(b"path", 2, pages, _snap("x"))
-    assert store.snapshot()["holes_reuse_miss"] == 1   # no hole of that size yet
-    assert "reuse=0/1/0.0MiB" in store.stats_line()
+    snap = store.snapshot()
+    assert snap["holes_absent"] == 1 and snap["holes_reuse_miss"] == 0
+    assert "absent=1," in store.stats_line()
+    # (b) pool non-empty, no exact fit: a true reuse-miss, absence stays put
+    store._discard(next(iter(store._segments.values())))
+    assert store._holes == {4096: {0}}
+    off, padded, reused = store._reserve_blob_span(4097)  # pads to 8192: no fit
+    assert not reused and padded == 8192
+    snap = store.snapshot()
+    assert snap["holes_reuse_miss"] == 1 and snap["holes_absent"] == 1
+    assert store._holes == {4096: {0}}                    # the hole survived
+    # (c) tomb-guard skip of an AVAILABLE same-size hole: a hole WAS there, reuse
+    # was only blocked by the guard - counts as a miss, not an absence
+    store._counters["holes_reuse_miss"] = 0
+    off, padded, reused = store._reserve_blob_span(512, identity=(b"path", 0, 512))
+    assert not reused and padded == 4096
+    snap = store.snapshot()
+    assert snap["holes_reuse_miss"] == 1 and snap["holes_absent"] == 1
+    # (d) holes_live renders the pooled span count/bytes born by the discard
+    assert "holes_live=1/0.0MiB" in store.stats_line()
 
 
 def test_l2_hole_tombstone_guard_shared_extent_victim(tmp_path):

@@ -512,6 +512,7 @@ class SessionTierStore:
                                           prefetch_rej_cap=0, prefetch_probe_hit=0,
                                           prefetch_probe_miss=0,
                                           holes_reused=0, holes_reuse_miss=0,
+                                          holes_absent=0,
                                           holes_reused_bytes=0, ext_crc_restamped=0)
         # Lock exists even when inert: the offer() wrapper takes it around the rejection
         # counter before any early return.
@@ -1098,7 +1099,17 @@ never reserve past the ssd cap by up to a group volume. identity is the
                         # the dead-ledger decrements land at journal time
                         return pick, padded, True
         if padded:
-            self._counters["holes_reuse_miss"] += 1
+            # reuse-miss split: the miss counter only covers reserves while the pool was
+            # NON-empty (size mismatch, or a same-size hole existed but the tomb guard
+            # blocked reuse - a hole WAS available, so this is a true reuse failure).
+            # An empty pool counts as holes_absent instead: reuse= hit-rate reading must
+            # not conflate "no holes existed" with "holes existed but none fit". Advisory
+            # read without _account_lock: a concurrent birth/drain in this window only
+            # shifts the count between the two buckets.
+            if self._holes:
+                self._counters["holes_reuse_miss"] += 1
+            else:
+                self._counters["holes_absent"] += 1
         off = self._blob_eof
         self._blob_eof += padded
         return off, padded, False
@@ -2548,7 +2559,8 @@ never reserve past the ssd cap by up to a group volume. identity is the
         check point. Returns dead records dropped (0 = no-op). The _dead_bytes watermark
         (physical holes: discards, previous generations) must NOT gate this - with zero
         dead records compact() is a no-op and every ok-offer would pay a full journal
-        parse for nothing (P5-iron finding 1). The holes= stat (watermark-minus-live)
+        parse for nothing (P5-iron finding 1). The unaccounted= stat
+        (watermark-minus-live)
         resets to 0 after a compact, which since P9 physically reclaims them in the
         same pass. P13: tombstoned victims count into _dead_record_bytes (the replay
         seed and every discard), so journal growth from tombstones is bounded by this
@@ -3265,11 +3277,22 @@ never reserve past the ssd cap by up to a group volume. identity is the
         final line ("session tier final: <this>"); "" when off. Stable field order:
         l1, l2, offers=ok/rej, dedup, ext (extents_shared), probes=hit/miss, midsn
         (probe_midspan_only), snapfree (probe_snapfree_skip), restore=l1/l2, ok,
-        refused, evict, demote, discard, tomb, reuse=used/miss/bytes, restamp, dead,
-        holes, pf=begin/adopt/abandon, prej (prefetch_rej_cap)."""
+        refused, evict, demote, discard, tomb, reuse=used/miss/bytes, absent
+        (holes_absent: reserves with an EMPTY hole pool), restamp, dead,
+        unaccounted (max(0, dead_bytes - dead_record_bytes): the boot-seeded ledger
+        gauge of blob regions no record accounts for - NOT the live pool),
+        holes_live=count/bytes (the CURRENT _holes pool, rendered from it at stats
+        time), pf=begin/adopt/abandon, prej (prefetch_rej_cap)."""
         snap = self.snapshot()
         if not snap:
             return ""
+        # display clamp: crash-window compact leaves dead spans above the truncated blob_eof
+        unaccounted = max(0, snap["dead_bytes"] - snap["dead_record_bytes"])
+        # live _holes pool gauge, rendered from the registry at stats time (the pool is
+        # small; _account_lock keeps a concurrent pop/birth out of the iteration)
+        with self._account_lock:
+            live_spans = sum(len(v) for v in self._holes.values())
+            live_bytes = sum(size * len(v) for size, v in self._holes.items())
         return (f"session-tier: l1={snap['l1_used'] / 2**20:.1f}MiB, "
                 f"l2={snap['ssd_used'] / 2**20:.1f}MiB, "
                 f"offers={snap['offers_ok']}/{snap['offers_rej']}, "
@@ -3283,11 +3306,12 @@ never reserve past the ssd cap by up to a group volume. identity is the
                         f"discard={snap['discards']}, tomb={snap['tombstones']}, "
                         f"reuse={snap['holes_reused']}/{snap['holes_reuse_miss']}/"
                         f"{snap['holes_reused_bytes'] / 2**20:.1f}MiB, "
+                        f"absent={snap['holes_absent']}, "
                         f"restamp={snap['ext_crc_restamped']}, "
                         f"dead={snap['dead_records']}rec/"
                         f"{snap['dead_record_bytes'] / 2**20:.1f}MiB, "
-                        # display clamp: crash-window compact leaves dead spans above the truncated blob_eof
-                        f"holes={max(0, snap['dead_bytes'] - snap['dead_record_bytes']) / 2**20:.1f}MiB, "
+                        f"unaccounted={unaccounted / 2**20:.1f}MiB, "
+                        f"holes_live={live_spans}/{live_bytes / 2**20:.1f}MiB, "
                         f"pf={snap['prefetch_adopt']}/{snap['prefetch_begin']}/"
                         f"{snap['prefetch_abandon']}, "
                         f"prej={snap['prefetch_rej_cap']}")
