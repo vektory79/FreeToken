@@ -3,8 +3,9 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field, replace, FrozenInstanceError
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, List, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, List, Mapping, Sequence
 
+import math
 import torch
 from freetoken.distributed import DistributedInfo
 from freetoken.layers.quantization import set_quant_config
@@ -17,6 +18,55 @@ if TYPE_CHECKING:
     from freetoken.models.config import SlotStateSpec
 
 logger = init_logger(__name__)
+
+
+def snap_route_affinity(value: float, ladder: Sequence[float]) -> float:
+    """The ladder value a request's affinity snaps to: nearest, ties -> smaller."""
+    return min(ladder, key=lambda a: (abs(a - value), a))
+
+
+def batch_route_affinity(
+    req_values: Iterable[float | None], *, ladder: Sequence[float] | None, default: float
+) -> tuple[float, bool]:
+    """The single route affinity a decode batch serves at, and whether requests disagreed.
+
+    The one snap point: a request value None resolves to the server default first, then
+    snaps to the nearest ladder value (ties -> smaller). A decode batch can only serve
+    one affinity, so a disagreement falls back to 0.0 (the caller warns once). Without
+    a ladder nothing snaps and the batch serves the server default - exactly today's
+    behavior.
+    """
+    if not ladder:
+        return default, False
+    snapped = {
+        snap_route_affinity(default if value is None else value, ladder) for value in req_values
+    }
+    if len(snapped) == 1:
+        return snapped.pop(), False
+    return 0.0, True
+
+
+def resolve_route_affinity_ladder(
+    ladder: Sequence[float] | None, *, moe_strategy: str, has_route_affinity_setter: bool
+) -> tuple[tuple[float, ...], str | None]:
+    """The ladder that actually has captured decode graphs, and why it was dropped.
+
+    The one resolution point: GraphRunner captures a decode graph per (bs, affinity),
+    so a value outside the ladder means a permanent eager decode, and DecodeManager
+    snaps the batch onto the same result. Both sides call this instead of gating the
+    raw flag themselves.
+    """
+    ladder = tuple(ladder or ())
+    if not ladder:
+        return (), None
+    if moe_strategy not in ("offload", "hybrid"):
+        return (), (
+            f"route affinity ladder applies to offload/hybrid MoE backends only "
+            f"(got {moe_strategy!r}); the ladder is ignored"
+        )
+    if not has_route_affinity_setter:
+        return (), "this model has no set_route_affinity; ignoring the route affinity ladder"
+    return ladder, None
 
 
 @dataclass(frozen=True)
@@ -67,6 +117,10 @@ class EngineConfig:
     # slot cache on the router's SELECTION score (mix weights stay unbiased). 0.0 = off;
     # effective only for sigmoid routers on the offload/hybrid backends.
     route_affinity: float = 0.0
+    # --route-affinity-ladder: affinity values with captured decode graphs, for
+    # per-request route_affinity. Resolved in __post_init__ to the sorted, deduplicated
+    # flag values plus the server default; empty = no ladder (the default everywhere).
+    route_affinity_ladder: tuple[float, ...] = ()
     # CPU decode expert threads (--moe-strategy cpu/hybrid, or offload with
     # --moe-cpu-layers): 0 = auto (one per physical core, pinned). One executor
     # pool serves every expert format, so the budget is global, not per partition.
@@ -148,6 +202,18 @@ class EngineConfig:
             raise ValueError(f"moe_locked_max_fetch must be at least 1, got {self.moe_locked_max_fetch}")
         if self.route_affinity < 0:
             raise ValueError(f"route_affinity must be >= 0, got {self.route_affinity}")
+        if self.route_affinity_ladder:
+            if any(not math.isfinite(v) or v < 0 for v in self.route_affinity_ladder):
+                raise ValueError(
+                    f"route_affinity_ladder must be finite values >= 0, got {self.route_affinity_ladder}"
+                )
+            # ladder mode: the server default stays capturable; sorted, deduplicated so
+            # the graph capture order is deterministic
+            object.__setattr__(
+                self,
+                "route_affinity_ladder",
+                tuple(sorted(set(self.route_affinity_ladder) | {self.route_affinity})),
+            )
         if self.moe_backend is None:
             return
         if self.moe_strategy != "auto":

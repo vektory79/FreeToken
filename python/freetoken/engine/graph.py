@@ -139,6 +139,9 @@ class GraphRunner:
         pool: Any = None,
         out_dtype: torch.dtype | None = None,
         linear_backend: LinearAttnBackend | None = None,
+        affinity_values: tuple[float, ...] | None = None,
+        affinity_hook: Callable[[float], None] | None = None,
+        affinity_default: float = 0.0,
     ) -> None:
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
@@ -171,6 +174,13 @@ class GraphRunner:
         self.batch_hook = batch_hook
         self.graph_pool = pool
         self.out_dtype = out_dtype
+        # one graph per (padded bs, affinity). The engine always resolves a non-empty
+        # tuple: the ladder, or the one value its batches replay at (0.0 for the verify
+        # family, the server default otherwise).
+        self.affinity_values: tuple[float, ...] = tuple(affinity_values) if affinity_values else (0.0,)
+        self.affinity_hook = affinity_hook
+        # the server default the eager prefill re-bakes (see apply_affinity)
+        self.affinity_default = affinity_default
         self._out: List[torch.Tensor] | None = None
         self._out_is_tuple = False
         self._out_rows: Dict[int, tuple[int, ...]] = {}
@@ -198,7 +208,7 @@ class GraphRunner:
         # reads it as an indeterminate phase and animates the bar. Must precede the
         # graphs-disabled early return so that config gets the phase too.
         emit_progress("Capturing CUDA graphs / warming up", 0, 0)
-        self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
+        self.graph_map: Dict[tuple[int, float], torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
 
@@ -230,44 +240,69 @@ class GraphRunner:
             free_memory = get_free_memory(self.device)
             pbar.desc = f"Capturing graphs: bs = {bs:<3} | avail_mem = {mem_GB(free_memory)}"
             pbar.refresh()
-            graph = torch.cuda.CUDAGraph()
-            batch = Batch(reqs=[self.dummy_req] * bs, phase=self.phase, rows_per_req=self.rows_per_req)
-            batch.padded_reqs = batch.reqs
-            if self.batch_hook is not None:
-                self.batch_hook(batch)
-            self.attn_backend.prepare_for_capture(batch)
-            self.buffer.set_batch(batch)
-            if self.linear_backend is not None:
-                self.linear_backend.prepare_for_capture(batch)
-            with get_global_ctx().forward_batch(batch, **self.ctx_override):
-                self._store_output(bs, self.forward())
-                # Keep the offload cache warmed for capture. Resetting here forces
-                # CUDA graph capture to replay cold-cache expert copies.
-                with torch.cuda.graph(graph, pool=pool, stream=self.stream):
+            # one graph per affinity value: the hook bakes the value into the blocks and
+            # the capture, and the offload cache resets like at the bs boundary
+            for affinity in self.affinity_values:
+                if self.affinity_hook is not None:
+                    self.affinity_hook(affinity)
+                graph = torch.cuda.CUDAGraph()
+                batch = Batch(reqs=[self.dummy_req] * bs, phase=self.phase, rows_per_req=self.rows_per_req)
+                batch.padded_reqs = batch.reqs
+                if self.batch_hook is not None:
+                    self.batch_hook(batch)
+                self.attn_backend.prepare_for_capture(batch)
+                self.buffer.set_batch(batch)
+                if self.linear_backend is not None:
+                    self.linear_backend.prepare_for_capture(batch)
+                with get_global_ctx().forward_batch(batch, **self.ctx_override):
                     self._store_output(bs, self.forward())
-                _upload_graph(graph, self.stream)
-                self._reset_moe_offload_cache()
-            if pool is None:
-                pool = graph.pool()  # reuse cuda graph handle to reduce memory
-            self.graph_map[bs] = graph
+                    # Keep the offload cache warmed for capture. Resetting here forces
+                    # CUDA graph capture to replay cold-cache expert copies.
+                    with torch.cuda.graph(graph, pool=pool, stream=self.stream):
+                        self._store_output(bs, self.forward())
+                    _upload_graph(graph, self.stream)
+                    self._reset_moe_offload_cache()
+                if pool is None:
+                    pool = graph.pool()  # reuse cuda graph handle to reduce memory
+                self.graph_map[(bs, affinity)] = graph
         self.graph_pool = pool
 
         self._reset_moe_offload_cache()
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
 
+    def _padded_bs(self, size: int) -> int | None:
+        """First captured batch size that fits ``size``; None when even the largest doesn't."""
+        return next((bs for bs in self.graph_bs_list if bs >= size), None)
+
     def can_use_cuda_graph(self, batch: Batch) -> bool:
-        return (
+        if not (
             batch.phase == self.phase
             and batch.rows_per_req == self.rows_per_req
             and batch.size <= self.max_graph_bs
-        )
+        ):
+            return False
+        # the (padded, affinity) key must have been captured too: an uncaptured value
+        # (e.g. the 0.0 mismatch fallback outside the ladder) falls to the eager path
+        padded = self._padded_bs(batch.size)
+        return padded is not None and (padded, batch.route_affinity) in self.graph_map
+
+    def apply_affinity(self, batch: Batch) -> None:
+        """Eager-forward hook: bake this batch's affinity into the blocks. Decode serves
+        the batch's snapped value; a prefill batch re-bakes the server default, undoing
+        whatever the previous eager decode left on the blocks."""
+        if self.affinity_hook is None:
+            return
+        if batch.phase == "decode":
+            self.affinity_hook(batch.route_affinity)
+        elif batch.phase == "prefill":
+            self.affinity_hook(self.affinity_default)
 
     def replay(self, batch: Batch) -> Any:
         assert self.can_use_cuda_graph(batch) and self._out is not None
         self.buffer.copy_from(batch)
         padded = batch.padded_size
-        g = self.graph_map[padded]
+        g = self.graph_map[(padded, batch.route_affinity)]
         self.attn_backend.prepare_for_replay(batch)
         if self.linear_backend is not None:
             self.linear_backend.prepare_for_replay(batch)
@@ -279,8 +314,8 @@ class GraphRunner:
 
     def pad_batch(self, batch: Batch) -> None:
         padded_size = (  # choose the first available batch size
-            next(bs for bs in self.graph_bs_list if bs >= batch.size)
-            if self.can_use_cuda_graph(batch)
+            padded
+            if (padded := self._padded_bs(batch.size)) is not None and self.can_use_cuda_graph(batch)
             else batch.size
         )
         batch.padded_reqs = batch.reqs + [self.dummy_req] * (padded_size - batch.size)

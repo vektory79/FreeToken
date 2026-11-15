@@ -30,7 +30,7 @@ from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cach
 from freetoken.moe.pool_policy import group_layers, make_pools, pool_of_layer, resolve_profile, split_slots
 from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
-from .config import EngineConfig
+from .config import EngineConfig, resolve_route_affinity_ladder
 from .graph import GraphRunner, _determine_cuda_graph_bs, get_free_memory
 from .sample import BatchSamplingArgs, Sampler
 from .spec_protocol import SpecRuntime
@@ -1429,6 +1429,17 @@ class Engine:
         config = self.config
         rows = config.decode_rows_per_req
         verify = {}
+        # per-request affinity: the ladder captures a graph per value into the plain decode
+        # family only. A verify step's rows mix drafts, so its graphs always replay at 0.0
+        # and never get the hook (also flagged in the spec runner, which has its own maps).
+        # The scheduler resolves the same effective ladder for its snap (one point).
+        ladder, dropped = resolve_route_affinity_ladder(
+            config.route_affinity_ladder,
+            moe_strategy=config.moe_strategy,
+            has_route_affinity_setter=hasattr(self.model, "set_route_affinity"),
+        )
+        if dropped:
+            logger.warning_rank0(dropped)
         if rows > 1:
             # every decode step is a verify; the verify scratch has max_running_req rows
             cuda_graph_bs = [
@@ -1436,6 +1447,19 @@ class Engine:
                 if bs <= config.max_running_req
             ]
             verify = dict(rows_per_req=rows, phase="verify", batch_hook=self._prepare_verify_batch)
+            affinity_values, affinity_hook = (0.0,), None
+            if config.route_affinity_ladder:
+                logger.warning_rank0(
+                    "speculative decoding: per-request route affinity does not apply to verify "
+                    "steps; the ladder is ignored"
+                )
+        elif ladder:
+            affinity_values, affinity_hook = ladder, self._set_route_affinity
+        else:
+            # single-value mode: the batch value every replay (or can_use) looks up is the
+            # server default, so the graphs capture keyed on exactly that
+            affinity_values = (config.route_affinity,)
+            affinity_hook = None
         runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -1450,11 +1474,25 @@ class Engine:
             mrope=config.model_config.model_is_mrope,
             out_dtype=torch.float32,
             linear_backend=self.linear_backend,
+            affinity_values=affinity_values,
+            affinity_hook=affinity_hook,
+            affinity_default=config.route_affinity,
             **verify,
         )
+        if affinity_hook is not None:
+            # capture ends on the last ladder value; prefill guards itself in
+            # apply_affinity (the default re-bake), so this restore only keeps the
+            # boot state (warmup prefill, the first batches) at the default
+            self._set_route_affinity(config.route_affinity)
         if self.spec is not None:
             self.spec.capture_graphs(runner.graph_bs_list, runner.graph_pool)
         return runner
+
+    def _set_route_affinity(self, value: float) -> None:
+        """The capture/eager hook: the model may not have the setter (other families)."""
+        setter = getattr(self.model, "set_route_affinity", None)
+        if setter is not None:
+            setter(value)
 
     def _prepare_verify_batch(self, batch: Batch) -> None:
         batch.features = self.spec.feature_sink(batch)
@@ -1477,6 +1515,10 @@ class Engine:
     def forward_logits(self, batch: Batch) -> torch.Tensor:
         """The batch's logits from its captured graph, or eagerly when none fits."""
         use_graph = self.graph_runner.can_use_cuda_graph(batch)
+        if not use_graph:
+            # Eager decode bakes the batch's snapped affinity into the blocks; prefill and
+            # verify batches stay at the server default (affinity only affects decode).
+            self.graph_runner.apply_affinity(batch)
         with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
             logits = self.graph_runner.replay(batch) if use_graph else self.model.forward()
         if self.cpu_moe_executor is not None:
@@ -2476,4 +2518,6 @@ def _adjust_config(config: EngineConfig):
         resolved.insert(0, f"moe_strategy={config.moe_strategy!r}")
         if config.route_affinity:
             resolved.append(f"route_affinity={config.route_affinity!r}")
+        if len(config.route_affinity_ladder) > 1:
+            resolved.append(f"route_affinity_ladder={list(config.route_affinity_ladder)}")
     logger.info_rank0(f"Resolved config: {', '.join(resolved)}")

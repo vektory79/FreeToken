@@ -15,6 +15,8 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _PY = os.path.join(_ROOT, "python")
 if _PY not in sys.path:
@@ -70,6 +72,19 @@ def test_convert_defaults_max_output_tokens_when_omitted():
     req2 = ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi", "max_output_tokens": 123})
     assert RP.convert_responses_to_genspec(req2, {}).sampling_params.max_tokens == 123
     assert RP.convert_responses_to_genspec(req, {}, default_max_tokens=2048).sampling_params.max_tokens == 2048
+
+
+def test_convert_request_passes_route_affinity_raw_and_validates():
+    """Codex-side knob: the raw value reaches the engine, which snaps it."""
+    req = ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi", "route_affinity": 0.3})
+    assert RP.convert_responses_to_genspec(req, {}).sampling_params.route_affinity == 0.3
+
+    from pydantic import ValidationError
+
+    for bad in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi", "route_affinity": bad})
+    ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi", "route_affinity": 0.0})
 
 
 def test_convert_list_input_with_tool_roundtrip_and_tools():

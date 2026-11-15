@@ -26,6 +26,9 @@ class SamplingParams:
     stop_strs: list[str] = field(default_factory=list)
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    # Maya-style per-request route affinity, carried raw from the request (None = the
+    # server's --route-affinity). Not sampling: the decode batch snaps it to the ladder.
+    route_affinity: float | None = None
 
     @property
     def is_greedy(self) -> bool:
@@ -89,6 +92,9 @@ class Req:
     mrope_delta: int = 0
     # The whole prompt's length; 0 = this request's input_ids (a ChunkedReq's end at its chunk).
     prompt_len: int = 0
+    # Raw per-request route affinity from the request (None = the server default). The
+    # scheduler snaps it onto the decode batch's single value at batch build; prefill ignores it.
+    route_affinity: float | None = None
 
     # --- hybrid-radix (GDN linear-state) per-request slots; None for non-hybrid models or
     # until allocated from LinearStatePool. Set by the scheduler (P2). ---
@@ -175,6 +181,9 @@ class Batch:
     phase: Literal["prefill", "decode", "verify"]
     # query rows per request: 1 on decode, more on verify, None on prefill (ragged)
     rows_per_req: int | None = None
+    # The affinity this decode batch serves at: the ladder value every request snapped
+    # to, or 0.0 when they disagreed (or for prefill/verify, which are inert to it).
+    route_affinity: float = 0.0
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)

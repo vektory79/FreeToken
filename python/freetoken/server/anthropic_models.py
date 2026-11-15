@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class AnthropicError(BaseModel):
@@ -94,6 +94,8 @@ class AnthropicMessagesRequest(BaseModel):
     stream: bool | None = False
     system: str | list[AnthropicContentBlock] | None = None
     temperature: float | None = None
+    # Maya-style per-request route affinity; passed raw, the engine snaps it. >= 0, finite.
+    route_affinity: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
     # Native extended-thinking toggle: {"type": "enabled"|"disabled", "budget_tokens": N}.
     # budget_tokens is accepted but not enforced (stateless subset).
     thinking: dict[str, Any] | None = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import List, Tuple
@@ -209,6 +210,15 @@ def parse_args(
         if value == "equal" or (value.startswith("profile:") and len(value) > len("profile:")):
             return value
         raise argparse.ArgumentTypeError("must be equal or profile:<path>")
+
+    def _parse_affinity_ladder(value: str) -> tuple[float, ...]:
+        try:
+            ladder = tuple(float(part) for part in value.split(","))
+        except ValueError:
+            raise argparse.ArgumentTypeError("must be comma-separated floats, e.g. 0.05,0.3") from None
+        if any(not math.isfinite(v) or v < 0 for v in ladder):
+            raise argparse.ArgumentTypeError("every value must be finite and >= 0")
+        return ladder
 
     def _positive_int(value: str) -> int:
         try:
@@ -925,6 +935,20 @@ def parse_args(
             "this bonus on the router's SELECTION score, so top-k shifts toward experts that "
             "need no PCIe/CPU fetch; the mix weights stay the unbiased scores of whoever got "
             "selected. Sigmoid routers on offload/hybrid only; 0.0 (default) = off."
+        ),
+    )
+
+    parser.add_argument(
+        "--route-affinity-ladder",
+        type=_parse_affinity_ladder,
+        default=ServerArgs.route_affinity_ladder,
+        help=(
+            "Comma-separated route-affinity values to capture a decode CUDA graph for, "
+            "enabling per-request affinity: a request's `route_affinity` field snaps to the "
+            "nearest ladder value (ties: smaller), and a decode batch whose requests snap "
+            "to different values decodes at 0.0 (one warning). Empty (default) = the server "
+            "--route-affinity value only, today's behavior. Boot cost scales with the "
+            "ladder width (one capture per batch size per value)."
         ),
     )
 

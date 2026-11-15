@@ -86,6 +86,7 @@ def chat_request_to_genspec(
             default_max_tokens=default_max_tokens,
             presence_penalty=req.presence_penalty,
             frequency_penalty=req.frequency_penalty,
+            route_affinity=req.route_affinity,
         ),
         chat_template_kwargs=ctk,
         template_tools=_tools_for_template(req),
@@ -632,6 +633,7 @@ def _resolve_sampling(
         default_max_tokens=default_max_tokens,
         presence_penalty=req.presence_penalty,
         frequency_penalty=req.frequency_penalty,
+        route_affinity=req.route_affinity,
     )
 
 

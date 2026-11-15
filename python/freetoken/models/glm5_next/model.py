@@ -180,6 +180,15 @@ class Glm5NextForCausalLM(BaseLLMModel):
                 layer.self_attn.prepare_for_runtime()
         torch.cuda.empty_cache()
 
+    def set_route_affinity(self, value: float) -> None:
+        """Re-point every sparse block's resident-expert bonus at ``value`` (per-request
+        route affinity). Blocks read the attribute on every eager forward, so a call
+        before a CUDA-graph capture bakes ``value`` in, and before an eager decode it
+        applies for that step; mix weights stay unbiased in both cases."""
+        for layer in self.model.layers.op_list:
+            if isinstance(layer.mlp, Glm5NextSparseBlock):
+                layer.mlp.route_affinity = value
+
     def forward(self) -> torch.Tensor:
         output = self.model.forward(get_global_ctx().batch.input_ids)
         return self.lm_head.forward(output)

@@ -55,7 +55,7 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
     ResponseUsage,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .generation import (
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -97,6 +97,8 @@ class ResponsesRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    # Maya-style per-request route affinity; passed raw, the engine snaps it. >= 0, finite.
+    route_affinity: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
     stream: bool = False
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any | None = None
@@ -250,6 +252,7 @@ def convert_responses_to_genspec(
             max_tokens=req.max_output_tokens or default_max_tokens,
             ignore_eos=False,
             model_sampling=model_sampling,
+            route_affinity=req.route_affinity,
         ),
         chat_template_kwargs=ctk,
         template_tools=template_tools,

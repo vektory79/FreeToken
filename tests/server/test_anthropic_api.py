@@ -96,6 +96,20 @@ def test_convert_request_system_text_tools():
     assert spec.template_tools[0]["function"]["parameters"]["type"] == "object"
 
 
+def test_convert_request_passes_route_affinity_raw_and_validates():
+    base = {"model": "claude-x", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}
+    req = AnthropicMessagesRequest.model_validate({**base, "route_affinity": 0.3})
+    spec = A.convert_anthropic_to_genspec(req, {})
+    assert spec.sampling_params.route_affinity == 0.3
+
+    from pydantic import ValidationError
+
+    for bad in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest.model_validate({**base, "route_affinity": bad})
+    AnthropicMessagesRequest.model_validate({**base, "route_affinity": 0.0})
+
+
 def test_convert_request_tool_use_and_result_roundtrip():
     req = AnthropicMessagesRequest.model_validate(
         {

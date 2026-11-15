@@ -125,6 +125,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does, [performa
 | `--moe-locked-max-fetch` | 8 | Most experts a locked layer fetches per step; sizes the staging (that many rows of the widest expert, per bank) |
 | `--moe-collect-stats` | off | Log decode MoE stats with each decode log line: hit rate, and per layer-step the misses, experts fetched and experts computed on CPU, for pinned, locked and CPU-only layers |
 | `--route-affinity` | 0.0 | Maya-style route affinity: experts already resident in the MoE slot cache get this bonus on the router's selection score, so top-k shifts toward experts that need no PCIe/CPU fetch; the mix weights stay the unbiased scores of whoever got selected. Sigmoid routers on offload/hybrid only; it changes which experts are picked, so answers shift too |
+| `--route-affinity-ladder` | server value only | Comma-separated affinity values that each get a captured decode CUDA graph, enabling per-request affinity: a request's `route_affinity` field snaps to the nearest ladder value (ties: smaller); a decode batch whose requests snap to different values decodes at 0.0 with one warning. Boot cost scales with the ladder width (one capture per batch size per value) |
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
 

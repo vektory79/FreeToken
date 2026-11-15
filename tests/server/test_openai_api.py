@@ -109,6 +109,24 @@ def chat_request(**kwargs) -> ChatCompletionRequest:
     return ChatCompletionRequest(**payload)
 
 
+def test_chat_route_affinity_passes_raw_and_validates():
+    """The server forwards the raw value; the engine snaps it (engine-side rule)."""
+    spec = chat_request_to_genspec(chat_request(route_affinity=0.3), {})
+    assert spec.sampling_params.route_affinity == 0.3
+    spec = chat_request_to_genspec(chat_request(route_affinity=None), {})
+    assert spec.sampling_params.route_affinity is None
+
+    from pydantic import ValidationError
+
+    messages = [{"role": "user", "content": "hi"}]
+    for bad in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(model="m", messages=messages, route_affinity=bad)
+        with pytest.raises(ValidationError):
+            CompletionRequest(model="m", prompt="hi", route_affinity=bad)
+    ChatCompletionRequest(model="m", messages=messages, route_affinity=0.0)
+
+
 def parse_sse(chunks: list[bytes]) -> list[dict | str]:
     events: list[dict | str] = []
     for chunk in chunks:

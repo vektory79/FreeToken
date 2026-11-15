@@ -103,7 +103,20 @@ class Scheduler(SchedulerIOMixin):
             radix_lookahead=self.spec is not None and self.spec.radix_lookahead,
         )
         token_headroom = config.decode_rows_per_req - 1
-        self.decode_manager = DecodeManager(config.page_size, token_headroom=token_headroom)
+        # the same effective ladder the graphs captured (one resolution point, engine-side
+        # gate folded in): a raw flag would snap batches onto values no graph serves
+        from freetoken.engine.config import resolve_route_affinity_ladder
+
+        self.decode_manager = DecodeManager(
+            config.page_size,
+            token_headroom=token_headroom,
+            route_affinity_ladder=resolve_route_affinity_ladder(
+                config.route_affinity_ladder,
+                moe_strategy=config.moe_strategy,
+                has_route_affinity_setter=hasattr(self.engine.model, "set_route_affinity"),
+            )[0],
+            route_affinity_default=config.route_affinity,
+        )
         self._bidirectional_mm = any(getattr(g, "bidirectional_mm_blocks", False) for g in config.model_config.attention_groups)
         self.prefill_manager = PrefillManager(
             self.cache_manager,
@@ -977,6 +990,8 @@ class Scheduler(SchedulerIOMixin):
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
         if self.spec is not None and batch.is_decode:
             batch.phase, batch.rows_per_req = "verify", self.config.decode_rows_per_req
+            # the verify family captures keyed on 0.0: affinity only affects plain decode
+            batch.route_affinity = 0.0
         self.engine.graph_runner.pad_batch(batch)
         self._forward_iter += 1
         if not batch.is_prefill:

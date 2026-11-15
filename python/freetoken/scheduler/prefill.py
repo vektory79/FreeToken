@@ -228,6 +228,7 @@ class PrefillAdder:
         req.mm_items = pending_req.mm_items
         req.mrope_positions_full = pending_req.mrope_positions_full
         req.mrope_delta = pending_req.mrope_delta
+        req.route_affinity = pending_req.sampling_params.route_affinity
         # one ReqStats across all chunk Reqs of the request: the stamps the scheduler
         # takes on the final chunk's Req must survive the intermediate ones
         req.stats = pending_req.stats

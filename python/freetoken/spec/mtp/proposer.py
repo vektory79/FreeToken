@@ -327,7 +327,9 @@ class MTPProposer(Proposer):
         self.picked_rows[:bs] = torch.arange(bs, device=self.device) * k1 + emitted
         self.extend_backend.prepare_metadata(draft)
         graphs = self.extend_graphs
-        if graphs is not None and graphs.can_use_cuda_graph(draft) and padded in graphs.graph_map:
+        if graphs is not None and graphs.can_use_cuda_graph(draft) and (
+            (padded, draft.route_affinity) in graphs.graph_map
+        ):
             picked, d1 = graphs.replay(draft)
         else:
             with get_global_ctx().forward_batch(draft, kv_cache=self.kv, attn_backend=self.extend_backend, hide_target_state=True):

@@ -72,6 +72,9 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     top_k: int | None = None
     top_p: float | None = None
+    # Maya-style per-request route affinity; the server passes it raw, the engine snaps
+    # it onto the captured-graph ladder. >= 0, finite.
+    route_affinity: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
     n: int = 1
     stream: bool = False
     stream_options: StreamOptions | None = None
@@ -110,6 +113,9 @@ class CompletionRequest(BaseModel):
     temperature: float | None = None
     top_k: int | None = None
     top_p: float | None = None
+    # Maya-style per-request route affinity; the server passes it raw, the engine snaps
+    # it onto the captured-graph ladder. >= 0, finite.
+    route_affinity: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
     n: int = 1
     stream: bool = False
     stream_options: StreamOptions | None = None
