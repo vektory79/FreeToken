@@ -3,7 +3,7 @@ title: "Офлайн-кривая 'слоты -> покрытие': гейт д�
 date: 2026-11-15
 hardware: "офлайн, CPU-only (без запуска сервера и без GPU); якорь конфига - RTX 5090 32GB, GGUF GLM-5.3-Flash-UD-Q3_K_XL, moe-strategy hybrid, memory-ratio 0.81 / kv-reserve 800k fp8, tier 10/50"
 branch-commits: "vektory79"
-status: "OPEN (план, фазы не начаты)"
+status: "CLOSED 2026-11-15 - гейт NO-GO (VERDICT.md)"
 tags: [hybrid, expert-cache, slots, coverage, kv-streaming, offline, route-affinity]
 ---
 
@@ -88,11 +88,11 @@ memory-ratio и т.п.) без кернельной работы наугад, �
 
 ## Checklist
 
-- [ ] Ф0: аудит телеметрии - вердикт "трейс есть / нужна инструментировка"
-- [ ] Ф1: трейс собран; конфиг, длина окна и число шагов зафиксированы
-- [ ] Ф2: симулятор проходит валидацию при S0 (дельта <= 2 п.п.)
-- [ ] Ф3: таблица C(S) + cpu_gib_per_step(S) + вердикт по гейту
-- [ ] Зеркало артефактов в kb
+- [x] Ф0: аудит телеметрии - вердикт "нужна инструментировка" (PHASE0.md; FREETOKEN_DR_ROUTES в T1-драйвере)
+- [x] Ф1: трейс собран - trace5: 770 шагов x 42 слоя, greedy 768 c ignore_eos, S0=820, eager; конфиг и меты в arm_trace5.json
+- [x] Ф2: валидация при S0 PASS - дельта 0.13 п.п. (порог 2.0), максимум по слою 0.31 п.п.
+- [x] Ф3: таблица C(S) + cpu_gib_per_step(S) + вердикт NO-GO (+300 слотов = +3.85 п.п. < +5) - VERDICT.md
+- [x] Зеркало артефактов в kb (kb/harness/coverage-curve/, драйвер - kb/harness/decode-research/driver/)
 
 ## Примечание про route affinity
 
