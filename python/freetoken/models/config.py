@@ -303,6 +303,11 @@ class ModelConfig:
     moe_strategy: str = "fused"
     # where routed experts decode (gpu / cpu / hybrid); set by the engine from the flags, it gates which expert kernels can serve
     decode_target: str = "gpu"
+    # Maya-style route affinity (--route-affinity): the bonus resident experts get on the
+    # router's SELECTION score, shifting top-k toward experts already in the slot cache;
+    # the mix weights stay the unbiased scores of whoever got selected. 0.0 = off; set by
+    # the engine from the flag, effective only for sigmoid routers on offload/hybrid.
+    route_affinity: float = 0.0
     # The QuantConfig the engine builds from the checkpoint; layers ask it for their method.
     quant: Any | None = None
     # ----- optional, model-specific extensions (default keeps other models intact) -----

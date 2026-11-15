@@ -50,6 +50,7 @@ def _keep_top_groups(ranked, offs_n, N_GROUP: tl.constexpr, TOPK_GROUP: tl.const
 def _router_triton_kernel(
     scores_ptr,
     bias_ptr,
+    resident_ptr,
     out_weights_ptr,
     out_indices_ptr,
     num_token_non_padded_ptr,
@@ -67,6 +68,7 @@ def _router_triton_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     SIGMOID: tl.constexpr,
+    ROUTE_AFFINITY: tl.constexpr,
     N_GROUP: tl.constexpr,
     TOPK_GROUP: tl.constexpr,
     BLOCK_G: tl.constexpr,
@@ -96,6 +98,13 @@ def _router_triton_kernel(
         activated = tl.div_rn(1.0, 1.0 + libdevice.exp(-logits))
         bias = tl.load(bias_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
         ranked = tl.where(mask_n[None, :], activated + bias[None, :], -float("inf"))
+        if ROUTE_AFFINITY > 0:
+            # Maya-style route affinity: resident experts (of the previous decode
+            # step, via the offload cache's slot rows) get a bonus on the SELECTION
+            # score only; `activated` - and therefore the output weights - stay the
+            # unbiased probabilities of whoever got selected.
+            resident = tl.load(resident_ptr + offs_n, mask=mask_n, other=0).to(tl.float32)
+            ranked = ranked + ROUTE_AFFINITY * resident[None, :]
     else:
         ranked = tl.where(mask_n[None, :], logits, -float("inf"))
         row_max = tl.max(ranked, axis=1)[:, None]
@@ -158,6 +167,8 @@ def _launch_router(
     n_group: int,
     topk_group: int,
     num_token_non_padded: torch.Tensor | None,
+    resident: torch.Tensor | None = None,
+    affinity: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert gating_output.ndim == 2, "gating_output must be 2D"
     M, N = gating_output.shape
@@ -178,6 +189,8 @@ def _launch_router(
     _router_triton_kernel[(triton.cdiv(M, BLOCK_M),)](
         gating_output,
         bias,
+        # a valid pointer even when the affinity path is compiled out
+        resident if resident is not None else gating_output,
         weights,
         indices,
         num_token_non_padded,
@@ -195,6 +208,7 @@ def _launch_router(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         SIGMOID=bias is not None,
+        ROUTE_AFFINITY=affinity,
         N_GROUP=n_group,
         TOPK_GROUP=topk_group,
         BLOCK_G=triton.next_power_of_2(n_group),
@@ -228,16 +242,23 @@ def fused_topk_sigmoid(
     n_group: int = 1,
     topk_group: int = 1,
     num_token_non_padded: torch.Tensor | None = None,
+    resident: torch.Tensor | None = None,
+    affinity: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Sigmoid scores; ``scores + bias`` picks the top-k (within the ``topk_group`` best of ``n_group`` groups when ``n_group > 1``).
 
-    The weights are the unbiased scores, renormalized to sum to 1 when ``renormalize``, then times ``routed_scale``.
+    ``affinity`` > 0 adds that constant to the selection score of every expert flagged
+    in ``resident`` ([num_experts] int tensor, 1 = resident) - a Maya-style route
+    affinity: the SELECTION shifts toward already-resident experts, while the weights
+    stay the unbiased scores of whoever got selected. The weights are the unbiased
+    scores, renormalized to sum to 1 when ``renormalize``, then times ``routed_scale``.
     Ties keep the lowest expert id; rows at or past ``num_token_non_padded`` get expert id -1.
     """
     num_experts = gating_output.shape[1]
     assert bias.shape == (num_experts,) and bias.stride(0) == 1
     assert n_group == 1 or (num_experts % n_group == 0 and num_experts // n_group >= 2 and 1 <= topk_group <= n_group)
-    return _launch_router(gating_output, bias, topk, renormalize, float(routed_scale), n_group, topk_group, num_token_non_padded)
+    assert affinity <= 0 or (resident is not None and resident.shape == (num_experts,)), "route affinity needs a [num_experts] resident flag"
+    return _launch_router(gating_output, bias, topk, renormalize, float(routed_scale), n_group, topk_group, num_token_non_padded, resident, float(affinity))
 
 
 __all__ = ["fused_topk_sigmoid", "fused_topk_softmax"]

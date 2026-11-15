@@ -917,6 +917,18 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--route-affinity",
+        type=float,
+        default=ServerArgs.route_affinity,
+        help=(
+            "Maya-style route affinity: experts already resident in the MoE slot cache get "
+            "this bonus on the router's SELECTION score, so top-k shifts toward experts that "
+            "need no PCIe/CPU fetch; the mix weights stay the unbiased scores of whoever got "
+            "selected. Sigmoid routers on offload/hybrid only; 0.0 (default) = off."
+        ),
+    )
+
+    parser.add_argument(
         "--moe-cpu-layers",
         type=str,
         default=ServerArgs.moe_cpu_layers,

@@ -2429,6 +2429,12 @@ def _adjust_config(config: EngineConfig):
     if is_moe:
         object.__setattr__(model_config, "moe_strategy", config.moe_strategy)
         object.__setattr__(model_config, "decode_target", _decode_target(config))
+        object.__setattr__(model_config, "route_affinity", config.route_affinity)
+        if config.route_affinity:
+            logger.info_rank0(
+                f"route affinity {config.route_affinity}: resident experts get the bonus on the "
+                "MoE router's selection score; mix weights stay unbiased"
+            )
 
     # Must stay LAST: page_size is only final here (_adjust_dsv4_config sets P=128, the
     # TRTLLM block sets 64). Also covers the programmatic LLM(...) path that bypasses parse_args.
@@ -2468,4 +2474,6 @@ def _adjust_config(config: EngineConfig):
     ]
     if is_moe:
         resolved.insert(0, f"moe_strategy={config.moe_strategy!r}")
+        if config.route_affinity:
+            resolved.append(f"route_affinity={config.route_affinity!r}")
     logger.info_rank0(f"Resolved config: {', '.join(resolved)}")

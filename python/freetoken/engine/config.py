@@ -63,6 +63,10 @@ class EngineConfig:
     # no-op unless moe_cache_size > 2 * num_experts.
     moe_prefill_hit_d2d: bool = False
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
+    # Maya-style route affinity (--route-affinity): bonus for experts resident in the MoE
+    # slot cache on the router's SELECTION score (mix weights stay unbiased). 0.0 = off;
+    # effective only for sigmoid routers on the offload/hybrid backends.
+    route_affinity: float = 0.0
     # CPU decode expert threads (--moe-strategy cpu/hybrid, or offload with
     # --moe-cpu-layers): 0 = auto (one per physical core, pinned). One executor
     # pool serves every expert format, so the budget is global, not per partition.
@@ -142,6 +146,8 @@ class EngineConfig:
             raise ValueError(f"moe_locked_fetch {self.moe_locked_fetch} rounds to 0 in Q16; pass 0 to keep locked layers CPU-only")
         if self.moe_locked_max_fetch < 1:
             raise ValueError(f"moe_locked_max_fetch must be at least 1, got {self.moe_locked_max_fetch}")
+        if self.route_affinity < 0:
+            raise ValueError(f"route_affinity must be >= 0, got {self.route_affinity}")
         if self.moe_backend is None:
             return
         if self.moe_strategy != "auto":

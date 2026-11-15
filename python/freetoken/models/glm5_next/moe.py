@@ -34,6 +34,9 @@ class Glm5NextSparseBlock(BaseOP):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_group = config.n_group
         self.topk_group = config.topk_group
+        # Selection-only resident-expert bonus (--route-affinity): shifts the top-k toward
+        # experts already in the slot cache; the mix weights stay unbiased (see moe_router.py).
+        self.route_affinity = config.route_affinity
 
         self.gate = LinearReplicated(config.hidden_size, config.num_experts, has_bias=False)
         self.e_score_correction_bias = torch.empty(config.num_experts, dtype=torch.float32)
@@ -58,6 +61,11 @@ class Glm5NextSparseBlock(BaseOP):
 
     def _route(self, hidden_states: torch.Tensor) -> TopK:
         logits = torch.mm(hidden_states, self.gate.weight.t(), out_dtype=torch.float32)
+        resident = None
+        if self.route_affinity > 0:
+            offload = getattr(self.experts, "offload_cache", None)
+            if offload is not None:
+                resident = (offload.slot_for_id[self.experts.layer_id] >= 0).to(torch.int32)
         return fused_topk_sigmoid(
             logits,
             self.e_score_correction_bias,
@@ -66,6 +74,8 @@ class Glm5NextSparseBlock(BaseOP):
             routed_scale=self.routed_scaling_factor,
             n_group=self.n_group,
             topk_group=self.topk_group,
+            resident=resident,
+            affinity=self.route_affinity,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
