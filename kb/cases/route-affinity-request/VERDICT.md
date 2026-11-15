@@ -2,8 +2,8 @@
 title: "Вердикт кейса route affinity на запрос: Ф0 готова, Ф1 PASS (per-request работает на bs=1), цена лестницы при bs=[1] ~10 MiB и ~0 с"
 date: 2026-11-16
 hardware: "RTX 5090 32GB; GGUF GLM-5.3-Flash-UD-Q3_K_XL (FTW-vision-new), moe-strategy hybrid, прод-графы, memory-ratio 0.81 / kv-reserve 800k fp8, tier 10/50, chunk 4095"
-branch-commits: "vektory79; Ф0 (реализация + CPU-тесты) в рабочем дереве НЕ коммичена - ждёт явной команды владельца"
-status: "PHASES DONE - Ф0/Ф1/Ф2 выполнены; вердикт Ф1 PASS, Ф2: лестница почти бесплатна при bs=[1]; дефолт широкой лестницы и коммиты - решение владельца"
+branch-commits: "vektory79: db8dffb (feat per-request route affinity), 12eb11d (kb verdict), e4c859b (kb index done), 8805b41 (memory sync) - не запушено"
+status: "PHASES DONE - Ф0/Ф1/Ф2 выполнены, вердикт Ф1/Ф2 PASS (Ф2: лестница почти бесплатна при bs=[1]); дефолт широкой лестницы - решение владельца; коммиты созданы, не запушены"
 tags: [route-affinity, per-request, cuda-graphs, ladder, decode, hybrid, verdict]
 ---
 
@@ -11,7 +11,7 @@ tags: [route-affinity, per-request, cuda-graphs, ladder, decode, hybrid, verdict
 
 ## Ф0: статус реализации
 
-Полная цепочка реализована в рабочем дереве (не коммичена), точки по файлам:
+Полная цепочка реализована и закоммичена в vektory79 (db8dffb, не запушено), точки по файлам:
 
 - CLI (`server/args.py`): флаг `--route-affinity-ladder` (comma-separated
   float); на буте лестница = дедуп `лестница + {server_default}`, значения >= 0.
