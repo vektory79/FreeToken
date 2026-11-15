@@ -2,8 +2,8 @@
 name: "ft-l2-hole-reuse-nogo"
 description: "L2 hole reuse NO-GO hit 0.067 (afa5efd); P13/compact bugfixes; prod crc forensics + restamp hardening cb55c02"
 type: project
-lastUpdated: 2026-11-14T16:30
-lastRecall: 2026-11-14T22:29
+lastUpdated: 2026-11-14T23:51
+lastRecall: 2026-11-14T23:29
 ---
 
 # L2 exact-fit hole reuse (session tier) - EXECUTED, HW verdict NO-GO (hit 0.067), committed as-is
@@ -40,3 +40,9 @@ lastRecall: 2026-11-14T22:29
 
 ## Closed follow-ups
 - kb stale links: 7 fixed, committed 86fa3bb (two were format-illustration placeholders -> de-linked; five were wrong ../ depth -> ../../../). Full-kb walk 0 broken, table_lint OK.
+
+## W4 metric split (2026-11-14 evening, commit 3adae44)
+- User questioned `holes=0.0MiB` and `reuse=0/N/0.0MiB` on the prod log - both were misleading as coded: (1) rendered `holes=` was max(0, _dead_bytes - _dead_record_bytes), a boot-seeded unaccounted-blob gauge, NOT the _holes pool (runtime births invisible); (2) miss bumped on EVERY reserve pop failure with no pool-state condition (structurally 1:1 with demote), conflating "no holes exist" with "no exact fit". Correction to earlier belief: hybrid victim's PRIVATE span (tail pages+snaps+pad) fully dies on discard -> holes likely WERE born per discard; the ancestor's shared page span never becomes a hole.
+- Fix (3adae44, SHIP review): miss counts only pool-non-empty reserves (size mismatch or tomb-guard skip of an available same-size hole); empty pool -> new holes_absent; stats tokens: `absent=N`, `holes_live=<count>/<MiB>` (render-time from _holes under _account_lock), `holes=` renamed `unaccounted=` (formula unchanged); reuse= shape unchanged. hit rate now = used/(used+miss) over pool-non-empty reserves.
+- Harness follow-through: arm_l2_hole_reuse.sh / arm_l2_hole_reuse_fu.sh regexes re-pointed (holes_live + unaccounted with old-token fallback); eof ledger identity = l2 + unacc + dead.
+- Ops note: the user's running server emits PRE-W4 tokens until restart; after restart expect absent=/holes_live=/unaccounted= in the fragment. Gate 559/1.

@@ -3,7 +3,7 @@ name: "hybrid-moe-pair-split-mechanics"
 description: "Hybrid MoE split per (layer,expert) pair via -1 marker not per layer; LRU pool ~3 steps; CPU GEMV reads RAM weights"
 type: project
 lastUpdated: 2026-10-11T18:56
-lastRecall: 2026-10-23T23:12
+lastRecall: 2026-11-15T00:08
 ---
 
 # Hybrid MoE: сплит CPU/GPU по парам (слой,эксперт), не по слоям (код-верификация 2026-10-10)

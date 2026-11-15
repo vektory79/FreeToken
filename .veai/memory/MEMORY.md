@@ -104,5 +104,6 @@
 - [ft-merge-round8-pending-handoff](ft-merge-round8-pending-handoff-afc936cd3734.md) — Merge round 8 fe975da CLOSED + followups to e9bc7a0: CPU 1653, boot-smoke 22.97 tok/s, GPU 954/4 baseline
 - [gguf-hybrid-reacceptance-final](gguf-hybrid-reacceptance-final-749f32036b6f.md) — GGUF glm5next hybrid re-acceptance: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; historical since round-5 f0eed55
 - [ft-merge-round9-closed](ft-merge-round9-closed-e7c3b6c4701b.md) — Round 9 merge b79457e CLOSED: boot-smoke PASS attempt 1 (READY 229s), GPU 969 passed/4 baseline; STOP GATE closed
-- [ft-l2-hole-reuse-nogo](ft-l2-hole-reuse-nogo-fdbbef4576e1.md) — L2 hole reuse NO-GO hit 0.067 (afa5efd); P13/compact bugfixes; prod crc forensics + restamp hardening cb55c02
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-196b3cb5ae6b.md) — GGUF serving skill ledger: TRAPS T01-T105 committed 997849a; run-garbage rule committed; sec.11 self-update protocol
+- [ft-l2-hole-reuse-nogo](ft-l2-hole-reuse-nogo-a324cd7e8134.md) — L2 hole reuse NO-GO hit 0.067 (afa5efd); P13/compact bugfixes; prod crc forensics + restamp hardening cb55c02
+- [ft-strata-maya-study](ft-strata-maya-study-d64f2f2cd845.md) — Strata/Maya study: KV-streaming for GLM not in Maya; route affinity +22-25% @ KL 0.2; gate plan offline-coverage-curve
