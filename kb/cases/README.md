@@ -265,6 +265,14 @@ Specification / Acceptance / Checklist.
   (baseline с 09-12), module-skip test_gguf_expert_banks, 33 CPU-skip
   nvfp4_w4a4. Вход: [TASK.md](round6-deferred-ports/TASK.md).
   Статус: ОТКРЫТА 2026-10-25 - фазы не начаты.
+- [offline-coverage-curve/](offline-coverage-curve/) — план-пакет 2026-11-15:
+  офлайн кривая "число VRAM-слотов -> покрытие горячего окна" из трейса
+  маршрутизации, CPU-only без запуска сервера; гейт для ёмкостных рычагов
+  (KV-стриминг в RAM по образцу Strata --kv-resident и т.п.) до любой
+  кернельной работы. Фон -
+  [../topics/strata-maya-inference-study.md](../topics/strata-maya-inference-study.md).
+  Вход: [TASK.md](offline-coverage-curve/TASK.md).
+  Статус: OPEN (план, фазы не начаты).
 
 ## Навигация
 

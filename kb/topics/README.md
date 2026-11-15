@@ -31,6 +31,7 @@
 | [ftw-legacy-fold-zero-scratch.md](ftw-legacy-fold-zero-scratch.md) | Почему легаси FTW-носитель ловил пик 198 GiB (fold double-buffer против read-пула) и как zero-scratch affine remap (f12e554) опустил пик до пола рецепта 142.5 GiB; фьюз по сумме группы процессов |
 | [gguf-vram-headroom-post-round5.md](gguf-vram-headroom-post-round5.md) | Почему рецепт сентября (0.82/400k/8191) перестал держать пик VRAM после re-platform раунда 5; новые внеплановые потребители; матрица 0.80-0.82 x чанк, лестница глубины, семантика L2-капа session tier |
 | [gguf-serving-perf-matrix.md](gguf-serving-perf-matrix.md) | Сводная матрица производительности текущего стека: префилл/декод/VRAM по memory-ratio x чанк (5 конфигов), лестницы глубины до 378k, slot-floor границы, рецепты выбора конфига |
+| [strata-maya-inference-study.md](strata-maya-inference-study.md) | Что общего у FreeToken с движками Strata/Project Maya (пять совпадающих механизмов); живые кандидаты - KV-стриминг в RAM ради слоёв экспертов и route affinity (+22-25% за KL 0.20 в Maya); что не переносить (MTP, KV-quant, микрофьюжны) |
 
 Правила статей: YAML-шапка (title/date/hardware/branch-commits/status/tags),
 <=~250 строк, все перекрёстные ссылки — markdown-ссылки на существующие

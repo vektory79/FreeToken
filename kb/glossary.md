@@ -132,6 +132,10 @@
 - **radix cache** — префиксный radix-кэш повторного использования KV;
   баги трекинга длины при chunked prefill — чейны fix-1/fix-3 —
   [TASK.md](cases/fix1-radix-track-seqlen/TASK.md).
+- **route affinity** — бонус в скор выбора маршрутизатора экспертам, уже
+  резидентным в VRAM (вес эксперта остаётся его вероятностью, меняется сам
+  выбор top-8); меняет ответы; измерено в Maya: 0.2 = +22-25% декода за
+  KL 0.20 — [strata-maya-inference-study.md](topics/strata-maya-inference-study.md).
 - **RestoreTicket** — асинхронный тикет предвыборки сегмента из стора; cap
   _MAX_RESTORE_TICKETS=2, 0 отключает механизм —
   [session-cache-tiering.md](topics/session-cache-tiering.md).
