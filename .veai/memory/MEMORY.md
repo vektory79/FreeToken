@@ -110,4 +110,4 @@
 - [ft-strata-maya-study](ft-strata-maya-study-158a10b86a22.md) — Strata/Maya: KV-streaming NO-GO here (curve ceiling 82%); route affinity +16.9% @ 0.05 measured; MTP/KV-quant closed
 - [niah-probe-design](niah-probe-design-e8ce6e309e75.md) — NIAH probe recipe GLM GGUF: own-line needle, 160-token budget, 5.53 ch/tok depth calibration, deepest-first radix reuse
 - [chat-text-capture-gotchas](chat-text-capture-gotchas-78d4e661216b.md) — ft serve chat harness: stream text needs delta.reasoning_content; multiturn needs history; budget >=160
-- [ft-route-affinity-ab](ft-route-affinity-ab-61fc5571974d.md) — Route affinity: gate GO-CLI (0.3 +112%) AND CLI flag --route-affinity landed (default 0.0, env removed); uncommitted
+- [ft-route-affinity-ab](ft-route-affinity-ab-083b9488ebb7.md) — Route affinity: per-request variant B Ф0-Ф2 done, VERDICT written; uncommitted, commits await owner
