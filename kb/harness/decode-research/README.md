@@ -65,14 +65,25 @@ env-крючки:
   (по умолчанию 150..160);
 - FREETOKEN_DR_PROF=1 - открыть окно torch.profiler (kineto). ВНИМАНИЕ: на этой
   машине kineto нативно убивает планировщик; по умолчанию режим events-only
-  (CUDA-event спэны шагов без профайлера).
+  (CUDA-event спэны шагов без профайлера);
+- FREETOKEN_DR_ROUTES=1 - трассировка маршрутов: каждый eager-вызов
+  _decode_routed пишет (layer_id, topk_ids) в device-буфер ДО перезаписи id
+  слотами; периодический дамп routes_<tag>.json (каждые 2688 вызовов, закрытие
+  окна, exit) с метой кеша (pool_sizes, pool_of_layer, slot_bytes по слоям,
+  фракции fetch, locked/unpinned) и n_replay_steps (0 = boot был eager).
+  Только для eager (--cuda-graph-max-bs 0): под CUDA-графом host-код слоя
+  на шаг не выполняется.
 
 Выход в outdir: stats_<tag>.json пишется ВСЕГДА (aggregate + per_layer + routing
-по партициям + step_spans_ms); trace_<tag>.json - только с FREETOKEN_DR_PROF=1.
-Маркеры в логе serve: "driver armed" (x4 процесса), "events-only window OPEN" /
-"trace window OPEN", "window CLOSED", "DUMPED stats". Броня: тело каждого хука
-обёрнуто в try/except - баг драйвера деградирует в no-op и никогда не валит
-движок.
+по партициям + step_spans_ms); в режиме routes stats_<tag>.json периодически
+переписывается (телеметрия кумулятивна до последнего дампа, финальный файл -
+полный прогон); trace_<tag>.json - только с FREETOKEN_DR_PROF=1.
+Маркеры в логе serve: "driver armed" (x4 процесса), "routes buffer armed",
+"events-only window OPEN" / "trace window OPEN", "window CLOSED",
+"DUMPED stats", "DUMPED routes", "driver INERT: ..." (импорт-ошибка брони -
+драйвер не вооружился, boot потрачен зря).
+Броня: тело каждого хука обёрнуто в try/except - баг драйвера деградирует
+в no-op и никогда не валит движок.
 
 Готчи драйвера:
 
@@ -83,4 +94,8 @@ env-крючки:
 - гистограмма маршрутизации честна только в eager (--cuda-graph-max-bs 0):
   host-scatter не переигрывается под CUDA-графами;
 - mean(step_spans_ms) против wall ms/step = разделение шага на
-  GPU-stream-занятую и host/idle части без kineto.
+  GPU-stream-занятую и host/idle части без kineto;
+- engine держит кеш в единственном числе (moe_offload_cache), множественный
+  список живёт на GraphRunner - чтение кешей только через fallback
+  moe_offload_caches -> moe_offload_cache (как cache_status._moe_offload_caches);
+  до фикса 2026-11-15 caches в stats_<tag>.json всегда был пустым списком.
