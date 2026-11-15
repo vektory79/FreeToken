@@ -1,9 +1,9 @@
 ---
 name: "ft-spec-decode-glm53-case"
-description: "Spec-decode GLM-5.3-Flash case CLOSED NO-GO: W0 R4 3.76, W0.5 cW 0.50, W1 ngram acceptance=0 (stage0 method flaw)"
+description: "Spec-decode GLM-5.3-Flash NO-GO: W0 verify cost, W0.5 cW 0.50, W1 acceptance=0, stage0 flaw, scaffold uncommitted"
 type: project
-lastUpdated: 2026-10-17T12:00
-lastRecall: 2026-10-30T18:49
+lastUpdated: 2026-11-15T15:10
+lastRecall: 2026-11-15T15:07
 ---
 
 # Спек-декод GLM-5.3-Flash: кейс ЗАКРЫТ NO-GO окончательно (W0+W0.5+W1, 2026-10-10)
@@ -42,18 +42,28 @@ experts-объект) - возможный отдельный follow-up.
 4. Структурно: verify M>=4 на 64k в 32 GiB нереализуем - целевой профиль 64k+
    недоступен глубокому draft.
 
-## Stage 0 + W1-narrow (урок метода)
+## Stage 0 + W1-narrow (урок метода; детали волны поглощены сюда из ft-w1narrow-ngram-wave)
 Офлайн n-gram симуляция по filler-потоку дала p(K=1) 0.91-0.95, A_2 2.73-2.89
 (лучший N=2) и оправдала W1-narrow - но W1 A/B на живом декоде дал acceptance = 0
-(ноль verify-шагов в ON-руках, k1/k2 в шуме пары +-1.7%) -> NO-GO, кейс закрыт
-окончательно. Stage-0 мерил самопересечение потока filler, а не согласие модели
-с n-грамм-таблицей: живой greedy-декод не воспроизводит шаблон. Урок: перед
-drafting-инфраструктурой мерить model-vs-table agreement на живом декоде;
-высокий radix-reuse ПРЕФИКСА не предсказывает повторяемость ВЫВОДА.
-Каркас (n-gram drafter + verify + GDN-откат через LinearStatePool.copy_from,
-флаги --spec-* default OFF) собран и бутится на GLM-5.3-Flash, но НЕ закоммичен
-(14 файлов ~625+ строк; commit default-OFF или откат - решение пользователя).
-Детали волны: ft-w1narrow-ngram-wave.
+-> NO-GO, кейс закрыт окончательно. Stage-0 мерил самопересечение потока filler (93%),
+а не согласие модели с n-грамм-таблицей: живой greedy-декод не воспроизводит шаблон
+(биграммы вне таблицы). Урок: перед drafting-инфраструктурой мерить model-vs-table
+agreement на живом декоде; высокий radix-reuse ПРЕФИКСА не предсказывает повторяемость
+ВЫВОДА.
+- W1 A/B числа (парное окно: 64k fill radix-reuse, temp 0, 768 tok, hybrid якорь):
+  off2 18.409 tok/s, k1 18.379 (-0.16%), k2 18.712 (+1.65%) - шум пары +-1.7%;
+  0 verify-шагов в ON-руках -> ON==OFF по построению. Без регрессии (overhead ниже шума).
+- Каркас (n-gram drafter + verify + GDN-откат через LinearStatePool.copy_from, метрики,
+  флаги --spec-* default OFF) отревьюен (2 MAJOR fixed: кормление драфтера на plain
+  decode; non-hybrid reject счётчики) и бутится на GLM-5.3-Flash (снят третий молчаливый
+  гейт _maybe_spec_verify_batch при page_size!=1; латентный KV пиннит 64 - leak-until-
+  finish на reject, wholesale free на finish). НЕ закоммичен (14 файлов ~625+ строк;
+  commit default-OFF или откат - решение пользователя). Окупится только на повторяемом
+  ВЫВОДЕ; для temp 1.0 нужен W3. Кавэт: kpool-ring персистентная деградация selection
+  невалидирована (reject'ов не было).
+- Артефакты: .tasks/glm53-spec-decode-w1/ (DESIGN.md, ab_harness.md, AB_RESULTS.md,
+  W1NARROW_KB_ADDENDUM.md, run_ab.py, логи). Полный набор падений pytest идентичен
+  до/после волны.
 
 ## Артефакты и статус
 kb/cases/glm53flash-spec-decode/RESULTS.md (+ шапка TASK.md, строка в

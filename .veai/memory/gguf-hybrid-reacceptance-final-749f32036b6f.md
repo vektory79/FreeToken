@@ -3,7 +3,7 @@ name: "gguf-hybrid-reacceptance-final"
 description: "GGUF glm5next hybrid re-acceptance: 3 gates PASS, 16.67 vs 12.97 tok/s @63b9bff; historical since round-5 f0eed55"
 type: project
 lastUpdated: 2026-11-09T18:47
-lastRecall: 2026-11-09T18:41
+lastRecall: 2026-11-15T15:08
 ---
 
 # GGUF glm5next hybrid: FINAL re-acceptance - hybrid RECOMMENDED

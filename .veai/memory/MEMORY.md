@@ -41,8 +41,6 @@
 - [ft-gguf-prefill-mmq-roofline](ft-gguf-prefill-mmq-roofline-7ef390fc96b0.md) — GGUF prefill MMQ roofline analysis: step-0 nsys split, v0 no-op, v2 grouped +16.4%, ~758 ceiling unreachable (ALU-bound)
 - [gguf-hybrid-decode-handshake-floor](gguf-hybrid-decode-handshake-floor-5405b1861a61.md) — Hybrid decode per-layer cost model: no fixed handshake floor; CPU-leg x fetch-volume coupling; 26.9 GB/s idle-inflated
 - [kb-first-research-workflow](kb-first-research-workflow-69ea95d4e31a.md) — Research workflow: kb/ first, questions one-by-one; research+instrumentation in-session; only optimizations split out
-- [ft-decode-stats-instruments-unwired](ft-decode-stats-instruments-unwired-e3ffca136987.md) — Decode T1 driver v3: hook GraphRunner.replay (replay bypasses layer host code); kineto aborts scheduler; events-only
-- [kb-read-file-virtual-fs-block](kb-read-file-virtual-fs-block-18ef02cfb524.md) — read_file blocked on kb/ (empty content or virtual-FS warning); write/edit work; read via shell or call_code_agent
 - [orchestrator-emission-loop](orchestrator-emission-loop-cadbb56c54cb.md) — Emission loop: agent repeats read_* instead of planned run_command; stop, text-only turn or delegate to call_code_agent
 - [ft-offload-decode-gather-gap](ft-offload-decode-gather-gap-e98b42be1439.md) — Offload gather-gap lever REFUTED by T1: prod 33.5-36 GB/s vs 43.6 bench; closing only ties hybrid; offload deprioritized
 - [plain-language-final-reports](plain-language-final-reports-5688565515c6.md) — Final chat reports must be plain-language step-by-step; dense jargon stays in kb/memory, not user summaries
@@ -79,9 +77,7 @@
 - [hybrid-moe-pair-split-mechanics](hybrid-moe-pair-split-mechanics-82a7ba957be8.md) — Hybrid MoE split per (layer,expert) pair via -1 marker not per layer; LRU pool ~3 steps; CPU GEMV reads RAM weights
 - [ft-l2-extent-dedup](ft-l2-extent-dedup-7f8282705f11.md) — L2 extent dedup for session tier: 23.81->8.17 GiB HW, commits 26e98c2..d3623ee, pin-census lessons T79
 - [ft-gguf-mmproj-vision-brief](ft-gguf-mmproj-vision-brief-75d61a728aa1.md) — mmproj GGUF vision case CLOSED phases 1-5 (e35577d..f67449b), 347/347 tensors exact, HW PASS, TRAPS T68-T75
-- [ft-w1narrow-ngram-wave](ft-w1narrow-ngram-wave-60722281b1c8.md) — W1-narrow CLOSED: A/B NO-GO on target profile (ngram acceptance 0); stage0 method flaw; scaffold uncommitted
 - [ft-merge-round5-deferred-ports](ft-merge-round5-deferred-ports-94670d11c055.md) — Merge round5 f0eed55: D1-D5 DONE; residuals fixed; kb links repaired (8bba8e5); only fa/fi/trtllm open
-- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-e8f30d956dd0.md) — Spec-decode GLM-5.3-Flash case CLOSED NO-GO: W0 R4 3.76, W0.5 cW 0.50, W1 ngram acceptance=0 (stage0 method flaw)
 - [ftw-legacy-fold-ram-peak](ftw-legacy-fold-ram-peak-88e4077322c2.md) — FTW legacy fold 198 GiB OOM fixed: zero-scratch VERIFIED f12e554 (~143 GiB); old carrier delete + push = user decisions
 - [ftw-new-carrier-slowload](ftw-new-carrier-slowload-7f3dce4f4d49.md) — FTW new carrier 148s boot: NOT banks (25s, faster); tier compact on idle loop + bimodal warmup; fix = background compact
 - [ft-gguf-serving-vram-headroom](ft-gguf-serving-vram-headroom-fd804af7adee.md) — GGUF glm5next VRAM: post-round5 matrix in USED MiB (5 configs + ladders), 0.80 floor, kb report used-based
@@ -106,4 +102,12 @@
 - [ft-merge-round9-closed](ft-merge-round9-closed-e7c3b6c4701b.md) — Round 9 merge b79457e CLOSED: boot-smoke PASS attempt 1 (READY 229s), GPU 969 passed/4 baseline; STOP GATE closed
 - [ft-gguf-native-serving-skill](ft-gguf-native-serving-skill-196b3cb5ae6b.md) — GGUF serving skill ledger: TRAPS T01-T105 committed 997849a; run-garbage rule committed; sec.11 self-update protocol
 - [ft-l2-hole-reuse-nogo](ft-l2-hole-reuse-nogo-a324cd7e8134.md) — L2 hole reuse NO-GO hit 0.067 (afa5efd); P13/compact bugfixes; prod crc forensics + restamp hardening cb55c02
-- [ft-strata-maya-study](ft-strata-maya-study-d64f2f2cd845.md) — Strata/Maya study: KV-streaming for GLM not in Maya; route affinity +22-25% @ KL 0.2; gate plan offline-coverage-curve
+- [ft-decode-stats-instruments-unwired](ft-decode-stats-instruments-unwired-be22ed51e399.md) — T1 decode driver traps: replay bypasses host code, kineto aborts, Engine singular moe_offload_cache, FREETOKEN_DR_ROUTES
+- [ft-serve-decode-length-and-readiness](ft-serve-decode-length-and-readiness-76b2637177f8.md) — ft serve: ignore_eos pins greedy decode length; session-tier replay blocks real readiness for minutes
+- [kb-read-file-virtual-fs-block](kb-read-file-virtual-fs-block-52f8c90ddcca.md) — read_file on kb/ works again (2026-11-15, 4 files verified); 2026-09-26 virtual-FS block historical; fallback cat
+- [ft-offline-coverage-curve-campaign](ft-offline-coverage-curve-campaign-a8a3c806db0f.md) — offline-coverage-curve CLOSED NO-GO: S0=820, validation 0.13pp, +300 slots=+3.85pp; ceiling 82%; route affinity next
+- [ft-spec-decode-glm53-case](ft-spec-decode-glm53-case-06ba2d1ecb9c.md) — Spec-decode GLM-5.3-Flash NO-GO: W0 verify cost, W0.5 cW 0.50, W1 acceptance=0, stage0 flaw, scaffold uncommitted
+- [ft-strata-maya-study](ft-strata-maya-study-158a10b86a22.md) — Strata/Maya: KV-streaming NO-GO here (curve ceiling 82%); route affinity +16.9% @ 0.05 measured; MTP/KV-quant closed
+- [niah-probe-design](niah-probe-design-e8ce6e309e75.md) — NIAH probe recipe GLM GGUF: own-line needle, 160-token budget, 5.53 ch/tok depth calibration, deepest-first radix reuse
+- [chat-text-capture-gotchas](chat-text-capture-gotchas-78d4e661216b.md) — ft serve chat harness: stream text needs delta.reasoning_content; multiturn needs history; budget >=160
+- [ft-route-affinity-ab](ft-route-affinity-ab-61fc5571974d.md) — Route affinity: gate GO-CLI (0.3 +112%) AND CLI flag --route-affinity landed (default 0.0, env removed); uncommitted
