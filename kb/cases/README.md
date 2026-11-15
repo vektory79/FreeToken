@@ -274,6 +274,20 @@ Specification / Acceptance / Checklist.
   Вход: [TASK.md](offline-coverage-curve/TASK.md).
   Статус: OPEN (план, фазы не начаты).
 
+- [route-affinity/](route-affinity/) - кампания Maya-рычага route affinity:
+  первый одно-проходный замер (0.05 -> +16.9%, 0.2 -> +71.0%, hit 73.6% -
+  до потолка слот-кривой 82%), полный гейт качества с слепым парным судом
+  и вердикт GO-CLI (победитель 0.3); CLI-флаг --route-affinity закоммичен,
+  дефолт 0.0. Входы: [TASK.md](route-affinity/TASK.md),
+  [RESULT.md](route-affinity/RESULT.md), [VERDICT.md](route-affinity/VERDICT.md).
+  Статус: CLOSED (GO-CLI, 2026-11-15).
+- [route-affinity-request/](route-affinity-request/) - бриф per-request
+  route affinity (вариант B): поле route_affinity в запросе снапится к
+  лестнице заранее захваченных CUDA-графов (bs, affinity), fallback 0.0
+  при разнобое батча; полная спека правок по файлам, цена лестницы
+  замеряется Ф2. Вход: [TASK.md](route-affinity-request/TASK.md).
+  Статус: OPEN (бриф утверждён владельцем 2026-11-15, кода не писано).
+
 ## Навигация
 
 - Планируете новую кампанию — берите шапку статуса, Goal/Scope/Acceptance из
