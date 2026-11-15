@@ -1,0 +1,146 @@
+[
+ {
+  "name": "b00_en",
+  "kind": "en",
+  "prompt": "Write a short essay on why public libraries still matter in the internet age.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b01_en",
+  "kind": "en",
+  "prompt": "Explain how a bicycle stays upright to a curious ten-year-old.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b02_en",
+  "kind": "en",
+  "prompt": "Describe a rainy evening in a small coastal town using vivid sensory detail.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b03_en",
+  "kind": "en",
+  "prompt": "What are the trade-offs between remote and office work? Give a balanced view.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b04_en",
+  "kind": "en",
+  "prompt": "Write a paragraph about the history of the printing press and its impact.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b05_en",
+  "kind": "en",
+  "prompt": "Explain why the sky is blue, and then why sunsets are red.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b06_en",
+  "kind": "en",
+  "prompt": "Write a short story opening about a lighthouse keeper who finds a message in a bottle.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b07_en",
+  "kind": "en",
+  "prompt": "Summarize how vaccines train the immune system, for a general reader.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b08_ru",
+  "kind": "ru",
+  "prompt": "Напиши короткое эссе о том, почему важно читать бумажные книги в цифровую эпоху.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b09_ru",
+  "kind": "ru",
+  "prompt": "Объясни ребёнку десяти лет, почему идёт дождь.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b10_ru",
+  "kind": "ru",
+  "prompt": "Опиши зимнее утро в деревне с помощью ярких сенсорных деталей.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b11_ru",
+  "kind": "ru",
+  "prompt": "Расскажи, как устроен компас, и почему стрелка показывает на север.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b12_ru",
+  "kind": "ru",
+  "prompt": "Напиши небольшой рассказ о том, как кот впервые увидел снег.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b13_ru",
+  "kind": "ru",
+  "prompt": "Объясни, зачем в языке нужны падежи, простыми словами.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b14_ru",
+  "kind": "ru",
+  "prompt": "Опиши, как готовят борщ, по шагам, но художественно.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b15_ru",
+  "kind": "ru",
+  "prompt": "Напиши абзац о значении Пушкина для русской литературы.",
+  "max_tokens": 160
+ },
+ {
+  "name": "b16_code",
+  "kind": "code",
+  "prompt": "Write a Python function that returns the first n Fibonacci numbers using iteration, with a docstring.",
+  "max_tokens": 192
+ },
+ {
+  "name": "b17_code",
+  "kind": "code",
+  "prompt": "Write a Python function is_palindrome(s) that ignores case and non-alphanumeric characters, with a docstring.",
+  "max_tokens": 192
+ },
+ {
+  "name": "b18_code",
+  "kind": "code",
+  "prompt": "Write a bash one-liner that prints the ten most frequent words in a text file, then explain it.",
+  "max_tokens": 192
+ },
+ {
+  "name": "b19_code",
+  "kind": "code",
+  "prompt": "Write a Python class Stack with push, pop and peek, with type hints and a short docstring.",
+  "max_tokens": 192
+ },
+ {
+  "name": "b20_reason",
+  "kind": "reason",
+  "prompt": "A train travels 60 km in 45 minutes. What is its average speed in km/h? Show the reasoning briefly.",
+  "max_tokens": 128
+ },
+ {
+  "name": "b21_reason",
+  "kind": "reason",
+  "prompt": "If today is Wednesday, what day of the week will it be in 100 days? Explain briefly.",
+  "max_tokens": 128
+ },
+ {
+  "name": "b22_reason",
+  "kind": "reason",
+  "prompt": "I have 3 apples and buy 2 bags with 4 apples each, then give away 5. How many are left? Explain briefly.",
+  "max_tokens": 128
+ },
+ {
+  "name": "b23_reason",
+  "kind": "reason",
+  "prompt": "Which is larger: 2^10 or 10^3? Show a short justification.",
+  "max_tokens": 128
+ }
+]
