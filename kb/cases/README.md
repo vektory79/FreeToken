@@ -285,8 +285,8 @@ Specification / Acceptance / Checklist.
   route affinity (вариант B): поле route_affinity в запросе снапится к
   лестнице заранее захваченных CUDA-графов (bs, affinity), fallback 0.0
   при разнобое батча; полная спека правок по файлам, цена лестницы
-  замеряется Ф2. Вход: [TASK.md](route-affinity-request/TASK.md).
-  Статус: OPEN (бриф утверждён владельцем 2026-11-15, кода не писано).
+  замерена в Ф2. Вход: [TASK.md](route-affinity-request/TASK.md).
+  Статус: DONE (Ф0-Ф2, вердикт PASS, 2026-11-16, db8dffb/12eb11d).
 
 ## Навигация
 
